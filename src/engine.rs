@@ -234,10 +234,10 @@ mod tests {
 
     #[tokio::test]
     async fn linear_edge_drives_downstream_node() {
-        // trigger -> transform: the transform executor is a stage-A2 stub, so the
+        // trigger -> switch: the switch executor is a stage-A2 stub, so the
         // run reaches it and surfaces its error — proving edge lowering + dispatch.
         let graph = WorkflowGraph {
-            nodes: vec![node("t", NodeKind::Trigger), node("x", NodeKind::Transform)],
+            nodes: vec![node("t", NodeKind::Trigger), node("x", NodeKind::Switch)],
             edges: vec![Edge {
                 from_node: "t".to_string(),
                 from_port: "main".to_string(),
@@ -251,9 +251,9 @@ mod tests {
 
         let error = run(&compiled, Value::Null, &caps)
             .await
-            .expect_err("transform stub should surface");
+            .expect_err("switch stub should surface");
         assert!(
-            error.to_string().contains("transform"),
+            error.to_string().contains("switch"),
             "unexpected error: {error}"
         );
     }

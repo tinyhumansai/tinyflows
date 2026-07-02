@@ -25,6 +25,7 @@ pub mod compiler;
 pub mod data;
 pub mod engine;
 pub mod error;
+pub mod expr;
 pub mod model;
 pub mod nodes;
 pub mod validate;
