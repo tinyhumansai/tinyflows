@@ -47,6 +47,11 @@ Optional durable key/value state for stateful/resumable workflows. (Graph
 checkpointing is a separate concern handled by tinyagents' `Checkpointer`, wired
 by the host.)
 
+> **Status:** the trait (and `MockStateStore`) are defined, but `StateStore` is
+> **not yet part of the `Capabilities` bundle** (below) or `mock_capabilities()` —
+> it's wired in when stateful workflows land. Today the per-run bundle is the four
+> traits above.
+
 ## The `Capabilities` bundle
 
 ```rust

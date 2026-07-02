@@ -17,8 +17,9 @@ The whole definition.
 | `nodes` | `Vec<Node>` | All nodes |
 | `edges` | `Vec<Edge>` | Directed port-to-port connections |
 
-Helpers: `trigger()` (the single trigger node, if exactly one), `node(id)`,
-`successors(id)`.
+Helpers: `trigger()` (the single trigger node, if exactly one), `node(id)`, and
+`successors(id)` — a node's **direct** successors (immediate neighbors only, not
+the transitive closure).
 
 ### `Node`
 A single unit of work.

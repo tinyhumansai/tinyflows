@@ -106,7 +106,9 @@ impl WorkflowGraph {
         self.nodes.iter().find(|n| n.id == id)
     }
 
-    /// Returns the ids of every node reachable by following edges from `start`.
+    /// Returns the ids of the **direct** successors of `start` — the target node
+    /// of each edge leaving it (immediate neighbors only, not the transitive
+    /// closure; ids may repeat if multiple edges connect the same pair).
     #[must_use]
     pub fn successors(&self, start: &str) -> Vec<&str> {
         self.edges

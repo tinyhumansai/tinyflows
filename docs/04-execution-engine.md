@@ -58,6 +58,12 @@ by its [`NodeExecutor`](05-capability-traits.md) with a [`NodeContext`](../src/n
 outgoing branch for control-flow nodes. The final state is returned as
 `RunOutcome`.
 
+> **Current vs A1:** in the skeleton, `NodeContext.state` and `NodeOutput.value`
+> are single `serde_json::Value`s. Stage A1 reshapes this to the **item-array**
+> contract in [data & expressions](13-data-and-expressions.md) (D13), so
+> `NodeOutput` becomes item-based (and `merge` / `split_out` operate on item
+> arrays). The single-value shape here is provisional.
+
 Today `run` returns `EngineError::Unimplemented`; the driver lands in A1
 (minimal trigger→node path) and A3 (all node kinds).
 
