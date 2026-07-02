@@ -25,6 +25,9 @@ async-trait = "0.1"
 thiserror = "2"
 tinyagents = "1.2"
 tracing = "0.1"
+jaq-core = "3.1.0"
+jaq-std = "3.0.1"
+jaq-json = { version = "2.0.1", features = ["serde"] }
 
 [features]
 # Off by default; enables in-memory mock capability impls for downstream tests
