@@ -8,7 +8,8 @@ operational ergonomics.
 ## Status
 
 tinyflows is in early development. The repository currently contains the initial
-Rust crate and project scaffolding.
+Rust crate and project scaffolding. The public library surface is intentionally
+small while the workflow runtime takes shape.
 
 ## Project Layout
 
@@ -19,17 +20,23 @@ Rust crate and project scaffolding.
 
 ## Getting Started
 
-Install Rust with [rustup](https://rustup.rs/), then run:
+Install Rust 1.85 or newer with [rustup](https://rustup.rs/), then run:
 
 ```sh
 cargo build
 cargo test
 ```
 
-To run the application:
+To run the command-line entry point:
 
 ```sh
 cargo run
+```
+
+To use the crate from Rust:
+
+```rust
+assert_eq!(tinyflows::product_name(), "tinyflows");
 ```
 
 ## Contributing

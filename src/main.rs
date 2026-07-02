@@ -1,3 +1,3 @@
 fn main() {
-    println!("tinyflows");
+    println!("{}", tinyflows::product_name());
 }

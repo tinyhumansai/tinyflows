@@ -2,8 +2,20 @@
 name = "tinyflows"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "GPL-3.0-or-later"
 description = "A Rust-based, n8n-inspired workflow management solution."
 readme = "README.md"
+repository = "https://github.com/tinyhumansai/tinyflows"
+homepage = "https://github.com/tinyhumansai/tinyflows"
+documentation = "https://docs.rs/tinyflows"
+keywords = ["automation", "workflow", "orchestration", "n8n"]
+categories = ["command-line-utilities", "development-tools"]
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
 
 [dependencies]
