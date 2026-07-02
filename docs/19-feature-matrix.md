@@ -16,8 +16,8 @@ A capability checklist for tinyflows, with the stage each feature lands (see the
 | Linear sequences | ✅ A1 |
 | IF (condition, true/false) | ✅ A2 |
 | Multi-way switch | ✅ A2 |
-| Merge / fan-in (named inputs, barrier) | ✅ A2 |
-| Parallel branches | 🟡 A2 (fan-out pending) |
+| Merge / fan-in (named inputs, barrier) | ✅ A2 (waiting-edge join) |
+| Parallel branches (fan-out) | ✅ A2 (concurrent same-port successors) |
 | Split-out / per-item fan-out | ✅ A2 |
 | Loops (bounded) | 🟡 A2 (`RecursionPolicy`) |
 | Sub-workflow (nested graph) | ✅ A3 |
@@ -44,17 +44,17 @@ A capability checklist for tinyflows, with the stage each feature lands (see the
 | Per-node error policy (stop/continue/route) + error port | ✅ A4 ([error handling](14-error-handling.md)) |
 | Retries with backoff | 🟡 A4 (retry ✅, backoff timing pending) |
 | Per-node / per-run timeouts | 🟡 A4 |
-| Human-in-the-loop approval (interrupt/resume) | 🟡 A4 |
-| Durable checkpointing / resume | 🟡 A4 |
+| Human-in-the-loop approval (interrupt/resume) | ✅ A4 (`requires_approval` pause + `engine::resume`) |
+| Durable checkpointing / resume | 🟡 A4 (checkpointer wired; replay-resume pending) |
 | Sandboxed code + network gating + curated tools | 🟡 A3/B (host) ([security](07-security.md)) |
 | Trust boundary (definition authorizes, payload untrusted) | 🟡 B2 |
 
 ## Connections & observability
 | Feature | Status |
 |---------|--------|
-| Opaque `connection_ref` (secrets host-side) | 🟡 A3 ([credentials](15-credentials-and-connections.md)) |
-| Run / execution-step record + inspect data | 🟡 A4 ([observability](16-observability-and-runs.md)) |
-| Tracing spans + `RunObserver` hook | ✅ A4 (tracing spans/events; `RunObserver` hook pending) |
+| Opaque `connection_ref` (secrets host-side) | ✅ A3 ([credentials](15-credentials-and-connections.md)) |
+| Run / execution-step record + inspect data | ✅ A4 ([observability](16-observability-and-runs.md)) |
+| Tracing spans + `RunObserver` hook | ✅ A4 (tracing events + `Run`/`ExecutionStep` record & `RunObserver` hook) |
 
 ## Authoring & lifecycle
 | Feature | Status |
@@ -63,7 +63,7 @@ A capability checklist for tinyflows, with the stage each feature lands (see the
 | Agent-first chat authoring | 🟡 B4 (host) |
 | Starter templates | 🟡 B4 (host) |
 | Enable / disable, run history UI | 🟡 B1/B5 (host) |
-| Schema + node `type_version` migrations | 🟡 A1 ([versioning](18-versioning-and-migration.md)) |
+| Schema + node `type_version` migrations | ✅ A1 (`crate::migrate` load-time upgrade) ([versioning](18-versioning-and-migration.md)) |
 | Import / export JSON | 🟡 A1 (format is the contract) |
 
 ## Distribution

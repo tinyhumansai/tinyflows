@@ -10,16 +10,28 @@ its exit criteria.
 - ✅ **A0–A3 landed**: workflow model + validation; the compiler/engine
   (`engine::run` lowers onto tinyagents, per-run build, merge reducer, item-based
   `{run, nodes:{id:{items}}}` state); native control-flow nodes (condition,
-  switch, merge, split_out, transform) with conditional routing; and all
-  capability-backed nodes (agent, tool_call, http_request, code, output_parser,
-  sub_workflow) running against mock capabilities. A minimal `=`-expression module
-  (`crate::expr`, dotted-path) covers the interim; full `jq`/`jaq`-style
-  expressions are still deferred (O1).
-- 🟡 **A4 partial**: per-node error handling (`on_error` stop/continue/route +
-  `retry` + `error` port) and `tracing`-based observability are done; HITL
-  interrupt/resume, retry backoff timing, and durable checkpointing are still
-  pending.
-- ⬜ A5 and B0–B5 pending.
+  switch, merge, split_out, transform) with conditional routing — including real
+  **parallel fan-out** (multiple same-port successors run concurrently) and a
+  **merge fan-in barrier** (a waiting-edge join); and all capability-backed nodes
+  (agent, tool_call, http_request, code, output_parser, sub_workflow) running
+  against mock capabilities, with opaque `connection_ref` threaded through the
+  LLM/tool/HTTP traits. A minimal `=`-expression module (`crate::expr`,
+  dotted-path) covers the interim; full `jq`/`jaq`-style expressions are still
+  deferred (O1).
+- ✅ **A4 essentially done**: per-node error handling (`on_error`
+  stop/continue/route + `retry` + `error` port); observability (`tracing`
+  events plus the `Run`/`ExecutionStep` record model and the `RunObserver` hook,
+  `src/observability.rs`, driven via `engine::run_with_observer`); and HITL —
+  nodes with `requires_approval` pause (`RunOutcome::pending_approvals`) via a
+  native tinyagents interrupt + `InMemoryCheckpointer`, and `engine::resume`
+  completes the approve-and-continue loop. Load-time versioning/migration
+  (`schema_version` + per-node `type_version`, `crate::migrate`) also landed.
+  Remaining polish: retry **backoff timing** (retries are bounded but don't
+  sleep — runtime-agnostic), per-node **timeouts**, and durable
+  **checkpointed super-step replay** for resume.
+- 🟡 **A5**: publish-ready (`cargo publish --dry-run` clean) but not yet
+  published.
+- ⬜ B0–B5 (OpenHuman host integration) not started.
 
 The public runtime works end-to-end against mock capabilities, guarded by the
 reference-workflow e2e suite (`tests/reference_workflows.rs`, feature `mock`).
@@ -48,9 +60,12 @@ reference-workflow e2e suite (`tests/reference_workflows.rs`, feature `mock`).
   wire the expression library (`jaq` or `minijinja`).
 - **Exit:** branch/switch/merge/parallel/split/loop covered by unit tests.
 - **Landed:** all five control-flow nodes plus conditional routing in the engine
-  (branch nodes route by chosen port). The expression side ships as a **minimal
-  interim** `=`-module (`crate::expr`, dotted-path); full `jq`/`jaq`-style
-  expressions remain deferred (O1).
+  (branch nodes route by chosen port), including real **parallel fan-out** (a node
+  with multiple same-port successors runs them concurrently via `Command::goto` +
+  `with_parallel`) and a **merge fan-in barrier** (a real waiting-edge join,
+  `add_waiting_edge`). The expression side ships as a **minimal interim**
+  `=`-module (`crate::expr`, dotted-path); full `jq`/`jaq`-style expressions
+  remain deferred (O1).
 
 ### A3 — Capability-backed nodes ✅ (landed)
 - Implement `agent` (with chat_model/memory/tool/output_parser sub-ports),
@@ -60,19 +75,28 @@ reference-workflow e2e suite (`tests/reference_workflows.rs`, feature `mock`).
 - **Landed:** every capability-backed node calls its `caps` trait and is
   exercised against the mocks by the reference-workflow e2e suite.
 
-### A4 — Durability, HITL, observability 🟡 (partial)
+### A4 — Durability, HITL, observability ✅ (essentially done)
 - Wire tinyagents checkpointing; mid-run `Interrupt`/`resume` approval steps;
   per-node retry/backoff + timeout; tracing spans.
 - **Exit:** a workflow pauses for approval and resumes; a failing node retries.
 - **Landed:** per-node error handling (`on_error` stop/continue/route + `retry`
-  + `error` port) and `tracing`-based observability (spans/events).
-- **Pending:** HITL interrupt/resume, retry backoff timing, and durable
-  checkpointing.
+  + `error` port); observability — `tracing` events **plus** the
+  `Run`/`ExecutionStep` record model and the `RunObserver` hook
+  (`src/observability.rs`), surfaced through `engine::run_with_observer`; and
+  HITL — nodes with `requires_approval` pause (`RunOutcome::pending_approvals`)
+  via a native tinyagents interrupt + `InMemoryCheckpointer`, with
+  `engine::resume` completing the approve-and-continue loop.
+- **Remaining polish:** retry **backoff timing** (retries are bounded but don't
+  sleep — runtime-agnostic), per-node **timeouts**, and durable **checkpointed
+  super-step replay** for resume (the checkpointer is wired, but resume currently
+  re-runs with the approval; replay-resume is a future optimization).
 
-### A5 — Docs, e2e, publish ⬜ (pending)
+### A5 — Docs, e2e, publish 🟡 (publish-ready)
 - Finalize docs + `e2e/` reference scenarios + examples; **`cargo publish` to
   crates.io** (semver + `release.yml` publish-on-tag).
 - **Exit:** `tinyflows = "x.y"` is installable; CI green on a tagged release.
+- **Status:** publish-ready — `cargo publish --dry-run` is clean — but not yet
+  published to crates.io.
 
 ## Phase B — OpenHuman integration
 
