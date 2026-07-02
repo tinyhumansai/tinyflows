@@ -37,5 +37,5 @@ and is implemented by hosts that need it.
 
 ## Deeper reading
 
-- [`docs/05-capability-traits.md`](../blob/main/docs/05-capability-traits.md)
-- [`docs/15-credentials-and-connections.md`](../blob/main/docs/15-credentials-and-connections.md)
+- [Architecture](Architecture) — how the engine drives a compiled workflow.
+- [Node Catalog](Node-Catalog) — the nodes that consume these capabilities.

@@ -12,7 +12,7 @@
 //! successors sharing one port, driven by a `Command::goto` that activates every
 //! branch concurrently), and a **fan-in barrier** (any node with more than one
 //! predecessor is wired with waiting edges so it runs only once all of them
-//! finish). See `docs/04-execution-engine.md`.
+//! finish).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -509,8 +509,8 @@ pub async fn run_with_observer(
 /// Resumes a paused run by re-running `workflow` with `newly_approved` node ids
 /// added to the run's approvals, so previously-gated nodes now execute.
 ///
-/// This is the approve-and-continue completion of the human-in-the-loop loop
-/// (see docs/04 / docs/16): a run that paused with `RunOutcome::pending_approvals`
+/// This is the approve-and-continue completion of the human-in-the-loop loop:
+/// a run that paused with `RunOutcome::pending_approvals`
 /// is continued by supplying the approvals. It re-executes the workflow with the
 /// merged approval set (deterministic; checkpointed super-step replay is a future
 /// optimization). Prior approvals in `input["approvals"]` are preserved and unioned.

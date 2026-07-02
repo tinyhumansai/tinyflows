@@ -9,7 +9,7 @@ use crate::model::{NodeKind, WorkflowGraph};
 ///
 /// Currently checks: unique node ids, exactly one trigger node, and that every
 /// edge references existing nodes. Cycle-legality and per-kind configuration
-/// checks are completed in stages A1–A2 (see `docs/08-roadmap.md`).
+/// checks are completed in stages A1–A2.
 ///
 /// # Errors
 /// Returns the first [`ValidationError`] encountered.

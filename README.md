@@ -157,7 +157,7 @@ cargo run --example hello_workflow --features mock
 | `split_out` | Fan-out that emits one item per element of a list. |
 | `transform` | Pure, expression-based data transform / field mapping over the run state. |
 
-See [`docs/03-node-catalog.md`](docs/03-node-catalog.md) for config keys and
+See the [Node Catalog](../../wiki/Node-Catalog) wiki page for config keys and
 ports.
 
 ## Status
@@ -204,18 +204,15 @@ cargo test --all-features
 
 ## Documentation
 
-The design and implementation docs live in [`docs/`](docs/README.md) — start with
-the [index](docs/README.md) (design docs `00`–`21`). Notable entries:
-[Overview](docs/00-overview.md), [Architecture](docs/01-architecture.md),
-[Workflow model](docs/02-workflow-model.md),
-[Node catalog](docs/03-node-catalog.md),
-[Capability traits](docs/05-capability-traits.md), and the
-[roadmap](docs/08-roadmap.md).
+The design and implementation guides live in the project
+[wiki](../../wiki) — start with
+[Getting Started](../../wiki/Getting-Started), then
+[Architecture](../../wiki/Architecture) and the
+[Node Catalog](../../wiki/Node-Catalog).
 
 ## Contributing
 
-Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
-[coding guidelines](docs/21-coding-guidelines.md). In short:
+Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md). In short:
 
 1. Keep changes focused and easy to review.
 2. Run the CI checks locally: `cargo fmt --all -- --check`,

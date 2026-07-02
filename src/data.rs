@@ -2,7 +2,7 @@
 //!
 //! Data on a connection is an **array of [`Item`]s**, not a single value — the
 //! model common to mature workflow tools. A node maps its logic over its input
-//! items and returns output items. See `docs/13-data-and-expressions.md` (D13).
+//! items and returns output items.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -9,8 +9,7 @@
 //! raw JSON → migrate (schema_version) → parse → validate → compile
 //! ```
 //!
-//! See `docs/18-versioning-and-migration.md` for the full scheme and the semver
-//! policy that treats the JSON format as public API.
+//! The semver policy treats the JSON format as public API.
 //!
 //! [`WorkflowGraph`]: crate::model::WorkflowGraph
 

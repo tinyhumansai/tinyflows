@@ -1,8 +1,8 @@
 //! Run/step observability records and the host-facing [`RunObserver`] hook.
 //!
 //! tinyflows **emits** structured records of what happened during a run; the
-//! host **persists** and renders them — the crate never owns a database (see
-//! `docs/16-observability-and-runs.md`). A [`Run`] captures one workflow
+//! host **persists** and renders them — the crate never owns a database.
+//! A [`Run`] captures one workflow
 //! execution as a sequence of [`ExecutionStep`]s, one per non-trigger node
 //! activation, each recording the node's status, output items, and wall-clock
 //! duration.
@@ -64,7 +64,7 @@ pub enum StepStatus {
 /// succeeded, and how long it took.
 ///
 /// This is the record the canvas renders when a user inspects a node, and what a
-/// run-history view summarizes (see `docs/16-observability-and-runs.md`).
+/// run-history view summarizes.
 #[derive(Debug, Clone)]
 pub struct ExecutionStep {
     /// The id of the node this step ran.

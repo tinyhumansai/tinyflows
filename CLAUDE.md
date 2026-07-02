@@ -61,11 +61,13 @@ cargo build --release
 
 ## Docs
 
-Design docs live in [`docs/`](docs/README.md) — **`docs/README.md` is the index,
-read it first.** Notable: `01-architecture.md`, `02-workflow-model.md`,
-`03-node-catalog.md`, `05-capability-traits.md`, `08-roadmap.md` (stages A0–A5 /
-B0–B5), `09-openhuman-integration.md`, `11-decisions.md` (ADR log). When you make
-a design decision, add it to `11-decisions.md`.
+Design docs live in `local/docs/` (gitignored — moved out of the public repo,
+symlinked into every worktree). **`local/docs/README.md` is the index, read it
+first.** Notable: `local/docs/01-architecture.md`, `local/docs/02-workflow-model.md`,
+`local/docs/03-node-catalog.md`, `local/docs/05-capability-traits.md`,
+`local/docs/08-roadmap.md` (stages A0–A5 / B0–B5),
+`local/docs/09-openhuman-integration.md`, `local/docs/11-decisions.md` (ADR log).
+When you make a design decision, record it in `local/docs/11-decisions.md`.
 
 ## Status
 

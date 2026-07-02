@@ -2,7 +2,7 @@
 //! End-to-end integration tests for the tinyflows engine.
 //!
 //! Each test builds a realistic, multi-node [`WorkflowGraph`] inspired by the
-//! reference workflows in `docs/10-reference-workflows.md`, compiles it, and runs
+//! project's reference workflows, compiles it, and runs
 //! it against the deterministic [mock capabilities](tinyflows::caps::mock). The
 //! goal is to prove the whole pipeline — model → validate → compile → run — works
 //! for the constructs the engine currently supports: linear chains, `split_out`

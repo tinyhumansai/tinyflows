@@ -5,9 +5,9 @@ host-agnostic workflow engine, licensed **GPL-3.0-or-later**.
 
 ## Before you start
 
-- Skim the design docs — [`docs/README.md`](docs/README.md) is the index.
-- Read the **[coding guidelines](docs/21-coding-guidelines.md)** — they're the
-  standard every change is held to.
+- Skim the design guides in the project [wiki](../../wiki).
+- Read the **coding standards** below — they're the standard every change is held
+  to.
 - For anything non-trivial, **open an issue first** (use the
   [issue templates](.github/ISSUE_TEMPLATE)) so we can agree on the approach.
 
@@ -36,8 +36,7 @@ cargo test --all-features
 
 ## Coding standards (the short version)
 
-Full detail in [`docs/21-coding-guidelines.md`](docs/21-coding-guidelines.md). The
-non-negotiables:
+The non-negotiables:
 
 - **Host-agnostic:** never hard-code an LLM/tool/HTTP/persistence vendor — outside-
   world effects go through a capability trait, not a direct dependency.
@@ -57,7 +56,7 @@ non-negotiables:
 - Branch from `main`, open a PR against `main`, and fill in the
   [PR template](.github/PULL_REQUEST_TEMPLATE.md).
 - Update docs alongside behavior/API changes; record design decisions as an ADR in
-  [`docs/11-decisions.md`](docs/11-decisions.md).
+  the project's decision log.
 - Keep PRs reviewable — separate large refactors from behavior changes.
 
 ## Licensing

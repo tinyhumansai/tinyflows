@@ -2,8 +2,7 @@
 //!
 //! A config string beginning with `=` is an **expression**: the remainder is a
 //! dotted path resolved against a scope (e.g. `"=item.name"` -> `scope["item"]["name"]`).
-//! Anything else is a literal. Full jq-style expressions are a future upgrade
-//! (see `docs/13-data-and-expressions.md`).
+//! Anything else is a literal. Full jq-style expressions are a future upgrade.
 
 use serde_json::Value;
 

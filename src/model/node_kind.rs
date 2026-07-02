@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 /// The category of work a [`crate::model::Node`] performs.
 ///
 /// Kind-specific configuration lives in [`crate::model::Node::config`] as
-/// free-form JSON, validated per kind during compilation. See
-/// `docs/03-node-catalog.md`.
+/// free-form JSON, validated per kind during compilation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {

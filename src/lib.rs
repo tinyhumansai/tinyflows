@@ -10,8 +10,7 @@
 //! The crate is deliberately **host-agnostic**: anything that touches the outside
 //! world — LLM calls, integration tools, HTTP, code execution, persistence — is
 //! expressed through the [`caps`] capability traits that the embedding
-//! application implements. See the `docs/` directory for the full architecture,
-//! node catalog, and roadmap.
+//! application implements.
 //!
 //! ```
 //! assert_eq!(tinyflows::product_name(), "tinyflows");

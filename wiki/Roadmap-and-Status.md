@@ -44,7 +44,5 @@ Being honest about what's ahead:
 
 ## Deeper reading
 
-- [`docs/08-roadmap.md`](../blob/main/docs/08-roadmap.md) — staged delivery
-  (A0–A5 / B0–B5).
-- [`docs/19-feature-matrix.md`](../blob/main/docs/19-feature-matrix.md) — feature
-  status matrix.
+- [Architecture](Architecture) — how the pieces fit together.
+- [Node Catalog](Node-Catalog) — the node kinds delivered so far.

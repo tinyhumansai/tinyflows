@@ -40,7 +40,6 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 
 ## Going deeper
 
-The full design specs live in the repository's
-[`docs/`](../blob/main/docs/README.md) directory (start with the index). For a
-quickstart and project layout, see the repo
-[`README.md`](../blob/main/README.md).
+Browse the design guides across this wiki (start with
+[Getting Started](Getting-Started)). For a quickstart and project layout, see the
+repo [`README.md`](../blob/main/README.md).

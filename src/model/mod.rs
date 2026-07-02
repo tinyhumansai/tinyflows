@@ -2,12 +2,12 @@
 //!
 //! A [`WorkflowGraph`] is the serializable source of truth for an automation.
 //! Both authoring surfaces — the visual canvas and agent-first chat — produce
-//! and edit the *same* `WorkflowGraph`. See `docs/02-workflow-model.md`.
+//! and edit the *same* `WorkflowGraph`.
 //!
 //! ## Versioning
 //!
 //! The JSON wire format is a stable contract. Two version axes make it durable
-//! as the model evolves (see `docs/18-versioning-and-migration.md`):
+//! as the model evolves:
 //!
 //! - [`WorkflowGraph::schema_version`] — the overall model shape. The current
 //!   value is [`CURRENT_SCHEMA_VERSION`].
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Graphs persisted with a lower `schema_version` are upgraded on load by
 /// [`crate::migrate`]. Bumping this constant is a breaking JSON-format change
-/// and must ship with a migration (see `docs/18-versioning-and-migration.md`).
+/// and must ship with a migration.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// Stable identifier for a node within a [`WorkflowGraph`].

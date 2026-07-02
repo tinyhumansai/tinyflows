@@ -46,6 +46,5 @@ Per-node error handling (`on_error` stop/continue/route, `retry`, an `error`
 port) and approval gating (`requires_approval`) are configured through the same
 free-form `config`.
 
-See [`docs/03-node-catalog.md`](../blob/main/docs/03-node-catalog.md) for the full
-catalog, and [`docs/06-triggers.md`](../blob/main/docs/06-triggers.md) for trigger
-kinds.
+Each node kind's config keys and ports, along with the available trigger kinds,
+are documented in the sections above.

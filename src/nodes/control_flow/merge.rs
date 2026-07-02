@@ -17,7 +17,7 @@ impl NodeExecutor for MergeNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
         // Fan-in: the engine concatenates all predecessor items into `ctx.input`, so
         // merge emits them combined. (A true multi-branch barrier via waiting edges
-        // lands with parallel fan-out support — see docs/04.)
+        // lands with parallel fan-out support.)
         Ok(NodeOutput::main(ctx.input.to_vec()))
     }
 }

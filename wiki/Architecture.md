@@ -61,5 +61,5 @@ Anything touching the outside world goes through a **capability trait** bundled 
 
 ## Deeper reading
 
-- [`docs/01-architecture.md`](../blob/main/docs/01-architecture.md)
-- [`docs/04-execution-engine.md`](../blob/main/docs/04-execution-engine.md)
+- [Capability Traits](Capability-Traits) — the host-injected seam.
+- [Node Catalog](Node-Catalog) — the node vocabulary the engine executes.
