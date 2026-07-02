@@ -7,8 +7,12 @@
 //! `{ "run": { "trigger": … }, "nodes": { "<id>": { "items": [ … ] } } }`;
 //! a merge reducer folds each node's item output into that map.
 //!
-//! Stage A1 lowers the **linear** path (one successor per node). Branching,
-//! parallel, and fan-in lowering land in A2. See `docs/04-execution-engine.md`.
+//! Lowering covers the **linear** path (one successor per node), **conditional
+//! branching** (successors on distinct ports), **parallel fan-out** (several
+//! successors sharing one port, driven by a `Command::goto` that activates every
+//! branch concurrently), and a **fan-in barrier** (any node with more than one
+//! predecessor is wired with waiting edges so it runs only once all of them
+//! finish). See `docs/04-execution-engine.md`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +20,8 @@ use std::time::Instant;
 
 use serde_json::{Map, Value, json};
 use tinyagents::{
-    END, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeResult, StateReducer, TinyAgentsError,
+    Command, END, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeResult, StateReducer,
+    TinyAgentsError,
 };
 
 use crate::caps::Capabilities;
@@ -173,21 +178,42 @@ pub async fn run_with_observer(
 
     tracing::info!(node_count = graph.nodes.len(), trigger = %trigger_id, "workflow run starting");
 
-    // Branching (multiple successors on DISTINCT ports) lowers to conditional
-    // edges. Two or more edges sharing a `from_port` is parallel fan-out, which
-    // still needs A2 parallel lowering.
-    for node in &graph.nodes {
-        let mut seen_ports = std::collections::HashSet::new();
-        for edge in graph.edges.iter().filter(|e| e.from_node == node.id) {
-            if !seen_ports.insert(edge.from_port.as_str()) {
-                return Err(EngineError::Unimplemented(
-                    "parallel fan-out lowering (stage A2)",
-                ));
-            }
-        }
+    // How many predecessors each node has. A node with more than one is a
+    // fan-in point: its incoming edges are lowered as waiting edges so it runs
+    // only after every predecessor has completed (the merge barrier).
+    let mut incoming_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for edge in &graph.edges {
+        *incoming_counts.entry(edge.to_node.as_str()).or_default() += 1;
     }
 
-    let mut builder = GraphBuilder::<Value, Value>::new().set_reducer(MergeReducer);
+    // A node is a **parallel fan-out** point when all of its outgoing edges share
+    // a single `from_port` and there is more than one of them: every successor
+    // must run concurrently. We record its ordered successor list here so the
+    // node's handler can emit a `Command::goto([...])` instead of a plain update.
+    let fan_out_targets = |node_id: &str| -> Option<Vec<String>> {
+        let outgoing: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.from_node == node_id)
+            .collect();
+        if outgoing.len() < 2 {
+            return None;
+        }
+        let first_port = outgoing[0].from_port.as_str();
+        if outgoing.iter().all(|e| e.from_port == first_port) {
+            Some(outgoing.iter().map(|e| e.to_node.clone()).collect())
+        } else {
+            None
+        }
+    };
+
+    // Concurrency is required so a fan-out's successors execute in the same
+    // superstep; the reducer folds their independent, per-id updates
+    // deterministically, so enabling it never changes a linear run's result.
+    let mut builder = GraphBuilder::<Value, Value>::new()
+        .with_parallel(true)
+        .set_reducer(MergeReducer);
 
     for node in &graph.nodes {
         let node = node.clone();
@@ -201,6 +227,8 @@ pub async fn run_with_observer(
         let observer = observer.clone();
         let steps = steps.clone();
         let is_trigger = node.kind == NodeKind::Trigger;
+        // Successors to fan out to concurrently, or `None` for a non-fan-out node.
+        let fan_out = fan_out_targets(&node.id);
 
         builder = builder.add_node(node.id.clone(), move |state: Value, _ctx| {
             let node = node.clone();
@@ -208,10 +236,22 @@ pub async fn run_with_observer(
             let caps = caps.clone();
             let observer = observer.clone();
             let steps = steps.clone();
+            let fan_out = fan_out.clone();
             async move {
+                // Wraps a node's partial update: a fan-out node drives all of its
+                // successors via a `Command::goto`, everything else emits a plain
+                // update and follows its static/conditional edge.
+                let emit = |update: Value| match &fan_out {
+                    Some(targets) => {
+                        NodeResult::Command(Command::goto(targets.clone()).with_update(update))
+                    }
+                    None => NodeResult::Update(update),
+                };
+
                 if is_trigger {
-                    // The trigger payload is pre-seeded into the state; no-op update.
-                    return Ok(NodeResult::Update(json!({})));
+                    // The trigger payload is pre-seeded into the state; no-op update
+                    // (still fanning out if the trigger has parallel successors).
+                    return Ok(emit(json!({})));
                 }
 
                 // Human-in-the-loop approval gate. A node whose config sets
@@ -306,7 +346,7 @@ pub async fn run_with_observer(
                         };
                         steps.lock().expect("steps mutex poisoned").push(step.clone());
                         observer.on_step_finish(&step);
-                        Ok(NodeResult::Update(items_update(
+                        Ok(emit(items_update(
                             &node.id,
                             &output.items,
                             output.port.as_deref(),
@@ -326,18 +366,18 @@ pub async fn run_with_observer(
                         // ran (`max_attempts >= 1`); the `None` arm is unreachable
                         // but handled defensively — emit an empty update, never panic.
                         let Some(err) = last_err else {
-                            return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                            return Ok(emit(items_update(&node.id, &[], None)?));
                         };
                         match on_error {
                             // Turn the failure into data on the default port.
-                            "continue" => Ok(NodeResult::Update(items_update(
+                            "continue" => Ok(emit(items_update(
                                 &node.id,
                                 &[error_item(&node.id, &err)],
                                 None,
                             )?)),
                             // Turn the failure into data on the `error` port so the
                             // graph can route it to a recovery sub-graph.
-                            "route" => Ok(NodeResult::Update(items_update(
+                            "route" => Ok(emit(items_update(
                                 &node.id,
                                 &[error_item(&node.id, &err)],
                                 Some("error"),
@@ -368,33 +408,52 @@ pub async fn run_with_observer(
             .iter()
             .filter(|e| e.from_node == node.id)
             .collect();
-        match outgoing.as_slice() {
+        if outgoing.is_empty() {
             // Leaf node: nothing routes out, so it terminates the run.
-            [] => builder = builder.add_edge(node.id.clone(), END),
-            // Single successor lowers to a plain static edge.
-            [edge] => builder = builder.add_edge(node.id.clone(), edge.to_node.clone()),
+            builder = builder.add_edge(node.id.clone(), END);
+        } else if let Some(dests) = fan_out_targets(&node.id) {
+            // Parallel fan-out: the node's handler drives every successor with a
+            // `Command::goto`, so we only declare the destination hints here. A
+            // command-routing node may not also carry static/conditional edges,
+            // so nothing else is wired for it.
+            builder = builder.with_command_destinations(node.id.clone(), dests);
+        } else if let [edge] = outgoing.as_slice() {
+            // Single successor. If the target is a fan-in point (more than one
+            // predecessor, e.g. a `merge`) wire it as a waiting edge so it runs
+            // only once every predecessor has completed — the merge barrier.
+            // Otherwise a plain static edge.
+            let target = edge.to_node.clone();
+            if incoming_counts
+                .get(edge.to_node.as_str())
+                .copied()
+                .unwrap_or(0)
+                > 1
+            {
+                builder = builder.add_waiting_edge(node.id.clone(), target);
+            } else {
+                builder = builder.add_edge(node.id.clone(), target);
+            }
+        } else {
             // Branching: distinct ports lower to conditional edges keyed on the
             // port the node recorded into state (defaulting to `main`).
-            edges => {
-                let from = node.id.clone();
-                let routes: Vec<(String, String)> = edges
-                    .iter()
-                    .map(|e| (e.from_port.clone(), e.to_node.clone()))
-                    .collect();
-                builder = builder.add_conditional_edges(
-                    node.id.clone(),
-                    move |state: &Value| -> String {
-                        state
-                            .get("nodes")
-                            .and_then(|nodes| nodes.get(&from))
-                            .and_then(|slot| slot.get("port"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("main")
-                            .to_string()
-                    },
-                    routes,
-                );
-            }
+            let from = node.id.clone();
+            let routes: Vec<(String, String)> = outgoing
+                .iter()
+                .map(|e| (e.from_port.clone(), e.to_node.clone()))
+                .collect();
+            builder = builder.add_conditional_edges(
+                node.id.clone(),
+                move |state: &Value| -> String {
+                    state
+                        .get("nodes")
+                        .and_then(|nodes| nodes.get(&from))
+                        .and_then(|slot| slot.get("port"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("main")
+                        .to_string()
+                },
+                routes,
+            );
         }
     }
 
@@ -569,7 +628,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fan_out_is_rejected_until_a2() {
+    async fn fan_out_runs_both_branches() {
+        // trigger fans out on port `main` to two independent successors; both must
+        // run concurrently (previously this shape was rejected as unimplemented).
         let graph = WorkflowGraph {
             nodes: vec![
                 node("t", NodeKind::Trigger),
@@ -595,10 +656,72 @@ mod tests {
         let compiled = compile(&graph).expect("compile");
         let caps = mock_capabilities();
 
-        let error = run(&compiled, Value::Null, &caps)
-            .await
-            .expect_err("fan-out");
-        assert!(matches!(error, EngineError::Unimplemented(_)));
+        let outcome = run(&compiled, json!({ "v": 1 }), &caps).await.expect("run");
+        assert!(
+            !outcome.output["nodes"]["a"]["items"].is_null(),
+            "fan-out branch a should have run"
+        );
+        assert!(
+            !outcome.output["nodes"]["b"]["items"].is_null(),
+            "fan-out branch b should have run"
+        );
+    }
+
+    #[tokio::test]
+    async fn diamond_fan_out_and_merge() {
+        // trigger -> dispatch, which fans out on port `main` to `a` and `b`; both
+        // feed a `merge` barrier `m`, then `m -> done`. The barrier must hold until
+        // both branches complete, and merge concatenates their items.
+        let edge = |from: &str, port: &str, to: &str| Edge {
+            from_node: from.to_string(),
+            from_port: port.to_string(),
+            to_node: to.to_string(),
+            to_port: "main".to_string(),
+        };
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("d", NodeKind::OutputParser),
+                node("a", NodeKind::OutputParser),
+                node("b", NodeKind::OutputParser),
+                node("m", NodeKind::Merge),
+                node("done", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "main", "d"),
+                edge("d", "main", "a"),
+                edge("d", "main", "b"),
+                edge("a", "main", "m"),
+                edge("b", "main", "m"),
+                edge("m", "main", "done"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "v": 1 }), &caps).await.expect("run");
+
+        assert!(
+            !outcome.output["nodes"]["a"]["items"].is_null(),
+            "fan-out branch a should have run"
+        );
+        assert!(
+            !outcome.output["nodes"]["b"]["items"].is_null(),
+            "fan-out branch b should have run"
+        );
+        let merged = outcome.output["nodes"]["m"]["items"]
+            .as_array()
+            .expect("merge should have produced items");
+        assert!(
+            merged.len() >= 2,
+            "merge should concatenate both branches' items, got {}",
+            merged.len()
+        );
+        assert!(
+            !outcome.output["nodes"]["done"]["items"].is_null(),
+            "the node past the merge barrier should have run"
+        );
     }
 
     #[tokio::test]
