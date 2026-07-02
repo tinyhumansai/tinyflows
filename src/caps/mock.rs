@@ -20,8 +20,8 @@ pub struct MockLlm;
 
 #[async_trait]
 impl LlmProvider for MockLlm {
-    async fn complete(&self, request: Value) -> Result<Value> {
-        Ok(json!({ "completion": request }))
+    async fn complete(&self, request: Value, conn: Option<&str>) -> Result<Value> {
+        Ok(json!({ "completion": request, "connection": conn }))
     }
 }
 
@@ -31,8 +31,8 @@ pub struct MockTools;
 
 #[async_trait]
 impl ToolInvoker for MockTools {
-    async fn invoke(&self, slug: &str, args: Value) -> Result<Value> {
-        Ok(json!({ "tool": slug, "args": args }))
+    async fn invoke(&self, slug: &str, args: Value, conn: Option<&str>) -> Result<Value> {
+        Ok(json!({ "tool": slug, "args": args, "connection": conn }))
     }
 }
 
@@ -42,8 +42,8 @@ pub struct MockHttp;
 
 #[async_trait]
 impl HttpClient for MockHttp {
-    async fn request(&self, request: Value) -> Result<Value> {
-        Ok(json!({ "status": 200, "request": request }))
+    async fn request(&self, request: Value, conn: Option<&str>) -> Result<Value> {
+        Ok(json!({ "status": 200, "request": request, "connection": conn }))
     }
 }
 
@@ -99,7 +99,7 @@ mod tests {
         let caps = mock_capabilities();
         let out = caps
             .tools
-            .invoke("slack.post", json!({"x": 1}))
+            .invoke("slack.post", json!({"x": 1}), None)
             .await
             .unwrap();
         assert_eq!(out["tool"], "slack.post");

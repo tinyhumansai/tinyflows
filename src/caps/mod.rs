@@ -20,21 +20,33 @@ use crate::error::Result;
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Runs a single completion given a JSON request, returning a JSON response.
-    async fn complete(&self, request: Value) -> Result<Value>;
+    ///
+    /// `conn` is an optional opaque, host-managed connection reference (e.g. a
+    /// provider credential id) that names the account the call acts as; the host
+    /// resolves it to real secrets inside this implementation.
+    async fn complete(&self, request: Value, conn: Option<&str>) -> Result<Value>;
 }
 
 /// Invokes a named integration tool (e.g. a curated Composio action).
 #[async_trait]
 pub trait ToolInvoker: Send + Sync {
     /// Executes the tool identified by `slug` with `args`, returning its output.
-    async fn invoke(&self, slug: &str, args: Value) -> Result<Value>;
+    ///
+    /// `conn` is an optional opaque, host-managed connection reference (e.g. a
+    /// Composio connection id) that names the account the call acts as; the host
+    /// resolves it to real secrets inside this implementation.
+    async fn invoke(&self, slug: &str, args: Value, conn: Option<&str>) -> Result<Value>;
 }
 
 /// Performs an outbound HTTP request on behalf of an `http_request` node.
 #[async_trait]
 pub trait HttpClient: Send + Sync {
     /// Issues the request described by `request`, returning the response as JSON.
-    async fn request(&self, request: Value) -> Result<Value>;
+    ///
+    /// `conn` is an optional opaque, host-managed connection reference (e.g. an
+    /// HTTP credential id) that names the account the call acts as; the host
+    /// resolves it to real secrets inside this implementation.
+    async fn request(&self, request: Value, conn: Option<&str>) -> Result<Value>;
 }
 
 /// The language a [`CodeRunner`] should execute.

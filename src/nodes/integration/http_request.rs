@@ -14,7 +14,12 @@ pub struct HttpRequestNode;
 impl NodeExecutor for HttpRequestNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
         // The node's config is the request descriptor; the host's HttpClient interprets it.
-        let response = ctx.caps.http.request(ctx.node.config.clone()).await?;
+        let conn = ctx
+            .node
+            .config
+            .get("connection_ref")
+            .and_then(serde_json::Value::as_str);
+        let response = ctx.caps.http.request(ctx.node.config.clone(), conn).await?;
         Ok(NodeOutput::main(vec![Item::new(response)]))
     }
 }

@@ -27,7 +27,12 @@ impl NodeExecutor for ToolCallNode {
             .get("args")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let result = ctx.caps.tools.invoke(slug, args).await?;
+        let conn = ctx
+            .node
+            .config
+            .get("connection_ref")
+            .and_then(serde_json::Value::as_str);
+        let result = ctx.caps.tools.invoke(slug, args, conn).await?;
         Ok(NodeOutput::main(vec![Item::new(result)]))
     }
 }
@@ -85,5 +90,21 @@ mod tests {
             "slack.post"
         );
         assert_eq!(out.output["nodes"]["n"]["items"][0]["json"]["args"]["x"], 1);
+    }
+
+    #[tokio::test]
+    async fn tool_call_threads_connection_ref() {
+        let graph = wf(
+            NodeKind::ToolCall,
+            json!({ "slug": "slack.post", "connection_ref": "composio:slack:acct_1" }),
+        );
+        let compiled = compile(&graph).expect("compile");
+        let out = run(&compiled, Value::Null, &mock_capabilities())
+            .await
+            .expect("run");
+        assert_eq!(
+            out.output["nodes"]["n"]["items"][0]["json"]["connection"],
+            "composio:slack:acct_1"
+        );
     }
 }

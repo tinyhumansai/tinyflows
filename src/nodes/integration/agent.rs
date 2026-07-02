@@ -16,7 +16,12 @@ pub struct AgentNode;
 impl NodeExecutor for AgentNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
         // A3-basic: the node config is the completion request; sub-port wiring is a later refinement.
-        let response = ctx.caps.llm.complete(ctx.node.config.clone()).await?;
+        let conn = ctx
+            .node
+            .config
+            .get("connection_ref")
+            .and_then(serde_json::Value::as_str);
+        let response = ctx.caps.llm.complete(ctx.node.config.clone(), conn).await?;
         Ok(NodeOutput::main(vec![Item::new(response)]))
     }
 }
