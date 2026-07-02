@@ -23,6 +23,14 @@ can plug in its own LLM, integration, HTTP, and code-execution capabilities.
 | 10 | [Reference workflows](10-reference-workflows.md) | The five reference automation flows as tinyflows JSON + coverage proof |
 | 11 | [Decisions](11-decisions.md) | ADR log of every design decision and its rationale |
 | 12 | [Testing](12-testing.md) | Test strategy: unit, compiler, e2e-vs-mocks, CI |
+| 13 | [Data & expressions](13-data-and-expressions.md) | Item-based data flow, pairing, the expression/reference language |
+| 14 | [Error handling](14-error-handling.md) | Per-node error policy, error port, retries, error-trigger workflows |
+| 15 | [Credentials & connections](15-credentials-and-connections.md) | Opaque `connection_ref`s; secrets stay host-side |
+| 16 | [Observability & runs](16-observability-and-runs.md) | Run / execution-step model, tracing, the inspect hook |
+| 17 | [Node authoring](17-node-authoring.md) | How to add a new node kind (extension guide) |
+| 18 | [Versioning & migration](18-versioning-and-migration.md) | Schema + per-node `type_version`, load-time migrations |
+| 19 | [Feature matrix](19-feature-matrix.md) | Capability checklist with the stage each feature lands |
+| 20 | [Glossary](20-glossary.md) | Terms used across the docs |
 
 ## Status
 

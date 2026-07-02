@@ -70,9 +70,45 @@ legacy `/settings/automations` SKILL panel to "Skills". **Rationale:** the
 core is in-process). **Rationale:** the in-process core dies with the GUI; a
 headless worker (queue-mode style) is deferred. **Status:** Accepted for v1.
 
+## D13 — Item-based data flow + `=` expressions
+**Decision:** data on connections is an **array of items** (`{ json, binary? }`),
+nodes map over items with best-effort **pairing**; any config field may be an
+`=`-prefixed **expression** evaluated against the run. Layered over the D5
+`serde_json::Value` state. **Rationale:** item semantics + data referencing are
+core to real automations; deciding now keeps the `Node` I/O contract stable.
+**Status:** Proposed (confirm) — shapes the A1 reducer + `Node` I/O. See
+[data & expressions](13-data-and-expressions.md).
+
+## D14 — Error-handling model
+**Decision:** per-node `on_error` (`stop` | `continue` | `route`), an `error`
+output port, `retry` with backoff, and `system`-trigger error workflows.
+**Rationale:** graceful degradation without run-ending failures. **Status:**
+Proposed — adds `Node` config; implemented A4. See
+[error handling](14-error-handling.md).
+
+## D15 — Credentials by opaque reference
+**Decision:** nodes carry opaque `connection_ref`s; secrets live host-side and are
+resolved inside capability impls; capability traits gain a connection parameter in
+A3. **Rationale:** graphs stay safe to store/share; crate stays vendor-agnostic.
+**Status:** Proposed. See [credentials](15-credentials-and-connections.md).
+
+## D16 — Run / execution-step model + observability hook
+**Decision:** define a `Run` + `ExecutionStep` record; emit via `tracing` spans +
+an optional `RunObserver` hook; the host persists/renders it. **Rationale:** powers
+the canvas inspect overlay and run history without the crate owning a DB.
+**Status:** Proposed — hook lands A4. See [observability](16-observability-and-runs.md).
+
+## D17 — Versioning: schema + per-node `type_version` + migrations
+**Decision:** add `schema_version` (WorkflowGraph) + per-node `type_version`, with
+registered load-time migrations; treat the JSON format as public API under semver.
+**Rationale:** saved definitions must keep loading as the model evolves.
+**Status:** Proposed — fields added A1. See
+[versioning](18-versioning-and-migration.md).
+
 ## Open decisions
 - **O1 — Expression library:** `jaq` (JSON-native, jq-like) vs `minijinja`
-  (templating). Decide in A2.
+  (templating). Used for both the `transform` node and inline `=` expressions
+  (D13). Decide in A2.
 - **O2 — `code` node default:** sandboxed-only (recommended) vs host-exec under
   Full autonomy. Decide in B2.
 - **O3 — UI order:** canvas (B3) before or after agent-first authoring (B4).
