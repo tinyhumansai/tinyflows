@@ -20,8 +20,8 @@ use std::time::Instant;
 
 use serde_json::{Map, Value, json};
 use tinyagents::{
-    Command, END, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeResult, StateReducer,
-    TinyAgentsError,
+    Command, CompiledGraph, END, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeResult,
+    StateReducer, TinyAgentsError,
 };
 
 use crate::caps::Capabilities;
@@ -156,6 +156,28 @@ pub async fn run_with_observer(
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
 ) -> Result<RunOutcome> {
+    let (_graph, _thread_id, outcome) =
+        build_and_run(workflow, input, capabilities, observer).await?;
+    Ok(outcome)
+}
+
+/// Builds the `tinyagents` graph for `workflow`, drives the first run under a
+/// checkpointed thread, and returns the still-live compiled graph, the run's
+/// thread id, and the [`RunOutcome`].
+///
+/// Shared by [`run_with_observer`] — which discards the graph — and
+/// [`run_resumable`], which keeps it (and thus its checkpointer) alive so a later
+/// [`ResumableRun::resume`] can replay forward from the persisted checkpoint
+/// without re-executing already-completed nodes.
+///
+/// # Errors
+/// Same as [`run`].
+async fn build_and_run(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    observer: &Arc<dyn RunObserver>,
+) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome)> {
     let graph = &workflow.graph;
 
     // Process-local, monotonic run id — no time/random source.
@@ -249,13 +271,17 @@ pub async fn run_with_observer(
         // Successors to fan out to concurrently, or `None` for a non-fan-out node.
         let fan_out = fan_out_targets(&node.id);
 
-        builder = builder.add_node(node.id.clone(), move |state: Value, _ctx| {
+        builder = builder.add_node(node.id.clone(), move |state: Value, ctx| {
             let node = node.clone();
             let predecessors = predecessors.clone();
             let caps = caps.clone();
             let observer = observer.clone();
             let steps = steps.clone();
             let fan_out = fan_out.clone();
+            // A checkpointed resume (see `ResumableRun::resume`) delivers a resume
+            // value to the interrupted node via `NodeContext::resume`; its presence
+            // approves this gate so the run proceeds forward from the checkpoint.
+            let resumed = ctx.resume.is_some();
             async move {
                 // Wraps a node's partial update: a fan-out node drives all of its
                 // successors via a `Command::goto`, everything else emits a plain
@@ -296,7 +322,9 @@ pub async fn run_with_observer(
                                 .filter_map(Value::as_str)
                                 .any(|id| id == node.id)
                         });
-                    if !approved {
+                    // `resumed` is set when a checkpointed resume delivered a
+                    // resume value to this interrupted gate — that approves it.
+                    if !approved && !resumed {
                         tracing::info!(node = %node.id, "node paused awaiting approval");
                         let payload = if node.config.is_null() {
                             json!({})
@@ -551,10 +579,14 @@ pub async fn run_with_observer(
     };
     observer.on_run_finish(&run_record);
 
-    Ok(RunOutcome {
-        output: execution.state,
-        pending_approvals,
-    })
+    Ok((
+        compiled,
+        trigger_id,
+        RunOutcome {
+            output: execution.state,
+            pending_approvals,
+        },
+    ))
 }
 
 /// Resumes a paused run by re-running `workflow` with `newly_approved` node ids
@@ -606,6 +638,94 @@ pub async fn resume(
     }
 
     run(workflow, merged_input, capabilities).await
+}
+
+/// A live, resumable workflow run.
+///
+/// Unlike the re-run-based [`resume`], this keeps the compiled `tinyagents` graph
+/// (and therefore its checkpointer) alive after the initial run, so
+/// [`ResumableRun::resume`] can continue **from the persisted checkpoint** —
+/// tinyagents replays forward from the interrupt boundary, so nodes that already
+/// completed are **not** re-executed.
+pub struct ResumableRun {
+    /// The compiled graph that ran, kept alive so its in-memory checkpointer
+    /// still holds the interrupt boundary a resume replays from.
+    graph: CompiledGraph<Value, Value>,
+    /// The thread id the initial run (and every resume) is keyed under.
+    thread_id: String,
+    /// The outcome of the initial run, before any resume.
+    outcome: RunOutcome,
+}
+
+impl ResumableRun {
+    /// The outcome of the initial run, before any [`resume`](ResumableRun::resume).
+    /// Its [`RunOutcome::pending_approvals`] lists the gate nodes awaiting
+    /// approval.
+    pub fn outcome(&self) -> &RunOutcome {
+        &self.outcome
+    }
+
+    /// Resumes the run from its checkpoint, approving the currently-interrupted
+    /// gate node(s) so the workflow proceeds. `newly_approved` are the gate ids
+    /// being approved; they are also recorded into the run's approvals for
+    /// downstream visibility.
+    ///
+    /// tinyagents replays forward from the persisted checkpoint — the interrupted
+    /// gate re-runs (now approved, because the resume value reaches it via
+    /// `NodeContext::resume`) and its downstream continues, while nodes that
+    /// already completed are not re-executed.
+    ///
+    /// # Errors
+    /// Returns [`EngineError::Capability`] if the checkpointed resume fails (for
+    /// example, when there is no pending checkpoint to resume from).
+    pub async fn resume(&self, newly_approved: Vec<String>) -> Result<RunOutcome> {
+        let approvals_update = json!({
+            "run": { "trigger": { "approvals": newly_approved } }
+        });
+        let execution = self
+            .graph
+            .resume(
+                self.thread_id.as_str(),
+                Command::resume(json!(true)).with_update(approvals_update),
+            )
+            .await
+            .map_err(|e| EngineError::Capability(e.to_string()))?;
+
+        let pending_approvals: Vec<String> = execution
+            .interrupts
+            .iter()
+            .map(|interrupt| interrupt.node.as_str().to_string())
+            .collect();
+
+        Ok(RunOutcome {
+            output: execution.state,
+            pending_approvals,
+        })
+    }
+}
+
+/// Runs `workflow` like [`run`], but returns a [`ResumableRun`] whose compiled
+/// graph (and checkpointer) is kept alive so [`ResumableRun::resume`] can
+/// continue from the persisted checkpoint without re-executing completed nodes.
+///
+/// A no-op [`RunObserver`] is installed; all execution behavior is identical to
+/// [`run`].
+///
+/// # Errors
+/// Same as [`run`].
+pub async fn run_resumable(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+) -> Result<ResumableRun> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    let (graph, thread_id, outcome) =
+        build_and_run(workflow, input, capabilities, &observer).await?;
+    Ok(ResumableRun {
+        graph,
+        thread_id,
+        outcome,
+    })
 }
 
 #[cfg(test)]
@@ -1278,6 +1398,64 @@ mod tests {
         assert!(
             !done.output["nodes"]["downstream"]["items"].is_null(),
             "downstream should run once both gates are approved via the unioned set"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumable_run_resumes_from_checkpoint() {
+        // trigger -> gate{requires_approval} -> downstream. `run_resumable` pauses
+        // at the gate and keeps the compiled graph (and its checkpointer) alive;
+        // `ResumableRun::resume` then continues *from the checkpoint* — the gate is
+        // approved via the delivered resume value and the downstream runs, without
+        // re-executing the already-completed trigger.
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "gate".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "downstream".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let rr = run_resumable(&compiled, json!({}), &caps)
+            .await
+            .expect("run_resumable");
+        assert!(
+            rr.outcome().pending_approvals.contains(&"gate".to_string()),
+            "gate should be reported as pending approval"
+        );
+        assert!(
+            rr.outcome().output["nodes"]["downstream"].is_null(),
+            "downstream must not run while the gate is pending"
+        );
+
+        let done = rr.resume(vec!["gate".to_string()]).await.expect("resume");
+        assert!(
+            done.pending_approvals.is_empty(),
+            "no approvals should be pending once the gate is resumed, got: {:?}",
+            done.pending_approvals
+        );
+        assert!(
+            !done.output["nodes"]["downstream"]["items"].is_null(),
+            "downstream should run once the run resumes from the checkpoint"
         );
     }
 }
