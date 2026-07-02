@@ -71,6 +71,11 @@ When you make a design decision, record it in `local/docs/11-decisions.md`.
 
 ## Status
 
-Early development: a compiling **skeleton** (model, validation, capability traits,
-node-executor stubs, compiler/engine entry points) plus docs. Node logic, the
-tinyagents compiler, and OpenHuman integration are staged — see the roadmap.
+Working runtime. The engine (`engine::run`, lowering onto tinyagents with item-based
+data flow), the full node catalog (control-flow + capability-backed), conditional +
+parallel routing with a merge barrier, per-node error handling (`on_error`/retry/error
+port), `tracing`/`RunObserver` observability, HITL approval gating + `engine::resume`,
+opaque `connection_ref`, and schema/`type_version` versioning are all implemented and
+tested (unit + reference-workflow e2e; `cargo publish --dry-run` clean). Ahead: full
+jq/jaq expressions, retry backoff/timeouts, durable checkpointed replay, and the
+OpenHuman host integration (Phase B). See `local/docs/08-roadmap.md`.
