@@ -118,6 +118,8 @@ pub async fn run(
         .id
         .clone();
 
+    tracing::info!(node_count = graph.nodes.len(), trigger = %trigger_id, "workflow run starting");
+
     // Branching (multiple successors on DISTINCT ports) lowers to conditional
     // edges. Two or more edges sharing a `from_port` is parallel fan-out, which
     // still needs A2 parallel lowering.
@@ -196,12 +198,16 @@ pub async fn run(
                 }
 
                 match output {
-                    Some(output) => Ok(NodeResult::Update(items_update(
-                        &node.id,
-                        &output.items,
-                        output.port.as_deref(),
-                    )?)),
+                    Some(output) => {
+                        tracing::debug!(node = %node.id, ?node.kind, item_count = output.items.len(), "node executed");
+                        Ok(NodeResult::Update(items_update(
+                            &node.id,
+                            &output.items,
+                            output.port.as_deref(),
+                        )?))
+                    }
                     None => {
+                        tracing::warn!(node = %node.id, "node failed after retries");
                         // Retries exhausted. `last_err` is always set when the loop
                         // ran (`max_attempts >= 1`); the `None` arm is unreachable
                         // but handled defensively — emit an empty update, never panic.
@@ -281,6 +287,12 @@ pub async fn run(
         .run(initial)
         .await
         .map_err(|e| EngineError::Capability(e.to_string()))?;
+
+    tracing::info!(
+        steps = execution.steps,
+        visited = execution.visited.len(),
+        "workflow run finished"
+    );
 
     Ok(RunOutcome {
         output: execution.state,
@@ -546,6 +558,36 @@ mod tests {
         assert_eq!(
             outcome.output["nodes"]["x"]["items"][0]["json"]["error"]["node"],
             json!("x")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_is_instrumented_and_still_succeeds() {
+        // Regression guard: the `tracing` instrumentation added to `run` must not
+        // alter execution. Drive a simple `trigger -> output_parser` workflow and
+        // confirm the items still flow through with the instrumentation present.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("p", NodeKind::OutputParser),
+            ],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "p".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "ok": true }), &caps)
+            .await
+            .expect("instrumented run should still succeed");
+        assert_eq!(
+            outcome.output["nodes"]["p"]["items"][0]["json"],
+            json!({ "ok": true })
         );
     }
 }
