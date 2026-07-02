@@ -506,6 +506,57 @@ pub async fn run_with_observer(
     })
 }
 
+/// Resumes a paused run by re-running `workflow` with `newly_approved` node ids
+/// added to the run's approvals, so previously-gated nodes now execute.
+///
+/// This is the approve-and-continue completion of the human-in-the-loop loop
+/// (see docs/04 / docs/16): a run that paused with `RunOutcome::pending_approvals`
+/// is continued by supplying the approvals. It re-executes the workflow with the
+/// merged approval set (deterministic; checkpointed super-step replay is a future
+/// optimization). Prior approvals in `input["approvals"]` are preserved and unioned.
+///
+/// # Errors
+/// Same as [`run`]: returns an [`EngineError`] if lowering, compilation, or
+/// execution of the resumed run fails.
+pub async fn resume(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    newly_approved: Vec<String>,
+    capabilities: &Capabilities,
+) -> Result<RunOutcome> {
+    // Union `newly_approved` into `input["approvals"]`: start from any existing
+    // approvals array (ignoring non-string entries), then append each newly
+    // approved id that is not already present. Reading defensively — a missing or
+    // non-array `approvals` simply yields an empty starting set, never a panic.
+    let mut approvals: Vec<String> = input
+        .get("approvals")
+        .and_then(Value::as_array)
+        .map(|existing| {
+            existing
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in newly_approved {
+        if !approvals.contains(&id) {
+            approvals.push(id);
+        }
+    }
+
+    let mut merged_input = input;
+    if let Value::Object(map) = &mut merged_input {
+        map.insert("approvals".to_string(), json!(approvals));
+    } else {
+        // A non-object input carries no fields to preserve, so replace it with a
+        // fresh object holding just the merged approvals.
+        merged_input = json!({ "approvals": approvals });
+    }
+
+    run(workflow, merged_input, capabilities).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,6 +1054,118 @@ mod tests {
         assert!(
             steps.lock().unwrap().contains(&"p".to_string()),
             "on_step_finish should record the output_parser node"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_completes_a_paused_run() {
+        // trigger -> gate{requires_approval} -> downstream. Running with no
+        // approvals pauses at the gate; `resume` supplies the gate approval and
+        // drives the run to completion so the downstream node executes.
+        let gate = |id: &str| {
+            let mut gate = node(id, NodeKind::OutputParser);
+            gate.config = json!({ "requires_approval": true });
+            gate
+        };
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate("gate"),
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "gate".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "downstream".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let paused = run(&compiled, json!({}), &caps).await.expect("run");
+        assert!(
+            paused.pending_approvals.contains(&"gate".to_string()),
+            "gate should be reported as pending approval"
+        );
+        assert!(
+            paused.output["nodes"]["downstream"].is_null(),
+            "downstream must not run while the gate is pending"
+        );
+
+        let done = resume(&compiled, json!({}), vec!["gate".to_string()], &caps)
+            .await
+            .expect("resume");
+        assert!(
+            done.pending_approvals.is_empty(),
+            "no approvals should be pending once the gate is approved"
+        );
+        assert!(
+            !done.output["nodes"]["downstream"]["items"].is_null(),
+            "downstream should run once the gate is approved via resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_unions_new_approval_with_existing() {
+        // Two gates in series, each requiring approval. Start with `other` already
+        // approved in the input and resume with `gate`: the union must preserve
+        // `other` (so its gate runs) and add `gate` (so its gate runs too),
+        // letting the run reach the downstream node.
+        let gate = |id: &str| {
+            let mut gate = node(id, NodeKind::OutputParser);
+            gate.config = json!({ "requires_approval": true });
+            gate
+        };
+        let edge = |from: &str, to: &str| Edge {
+            from_node: from.to_string(),
+            from_port: "main".to_string(),
+            to_node: to.to_string(),
+            to_port: "main".to_string(),
+        };
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate("other"),
+                gate("gate"),
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "other"),
+                edge("other", "gate"),
+                edge("gate", "downstream"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let done = resume(
+            &compiled,
+            json!({ "approvals": ["other"] }),
+            vec!["gate".to_string()],
+            &caps,
+        )
+        .await
+        .expect("resume");
+        assert!(
+            done.pending_approvals.is_empty(),
+            "unioning `gate` into the existing `other` approval should clear both gates, \
+             got pending: {:?}",
+            done.pending_approvals
+        );
+        assert!(
+            !done.output["nodes"]["downstream"]["items"].is_null(),
+            "downstream should run once both gates are approved via the unioned set"
         );
     }
 }
