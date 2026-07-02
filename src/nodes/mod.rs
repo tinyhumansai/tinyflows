@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::caps::Capabilities;
 use crate::data::Item;
 use crate::error::Result;
-use crate::model::Node;
+use crate::model::{Node, NodeKind};
 
 /// The runtime context handed to a node when it executes.
 ///
@@ -72,4 +72,39 @@ impl NodeOutput {
 pub trait NodeExecutor: Send + Sync {
     /// Runs the node and returns its output (or a routing decision).
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput>;
+}
+
+/// A trigger node's executor: it echoes its input items through unchanged. The
+/// engine seeds the trigger payload directly into the run state, so at runtime
+/// the trigger is a passthrough; this executor makes the dispatch table total.
+#[derive(Debug, Default, Clone)]
+struct TriggerNode;
+
+#[async_trait]
+impl NodeExecutor for TriggerNode {
+    async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
+        Ok(NodeOutput::main(ctx.input.to_vec()))
+    }
+}
+
+/// Returns the [`NodeExecutor`] for a given [`NodeKind`].
+///
+/// Native control-flow executors live in [`control_flow`]; capability-backed
+/// ones in [`integration`]. The engine uses this to dispatch each graph node.
+#[must_use]
+pub(crate) fn executor_for(kind: &NodeKind) -> Box<dyn NodeExecutor> {
+    match kind {
+        NodeKind::Trigger => Box::new(TriggerNode),
+        NodeKind::Agent => Box::new(integration::AgentNode),
+        NodeKind::ToolCall => Box::new(integration::ToolCallNode),
+        NodeKind::HttpRequest => Box::new(integration::HttpRequestNode),
+        NodeKind::Code => Box::new(integration::CodeNode),
+        NodeKind::OutputParser => Box::new(integration::OutputParserNode),
+        NodeKind::SubWorkflow => Box::new(integration::SubWorkflowNode),
+        NodeKind::Condition => Box::new(control_flow::ConditionNode),
+        NodeKind::Switch => Box::new(control_flow::SwitchNode),
+        NodeKind::Merge => Box::new(control_flow::MergeNode),
+        NodeKind::SplitOut => Box::new(control_flow::SplitOutNode),
+        NodeKind::Transform => Box::new(control_flow::TransformNode),
+    }
 }
