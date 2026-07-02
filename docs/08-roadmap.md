@@ -7,44 +7,69 @@ its exit criteria.
 ## Current status
 
 - ✅ Crate scaffold + this documentation.
-- ✅ **A0 (in progress)**: workflow model, validation, capability traits,
-  node-executor trait + per-kind stubs, compiler/engine entry points. Crate
-  compiles, is `fmt`/`clippy -D warnings` clean, and tests pass.
-- ⬜ A1–A5, B0–B5 pending.
+- ✅ **A0–A3 landed**: workflow model + validation; the compiler/engine
+  (`engine::run` lowers onto tinyagents, per-run build, merge reducer, item-based
+  `{run, nodes:{id:{items}}}` state); native control-flow nodes (condition,
+  switch, merge, split_out, transform) with conditional routing; and all
+  capability-backed nodes (agent, tool_call, http_request, code, output_parser,
+  sub_workflow) running against mock capabilities. A minimal `=`-expression module
+  (`crate::expr`, dotted-path) covers the interim; full `jq`/`jaq`-style
+  expressions are still deferred (O1).
+- 🟡 **A4 partial**: per-node error handling (`on_error` stop/continue/route +
+  `retry` + `error` port) and `tracing`-based observability are done; HITL
+  interrupt/resume, retry backoff timing, and durable checkpointing are still
+  pending.
+- ⬜ A5 and B0–B5 pending.
+
+The public runtime works end-to-end against mock capabilities, guarded by the
+reference-workflow e2e suite (`tests/reference_workflows.rs`, feature `mock`).
 
 ## Phase A — the `tinyflows` crate
 
-### A0 — Workflow model ✅ (skeleton landed)
+### A0 — Workflow model ✅ (landed)
 - `WorkflowGraph` / `Node` / `Edge` / `Port` / `NodeKind` / `TriggerKind` with
   serde round-trip; `validate()` core checks; capability traits + mocks;
   `NodeExecutor` trait; compiler/engine entry points.
 - **Exit:** model round-trips; validation covers ids/trigger/edges; CI green.
-- **Next within A0:** golden JSON fixtures for the five
-  [reference workflows](10-reference-workflows.md).
+- **Landed:** model + validation ship; reference-workflow coverage moved into
+  the `tests/reference_workflows.rs` e2e suite.
 
-### A1 — Compiler + engine
+### A1 — Compiler + engine ✅ (landed)
 - Add `tinyagents` dependency. Implement `compile()` → `CompiledGraph<Value>`
   (fresh per definition) and `engine::run()` for the minimal trigger→node path
   with a merge-tolerant reducer.
 - **Exit:** a linear workflow runs end-to-end against mock capabilities.
+- **Landed:** `engine::run` lowers a validated graph onto tinyagents with a
+  per-run build, merge reducer, and item-based `{run, nodes:{id:{items}}}` state
+  (item-based data flow, D13).
 
-### A2 — Native control-flow nodes
+### A2 — Native control-flow nodes ✅ (landed)
 - Implement `condition`, `switch`, `merge`, `split_out`, `transform`; choose and
   wire the expression library (`jaq` or `minijinja`).
 - **Exit:** branch/switch/merge/parallel/split/loop covered by unit tests.
+- **Landed:** all five control-flow nodes plus conditional routing in the engine
+  (branch nodes route by chosen port). The expression side ships as a **minimal
+  interim** `=`-module (`crate::expr`, dotted-path); full `jq`/`jaq`-style
+  expressions remain deferred (O1).
 
-### A3 — Capability-backed nodes
+### A3 — Capability-backed nodes ✅ (landed)
 - Implement `agent` (with chat_model/memory/tool/output_parser sub-ports),
   `tool_call`, `http_request`, `code`, `output_parser`, `sub_workflow` against
   the capability traits.
 - **Exit:** all five reference workflows run green against mock capabilities.
+- **Landed:** every capability-backed node calls its `caps` trait and is
+  exercised against the mocks by the reference-workflow e2e suite.
 
-### A4 — Durability, HITL, observability
+### A4 — Durability, HITL, observability 🟡 (partial)
 - Wire tinyagents checkpointing; mid-run `Interrupt`/`resume` approval steps;
   per-node retry/backoff + timeout; tracing spans.
 - **Exit:** a workflow pauses for approval and resumes; a failing node retries.
+- **Landed:** per-node error handling (`on_error` stop/continue/route + `retry`
+  + `error` port) and `tracing`-based observability (spans/events).
+- **Pending:** HITL interrupt/resume, retry backoff timing, and durable
+  checkpointing.
 
-### A5 — Docs, e2e, publish
+### A5 — Docs, e2e, publish ⬜ (pending)
 - Finalize docs + `e2e/` reference scenarios + examples; **`cargo publish` to
   crates.io** (semver + `release.yml` publish-on-tag).
 - **Exit:** `tinyflows = "x.y"` is installable; CI green on a tagged release.

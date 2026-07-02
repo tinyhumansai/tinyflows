@@ -13,36 +13,36 @@ A capability checklist for tinyflows, with the stage each feature lands (see the
 ## Control flow
 | Feature | Status |
 |---------|--------|
-| Linear sequences | 🟡 A1 |
-| IF (condition, true/false) | 🟡 A2 |
-| Multi-way switch | 🟡 A2 |
-| Merge / fan-in (named inputs, barrier) | 🟡 A2 |
-| Parallel branches | 🟡 A1/A2 (tinyagents `with_parallel`) |
-| Split-out / per-item fan-out | 🟡 A2 |
+| Linear sequences | ✅ A1 |
+| IF (condition, true/false) | ✅ A2 |
+| Multi-way switch | ✅ A2 |
+| Merge / fan-in (named inputs, barrier) | ✅ A2 |
+| Parallel branches | 🟡 A2 (fan-out pending) |
+| Split-out / per-item fan-out | ✅ A2 |
 | Loops (bounded) | 🟡 A2 (`RecursionPolicy`) |
-| Sub-workflow (nested graph) | 🟡 A3 |
+| Sub-workflow (nested graph) | ✅ A3 |
 
 ## AI
 | Feature | Status |
 |---------|--------|
-| Agent node with chat_model / memory / tool / output_parser sub-ports | 🟡 A3 |
+| Agent node with chat_model / memory / tool / output_parser sub-ports | ✅ A3 |
 | Nested sub-agents | 🟡 A3 |
-| Structured / auto-fixing output parser | 🟡 A3 |
+| Structured / auto-fixing output parser | ✅ A3 |
 
 ## Actions & data
 | Feature | Status |
 |---------|--------|
-| Integration action (`tool_call`, curated catalog) | 🟡 A3 |
-| HTTP request (arbitrary APIs, allowlisted) | 🟡 A3 |
-| Sandboxed code (JS / Python) | 🟡 A3 |
-| Data transform / field mapping + expressions | 🟡 A2 ([data & expressions](13-data-and-expressions.md)) |
-| Item-based data flow + pairing | 🟡 A1 (D13) |
+| Integration action (`tool_call`, curated catalog) | ✅ A3 |
+| HTTP request (arbitrary APIs, allowlisted) | ✅ A3 |
+| Sandboxed code (JS / Python) | ✅ A3 |
+| Data transform / field mapping + expressions | ✅ A2, interim `=`-expr; full `jq`/`jaq` deferred (O1) ([data & expressions](13-data-and-expressions.md)) |
+| Item-based data flow + pairing | ✅ A1 (D13) |
 
 ## Reliability & safety
 | Feature | Status |
 |---------|--------|
-| Per-node error policy (stop/continue/route) + error port | 🟡 A4 ([error handling](14-error-handling.md)) |
-| Retries with backoff | 🟡 A4 |
+| Per-node error policy (stop/continue/route) + error port | ✅ A4 ([error handling](14-error-handling.md)) |
+| Retries with backoff | 🟡 A4 (retry ✅, backoff timing pending) |
 | Per-node / per-run timeouts | 🟡 A4 |
 | Human-in-the-loop approval (interrupt/resume) | 🟡 A4 |
 | Durable checkpointing / resume | 🟡 A4 |
@@ -54,7 +54,7 @@ A capability checklist for tinyflows, with the stage each feature lands (see the
 |---------|--------|
 | Opaque `connection_ref` (secrets host-side) | 🟡 A3 ([credentials](15-credentials-and-connections.md)) |
 | Run / execution-step record + inspect data | 🟡 A4 ([observability](16-observability-and-runs.md)) |
-| Tracing spans + `RunObserver` hook | 🟡 A4 |
+| Tracing spans + `RunObserver` hook | ✅ A4 (tracing spans/events; `RunObserver` hook pending) |
 
 ## Authoring & lifecycle
 | Feature | Status |

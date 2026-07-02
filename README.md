@@ -7,9 +7,16 @@ operational ergonomics.
 
 ## Status
 
-tinyflows is in early development. The repository currently contains the initial
-Rust crate and project scaffolding. The public library surface is intentionally
-small while the workflow runtime takes shape.
+tinyflows has a working runtime. The workflow engine (`engine::run`, which
+compiles a validated graph onto the tinyagents state-graph engine with item-based
+data flow), the full node catalog — control flow (condition, switch, merge,
+split-out, transform) plus capability-backed nodes (agent, tool_call,
+http_request, code, output_parser, sub_workflow) — per-node error handling
+(`on_error` policy, retry, error port), and `tracing`-based observability are all
+implemented and tested. The public runtime runs end-to-end against mock
+capabilities, guarded by a reference-workflow e2e suite. Still ahead: durable
+checkpointing and human-in-the-loop approval, visual and agent-first authoring
+(host-side), and publishing to crates.io.
 
 ## Documentation
 
