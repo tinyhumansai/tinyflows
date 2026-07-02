@@ -50,12 +50,15 @@ assert_eq!(tinyflows::product_name(), "tinyflows");
 
 ## Contributing
 
-Contributions are welcome. Before opening a pull request, please:
+Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+[coding guidelines](docs/21-coding-guidelines.md). In short:
 
 1. Keep changes focused and easy to review.
-2. Run `cargo fmt` and `cargo test`.
+2. Run the CI checks locally: `cargo fmt --all -- --check`,
+   `cargo clippy --all-targets --all-features -- -D warnings`, and
+   `cargo test --all-features`.
 3. Include tests or documentation when behavior changes.
-4. Explain the workflow use case your change supports.
+4. Follow the host-agnostic, no-`unsafe`, fully-documented conventions.
 
 ## License
 

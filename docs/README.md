@@ -31,6 +31,7 @@ can plug in its own LLM, integration, HTTP, and code-execution capabilities.
 | 18 | [Versioning & migration](18-versioning-and-migration.md) | Schema + per-node `type_version`, load-time migrations |
 | 19 | [Feature matrix](19-feature-matrix.md) | Capability checklist with the stage each feature lands |
 | 20 | [Glossary](20-glossary.md) | Terms used across the docs |
+| 21 | [Coding guidelines](21-coding-guidelines.md) | Rust + repo coding standards, the local check loop, PR rules |
 
 ## Status
 
