@@ -28,6 +28,7 @@ pub mod error;
 pub mod expr;
 pub mod model;
 pub mod nodes;
+pub mod observability;
 pub mod validate;
 
 /// The crate name published to crates.io.
