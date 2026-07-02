@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
 thiserror = "2"
+futures-timer = "3"
 tinyagents = "1.2"
 tracing = "0.1"
 jaq-core = "3.1.0"

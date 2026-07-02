@@ -27,7 +27,7 @@ use tinyagents::{
 use crate::caps::Capabilities;
 use crate::compiler::CompiledWorkflow;
 use crate::data::Item;
-use crate::error::{EngineError, Result};
+use crate::error::{EngineError, Result, ValidationError};
 use crate::model::NodeKind;
 use crate::nodes::{NodeContext, executor_for};
 use crate::observability::{ExecutionStep, Run, RunObserver, RunStatus, StepStatus};
@@ -168,13 +168,26 @@ pub async fn run_with_observer(
     // handler closures, which can't otherwise push to a common `Vec`.
     let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let trigger_id = graph
+    let trigger = graph
         .trigger()
-        .ok_or(EngineError::Unimplemented(
-            "workflow must have exactly one trigger",
-        ))?
-        .id
-        .clone();
+        .ok_or(EngineError::Validation(ValidationError::MissingTrigger))?;
+    let trigger_id = trigger.id.clone();
+
+    // Run-level knobs are read from the trigger node's config — the natural
+    // run-level config holder, since `WorkflowGraph` has no top-level config.
+    // `recursion_limit` bounds loops (tinyagents' default is 50) and
+    // `node_timeout_secs` sets a per-node timeout for the whole run; both are
+    // applied to the builder below.
+    let recursion_limit = trigger
+        .config
+        .get("recursion_limit")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0);
+    let node_timeout_secs = trigger
+        .config
+        .get("node_timeout_secs")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0);
 
     tracing::info!(node_count = graph.nodes.len(), trigger = %trigger_id, "workflow run starting");
 
@@ -214,6 +227,12 @@ pub async fn run_with_observer(
     let mut builder = GraphBuilder::<Value, Value>::new()
         .with_parallel(true)
         .set_reducer(MergeReducer);
+    if let Some(limit) = recursion_limit {
+        builder = builder.with_recursion_limit(limit as usize);
+    }
+    if let Some(secs) = node_timeout_secs {
+        builder = builder.with_node_timeout(std::time::Duration::from_secs(secs));
+    }
 
     for node in &graph.nodes {
         let node = node.clone();
@@ -310,15 +329,31 @@ pub async fn run_with_observer(
                     .and_then(Value::as_u64)
                     .unwrap_or(1)
                     .max(1);
+                // Backoff between attempts. `backoff_ms` is the base delay (default
+                // 0 = no wait); `backoff` selects `"fixed"` (default, constant delay)
+                // or `"exponential"` (`backoff_ms * 2^attempt_index`). We use a
+                // runtime-agnostic timer (`futures_timer::Delay`) so the crate stays
+                // host-agnostic and pulls in no specific async runtime.
+                let backoff_ms = node
+                    .config
+                    .get("retry")
+                    .and_then(|retry| retry.get("backoff_ms"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let exponential = node
+                    .config
+                    .get("retry")
+                    .and_then(|retry| retry.get("backoff"))
+                    .and_then(Value::as_str)
+                    == Some("exponential");
 
                 // Attempt the executor up to `max_attempts` times: use the first
-                // `Ok`, otherwise keep the last `Err`. Backoff timing (sleep between
-                // attempts) is intentionally deferred — the library is
-                // runtime-agnostic and must not depend on a timer/runtime here.
+                // `Ok`, otherwise keep the last `Err`. Between failed attempts (never
+                // after the final one), wait for the configured backoff delay.
                 let mut output = None;
                 let mut last_err: Option<EngineError> = None;
                 let started = Instant::now();
-                for _ in 0..max_attempts {
+                for attempt in 0..max_attempts {
                     let ctx = NodeContext {
                         node: &node,
                         input: &input,
@@ -331,6 +366,22 @@ pub async fn run_with_observer(
                             break;
                         }
                         Err(err) => last_err = Some(err),
+                    }
+                    // Sleep before the next attempt, but not after the last one.
+                    if backoff_ms > 0 && attempt + 1 < max_attempts {
+                        // `attempt` is the 0-based index of the attempt that just
+                        // failed; exponential grows the base by `2^attempt`. All
+                        // math saturates and the delay is capped at 60s so a large
+                        // `backoff_ms`/attempt count can never overflow or hang.
+                        let delay = if exponential {
+                            2u64.checked_pow(attempt as u32)
+                                .and_then(|factor| backoff_ms.checked_mul(factor))
+                                .unwrap_or(u64::MAX)
+                        } else {
+                            backoff_ms
+                        }
+                        .min(60_000);
+                        futures_timer::Delay::new(std::time::Duration::from_millis(delay)).await;
                     }
                 }
                 let duration_ms = started.elapsed().as_millis();
@@ -882,6 +933,67 @@ mod tests {
         assert_eq!(
             outcome.output["nodes"]["x"]["items"][0]["json"]["error"]["node"],
             json!("x")
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_backoff_runs_without_hanging() {
+        // trigger -> tool_call with no slug (deterministic error) and an
+        // exponential backoff of 1ms across 2 attempts. The tiny delay proves the
+        // backoff path executes between attempts without hanging, and `on_error:
+        // continue` lets the run complete with an error item. (Actual timeout/limit
+        // firing is enforced and tested by tinyagents itself.)
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({
+            "retry": { "max_attempts": 2, "backoff_ms": 1, "backoff": "exponential" },
+            "on_error": "continue"
+        });
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), tool],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "x".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({}), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["x"]["items"][0]["json"]["error"]["node"],
+            json!("x")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_level_knobs_accepted() {
+        // A trigger carrying run-level `recursion_limit` and `node_timeout_secs`
+        // wired to a downstream passthrough. This proves the knobs are read from the
+        // trigger config and wired onto the builder without breaking execution; the
+        // downstream node still runs. (tinyagents itself tests the knobs actually
+        // firing.)
+        let mut trigger = node("t", NodeKind::Trigger);
+        trigger.config = json!({ "recursion_limit": 100, "node_timeout_secs": 30 });
+        let graph = WorkflowGraph {
+            nodes: vec![trigger, node("p", NodeKind::OutputParser)],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "p".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "x": 1 }), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["p"]["items"][0]["json"],
+            json!({ "x": 1 })
         );
     }
 
