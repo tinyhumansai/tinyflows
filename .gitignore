@@ -1,1 +1,12 @@
 /target
+
+# macOS
+.DS_Store
+
+# Claude Code — local, per-machine
+/CLAUDE.local.md
+/.claude/settings.local.json
+
+# Parallel-build tracker (gitignored; symlinked into every worktree)
+/local/
+/local
