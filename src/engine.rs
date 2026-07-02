@@ -89,6 +89,13 @@ fn items_update(node_id: &str, items: &[Item], port: Option<&str>) -> tinyagents
     Ok(Value::Object(root))
 }
 
+/// Builds the error item a node emits when its `on_error` policy is `continue` or
+/// `route`, turning a failed execution into routable data rather than a run-ending
+/// event: `{ "error": { "message", "node" } }`.
+fn error_item(node_id: &str, e: &EngineError) -> Item {
+    Item::new(json!({ "error": { "message": e.to_string(), "node": node_id } }))
+}
+
 /// Executes a compiled workflow with the given trigger `input` and host
 /// `capabilities`, driving it to completion.
 ///
@@ -149,23 +156,77 @@ pub async fn run(
                 }
                 let input = collect_input(&state, &predecessors);
                 let run_meta = state.get("run").cloned().unwrap_or(Value::Null);
-                let output = {
+
+                // Per-node error policy, read from free-form `node.config` (no model
+                // struct change). `on_error` selects what happens once retries are
+                // exhausted; `retry.max_attempts` bounds the attempts.
+                let on_error = node
+                    .config
+                    .get("on_error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stop");
+                let max_attempts = node
+                    .config
+                    .get("retry")
+                    .and_then(|retry| retry.get("max_attempts"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1);
+
+                // Attempt the executor up to `max_attempts` times: use the first
+                // `Ok`, otherwise keep the last `Err`. Backoff timing (sleep between
+                // attempts) is intentionally deferred — the library is
+                // runtime-agnostic and must not depend on a timer/runtime here.
+                let mut output = None;
+                let mut last_err: Option<EngineError> = None;
+                for _ in 0..max_attempts {
                     let ctx = NodeContext {
                         node: &node,
                         input: &input,
                         run: &run_meta,
                         caps: &caps,
                     };
-                    executor_for(&node.kind)
-                        .execute(ctx)
-                        .await
-                        .map_err(|e| TinyAgentsError::Graph(e.to_string()))?
-                };
-                Ok(NodeResult::Update(items_update(
-                    &node.id,
-                    &output.items,
-                    output.port.as_deref(),
-                )?))
+                    match executor_for(&node.kind).execute(ctx).await {
+                        Ok(ok) => {
+                            output = Some(ok);
+                            break;
+                        }
+                        Err(err) => last_err = Some(err),
+                    }
+                }
+
+                match output {
+                    Some(output) => Ok(NodeResult::Update(items_update(
+                        &node.id,
+                        &output.items,
+                        output.port.as_deref(),
+                    )?)),
+                    None => {
+                        // Retries exhausted. `last_err` is always set when the loop
+                        // ran (`max_attempts >= 1`); the `None` arm is unreachable
+                        // but handled defensively — emit an empty update, never panic.
+                        let Some(err) = last_err else {
+                            return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                        };
+                        match on_error {
+                            // Turn the failure into data on the default port.
+                            "continue" => Ok(NodeResult::Update(items_update(
+                                &node.id,
+                                &[error_item(&node.id, &err)],
+                                None,
+                            )?)),
+                            // Turn the failure into data on the `error` port so the
+                            // graph can route it to a recovery sub-graph.
+                            "route" => Ok(NodeResult::Update(items_update(
+                                &node.id,
+                                &[error_item(&node.id, &err)],
+                                Some("error"),
+                            )?)),
+                            // "stop" (default) and any unknown policy fail the run.
+                            _ => Err(TinyAgentsError::Graph(err.to_string())),
+                        }
+                    }
+                }
             }
         });
     }
@@ -376,5 +437,115 @@ mod tests {
             .await
             .expect_err("fan-out");
         assert!(matches!(error, EngineError::Unimplemented(_)));
+    }
+
+    #[tokio::test]
+    async fn on_error_continue_emits_error_item() {
+        // A `tool_call` with no `slug` deterministically errors; `on_error:
+        // continue` turns that into an error item on the default port so the run
+        // still completes.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "on_error": "continue" });
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), tool],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "x".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({}), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["x"]["items"][0]["json"]["error"]["node"],
+            json!("x")
+        );
+    }
+
+    #[tokio::test]
+    async fn on_error_route_sends_error_item_to_error_port() {
+        // `on_error: route` emits the error item on the `error` port; an edge from
+        // that port must carry it into the downstream handler.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "on_error": "route" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                tool,
+                node("h", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "x".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "x".to_string(),
+                    from_port: "error".to_string(),
+                    to_node: "h".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({}), &caps).await.expect("run");
+        assert!(
+            !outcome.output["nodes"]["h"]["items"][0]["json"]["error"].is_null(),
+            "handler should have received the routed error item"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_error_stop_is_default() {
+        // No `on_error` config: the tool_call's error must fail the whole run.
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), node("x", NodeKind::ToolCall)],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "x".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        assert!(run(&compiled, json!({}), &caps).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn retry_then_continue_completes() {
+        // Retries are exhausted (the tool_call errors every attempt), then
+        // `on_error: continue` yields an error item and the run completes.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "retry": { "max_attempts": 3 }, "on_error": "continue" });
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), tool],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "x".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({}), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["x"]["items"][0]["json"]["error"]["node"],
+            json!("x")
+        );
     }
 }
