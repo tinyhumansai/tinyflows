@@ -10,8 +10,12 @@
 //! Stage A1 lowers the **linear** path (one successor per node). Branching,
 //! parallel, and fan-in lowering land in A2. See `docs/04-execution-engine.md`.
 
+use std::sync::Arc;
+
 use serde_json::{Map, Value, json};
-use tinyagents::{END, GraphBuilder, NodeResult, StateReducer, TinyAgentsError};
+use tinyagents::{
+    END, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeResult, StateReducer, TinyAgentsError,
+};
 
 use crate::caps::Capabilities;
 use crate::compiler::CompiledWorkflow;
@@ -25,6 +29,11 @@ use crate::nodes::{NodeContext, executor_for};
 pub struct RunOutcome {
     /// The final run state after the terminal node(s) completed.
     pub output: Value,
+    /// Node ids that paused the run awaiting human approval. A node is listed
+    /// here when it is an approval gate (`config.requires_approval == true`)
+    /// whose id was not present in the run input's `approvals` array; its
+    /// downstream did not run. Empty for a fully completed run.
+    pub pending_approvals: Vec<String>,
 }
 
 /// Reducer that deep-merges each node's partial `{ "nodes": { id: { items } } }`
@@ -156,6 +165,45 @@ pub async fn run(
                     // The trigger payload is pre-seeded into the state; no-op update.
                     return Ok(NodeResult::Update(json!({})));
                 }
+
+                // Human-in-the-loop approval gate. A node whose config sets
+                // `requires_approval: true` must not execute until its id is
+                // listed in the run input's `approvals` array (readable at
+                // `state["run"]["trigger"]["approvals"]`). Until then it pauses
+                // the run via a tinyagents interrupt, so its downstream never
+                // runs and the run reports the pending node.
+                let requires_approval = node
+                    .config
+                    .get("requires_approval")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if requires_approval {
+                    let approved = state
+                        .get("run")
+                        .and_then(|run| run.get("trigger"))
+                        .and_then(|trigger| trigger.get("approvals"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|approvals| {
+                            approvals
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .any(|id| id == node.id)
+                        });
+                    if !approved {
+                        tracing::info!(node = %node.id, "node paused awaiting approval");
+                        let payload = if node.config.is_null() {
+                            json!({})
+                        } else {
+                            node.config.clone()
+                        };
+                        return Ok(NodeResult::Interrupt(Interrupt {
+                            id: node.id.clone(),
+                            node: node.id.clone().into(),
+                            payload,
+                        }));
+                    }
+                }
+
                 let input = collect_input(&state, &predecessors);
                 let run_meta = state.get("run").cloned().unwrap_or(Value::Null);
 
@@ -239,6 +287,16 @@ pub async fn run(
 
     builder = builder.set_entry(trigger_id.clone());
     for node in &graph.nodes {
+        // Permit the interrupt at every approval-gate node so the engine can
+        // pause there (the gate emits the interrupt from its handler above).
+        if node
+            .config
+            .get("requires_approval")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            builder = builder.mark_interrupt(node.id.clone());
+        }
         let outgoing: Vec<_> = graph
             .edges
             .iter()
@@ -274,9 +332,13 @@ pub async fn run(
         }
     }
 
+    // A checkpointer (plus a thread id on the run below) is required for
+    // tinyagents to persist the interrupt boundary and hand pending approvals
+    // back to us; an in-memory one keeps the crate host-agnostic and dep-free.
     let compiled = builder
         .compile()
-        .map_err(|e| EngineError::Capability(e.to_string()))?;
+        .map_err(|e| EngineError::Capability(e.to_string()))?
+        .with_checkpointer(Arc::new(InMemoryCheckpointer::<Value>::default()));
 
     let seed_items = items_update(&trigger_id, &[Item::new(input.clone())], None)
         .map_err(|e| EngineError::Capability(e.to_string()))?;
@@ -284,18 +346,28 @@ pub async fn run(
     merge(&mut initial, seed_items);
 
     let execution = compiled
-        .run(initial)
+        .run_with_thread(trigger_id.clone(), initial)
         .await
         .map_err(|e| EngineError::Capability(e.to_string()))?;
+
+    // Nodes that paused the run awaiting approval, surfaced from the interrupts
+    // tinyagents returned at the boundary.
+    let pending_approvals: Vec<String> = execution
+        .interrupts
+        .iter()
+        .map(|interrupt| interrupt.node.as_str().to_string())
+        .collect();
 
     tracing::info!(
         steps = execution.steps,
         visited = execution.visited.len(),
+        pending_approvals = pending_approvals.len(),
         "workflow run finished"
     );
 
     Ok(RunOutcome {
         output: execution.state,
+        pending_approvals,
     })
 }
 
@@ -588,6 +660,93 @@ mod tests {
         assert_eq!(
             outcome.output["nodes"]["p"]["items"][0]["json"],
             json!({ "ok": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_gate_pauses_until_approved() {
+        // trigger -> gate{requires_approval} -> downstream. With no approvals in
+        // the input the gate must pause the run: it reports as pending and its
+        // downstream never runs.
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "gate".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "downstream".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "x": 1 }), &caps).await.expect("run");
+        assert!(
+            outcome.pending_approvals.contains(&"gate".to_string()),
+            "gate should be reported as pending approval"
+        );
+        assert!(
+            outcome.output["nodes"]["downstream"].is_null(),
+            "downstream must not run while the gate is pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_gate_completes() {
+        // Same graph, but the input approves the gate: the run completes fully
+        // and the downstream node runs.
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "gate".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "downstream".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "approvals": ["gate"] }), &caps)
+            .await
+            .expect("run");
+        assert!(
+            outcome.pending_approvals.is_empty(),
+            "no approvals should be pending once the gate is approved"
+        );
+        assert!(
+            !outcome.output["nodes"]["downstream"]["items"].is_null(),
+            "downstream should run once the gate is approved"
         );
     }
 }
