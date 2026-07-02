@@ -10,7 +10,9 @@
 //! Stage A1 lowers the **linear** path (one successor per node). Branching,
 //! parallel, and fan-in lowering land in A2. See `docs/04-execution-engine.md`.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde_json::{Map, Value, json};
 use tinyagents::{
@@ -23,6 +25,11 @@ use crate::data::Item;
 use crate::error::{EngineError, Result};
 use crate::model::NodeKind;
 use crate::nodes::{NodeContext, executor_for};
+use crate::observability::{ExecutionStep, Run, RunObserver, RunStatus, StepStatus};
+
+/// Source of process-local run ids. Monotonic and cheap; deliberately not
+/// time- or random-based so ids stay deterministic within a process.
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(0);
 
 /// The result of a completed workflow run.
 #[derive(Debug, Clone)]
@@ -108,6 +115,9 @@ fn error_item(node_id: &str, e: &EngineError) -> Item {
 /// Executes a compiled workflow with the given trigger `input` and host
 /// `capabilities`, driving it to completion.
 ///
+/// This installs a no-op [`RunObserver`]; use [`run_with_observer`] to receive
+/// run/step observability records as the run executes.
+///
 /// # Errors
 /// Returns an [`EngineError`] if lowering, compilation, or execution fails —
 /// including any error a node's executor produces. A node kind whose executor is
@@ -117,7 +127,41 @@ pub async fn run(
     input: Value,
     capabilities: &Capabilities,
 ) -> Result<RunOutcome> {
+    run_with_observer(
+        workflow,
+        input,
+        capabilities,
+        &(Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>),
+    )
+    .await
+}
+
+/// Like [`run`], but reports run/step records to `observer` as the run executes:
+/// [`RunObserver::on_run_start`] fires once before any node runs,
+/// [`RunObserver::on_step_finish`] once per non-trigger node as it finishes, and
+/// [`RunObserver::on_run_finish`] once with the assembled [`Run`]. All execution
+/// behavior (retry, `on_error`, HITL interrupts, conditional routing, tracing) is
+/// identical to [`run`].
+///
+/// # Errors
+/// Same as [`run`].
+pub async fn run_with_observer(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    observer: &Arc<dyn RunObserver>,
+) -> Result<RunOutcome> {
     let graph = &workflow.graph;
+
+    // Process-local, monotonic run id — no time/random source.
+    let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
+    observer.on_run_start(&run_id);
+
+    // Node handlers stream finished steps here (they also fire
+    // `on_step_finish`); the engine folds this into the final `Run`. A shared
+    // `Mutex` is the simplest correct sink across the `'static + Send + Sync`
+    // handler closures, which can't otherwise push to a common `Vec`.
+    let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
 
     let trigger_id = graph
         .trigger()
@@ -154,12 +198,16 @@ pub async fn run(
             .map(|e| e.from_node.clone())
             .collect();
         let caps = capabilities.clone();
+        let observer = observer.clone();
+        let steps = steps.clone();
         let is_trigger = node.kind == NodeKind::Trigger;
 
         builder = builder.add_node(node.id.clone(), move |state: Value, _ctx| {
             let node = node.clone();
             let predecessors = predecessors.clone();
             let caps = caps.clone();
+            let observer = observer.clone();
+            let steps = steps.clone();
             async move {
                 if is_trigger {
                     // The trigger payload is pre-seeded into the state; no-op update.
@@ -229,6 +277,7 @@ pub async fn run(
                 // runtime-agnostic and must not depend on a timer/runtime here.
                 let mut output = None;
                 let mut last_err: Option<EngineError> = None;
+                let started = Instant::now();
                 for _ in 0..max_attempts {
                     let ctx = NodeContext {
                         node: &node,
@@ -244,10 +293,19 @@ pub async fn run(
                         Err(err) => last_err = Some(err),
                     }
                 }
+                let duration_ms = started.elapsed().as_millis();
 
                 match output {
                     Some(output) => {
                         tracing::debug!(node = %node.id, ?node.kind, item_count = output.items.len(), "node executed");
+                        let step = ExecutionStep {
+                            node_id: node.id.clone(),
+                            status: StepStatus::Success,
+                            output: serde_json::to_value(&output.items).unwrap_or(Value::Null),
+                            duration_ms,
+                        };
+                        steps.lock().expect("steps mutex poisoned").push(step.clone());
+                        observer.on_step_finish(&step);
                         Ok(NodeResult::Update(items_update(
                             &node.id,
                             &output.items,
@@ -256,6 +314,14 @@ pub async fn run(
                     }
                     None => {
                         tracing::warn!(node = %node.id, "node failed after retries");
+                        let step = ExecutionStep {
+                            node_id: node.id.clone(),
+                            status: StepStatus::Error,
+                            output: Value::Null,
+                            duration_ms,
+                        };
+                        steps.lock().expect("steps mutex poisoned").push(step.clone());
+                        observer.on_step_finish(&step);
                         // Retries exhausted. `last_err` is always set when the loop
                         // ran (`max_attempts >= 1`); the `None` arm is unreachable
                         // but handled defensively — emit an empty update, never panic.
@@ -365,6 +431,16 @@ pub async fn run(
         "workflow run finished"
     );
 
+    // Reaching here means the run settled without a `stop`-policy failure
+    // (those bubble out as `Err` above), so it Completed. Per-step Error status
+    // is recorded independently on nodes handled by `continue`/`route`.
+    let run_record = Run {
+        id: run_id,
+        status: RunStatus::Completed,
+        steps: steps.lock().expect("steps mutex poisoned").clone(),
+    };
+    observer.on_run_finish(&run_record);
+
     Ok(RunOutcome {
         output: execution.state,
         pending_approvals,
@@ -377,6 +453,7 @@ mod tests {
     use crate::caps::mock::mock_capabilities;
     use crate::compiler::compile;
     use crate::model::{Edge, Node, WorkflowGraph};
+    use std::sync::{Arc, Mutex};
 
     fn node(id: &str, kind: NodeKind) -> Node {
         Node {
@@ -747,6 +824,61 @@ mod tests {
         assert!(
             !outcome.output["nodes"]["downstream"]["items"].is_null(),
             "downstream should run once the gate is approved"
+        );
+    }
+
+    /// A [`RunObserver`] that records which node ids finished and how many runs
+    /// started, so a test can assert the observer hooks fired.
+    struct Capture {
+        steps: Arc<Mutex<Vec<String>>>,
+        runs: Arc<Mutex<u32>>,
+    }
+
+    impl RunObserver for Capture {
+        fn on_run_start(&self, _run_id: &str) {
+            *self.runs.lock().unwrap() += 1;
+        }
+
+        fn on_step_finish(&self, step: &ExecutionStep) {
+            self.steps.lock().unwrap().push(step.node_id.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn observer_receives_run_start_and_step_finish() {
+        // trigger -> output_parser via `run_with_observer`: on_run_start fires
+        // once and on_step_finish records the (non-trigger) output_parser node.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("p", NodeKind::OutputParser),
+            ],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "p".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let runs = Arc::new(Mutex::new(0));
+        let observer: Arc<dyn RunObserver> = Arc::new(Capture {
+            steps: steps.clone(),
+            runs: runs.clone(),
+        });
+
+        run_with_observer(&compiled, json!({ "x": 1 }), &caps, &observer)
+            .await
+            .expect("run");
+
+        assert_eq!(*runs.lock().unwrap(), 1, "on_run_start should fire once");
+        assert!(
+            steps.lock().unwrap().contains(&"p".to_string()),
+            "on_step_finish should record the output_parser node"
         );
     }
 }
