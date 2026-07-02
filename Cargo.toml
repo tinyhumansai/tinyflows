@@ -1,0 +1,9 @@
+[package]
+name = "tinyflows"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "A Rust-based, n8n-inspired workflow management solution."
+readme = "README.md"
+
+[dependencies]
