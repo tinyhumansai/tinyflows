@@ -4,12 +4,12 @@ version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
-description = "A Rust-based, n8n-inspired workflow management solution."
+description = "A Rust-based workflow management solution."
 readme = "README.md"
 repository = "https://github.com/tinyhumansai/tinyflows"
 homepage = "https://github.com/tinyhumansai/tinyflows"
 documentation = "https://docs.rs/tinyflows"
-keywords = ["automation", "workflow", "orchestration", "n8n"]
+keywords = ["automation", "workflow", "orchestration", "pipeline"]
 categories = ["command-line-utilities", "development-tools"]
 include = [
     "src/**/*.rs",
@@ -19,3 +19,16 @@ include = [
 ]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+
+[features]
+# Off by default; enables in-memory mock capability impls for downstream tests
+# and examples. Mocks are always available inside this crate's own tests.
+default = []
+mock = []
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
