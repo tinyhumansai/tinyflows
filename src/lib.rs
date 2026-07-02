@@ -22,6 +22,7 @@
 
 pub mod caps;
 pub mod compiler;
+pub mod data;
 pub mod engine;
 pub mod error;
 pub mod model;
