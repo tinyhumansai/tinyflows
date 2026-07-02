@@ -1,15 +1,14 @@
-//! Compiles a validated [`WorkflowGraph`] into a runnable form.
+//! Compiles a [`WorkflowGraph`] into a runnable handle.
 //!
-//! **Stage A1 target:** lower the graph onto a
-//! `tinyagents::graph::CompiledGraph<serde_json::Value>`, built fresh per
-//! definition (the `model_council` per-request pattern). Edges become
-//! `add_edge` / `add_conditional_edges` (branch & switch) / `add_waiting_edge`
-//! (merge), node kinds become graph nodes dispatched via [`crate::nodes`], and
-//! `serde_json::Value` is the graph state for dynamic per-node I/O.
-//! See `docs/04-execution-engine.md`.
+//! [`compile`] runs structural validation over the graph (via
+//! [`crate::validate::validate`]) and, on success, returns an opaque
+//! [`CompiledWorkflow`] holding the validated graph. Compilation is therefore
+//! validation plus handle creation — it performs no lowering itself.
 //!
-//! In this skeleton, [`compile`] validates the graph and returns an opaque
-//! [`CompiledWorkflow`] handle; the tinyagents lowering lands in A1.
+//! The graph is lowered onto a fresh `tinyagents` state graph once per run,
+//! inside [`crate::engine::run`], which captures that run's host capabilities.
+//! Building the state graph per run keeps compilation independent of any
+//! particular set of capabilities.
 
 use crate::error::Result;
 use crate::model::WorkflowGraph;

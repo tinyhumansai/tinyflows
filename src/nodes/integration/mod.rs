@@ -1,7 +1,6 @@
-//! Capability-backed node executors: agent / tool_call / http_request / code /
-//! output_parser / sub_workflow. These call the host through [`crate::caps`] and
-//! are implemented in stage A3. Each currently returns
-//! [`crate::error::EngineError::Unimplemented`].
+//! Capability-backed node executors: `agent`, `tool_call`, `http_request`,
+//! `code`, `output_parser`, and `sub_workflow`. These reach the outside world
+//! through the host capabilities in [`crate::caps`].
 //!
 //! One module per node kind so parallel work can edit them without conflicts.
 

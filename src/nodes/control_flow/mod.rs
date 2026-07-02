@@ -1,6 +1,6 @@
-//! Native control-flow node executors: if / switch / merge / split_out /
-//! transform. These are pure (no host capabilities) and are implemented in
-//! stage A2. Each currently returns [`crate::error::EngineError::Unimplemented`].
+//! Native control-flow node executors: `condition`, `switch`, `merge`,
+//! `split_out`, and `transform`. These are pure — they route and reshape data
+//! within the engine and use no host capability.
 //!
 //! One module per node kind so parallel work can edit them without conflicts.
 

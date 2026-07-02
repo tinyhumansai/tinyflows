@@ -1,9 +1,10 @@
 //! Node execution: the [`NodeExecutor`] trait and per-kind implementations.
 //!
-//! Each [`crate::model::NodeKind`] maps to a `NodeExecutor`. Native control-flow
-//! nodes live in [`control_flow`]; capability-backed nodes (which call the host
-//! via [`crate::caps`]) live in [`integration`]. Implementations are stubbed in
-//! this skeleton and completed in stages A2–A3 (see `docs/08-roadmap.md`).
+//! Each [`crate::model::NodeKind`] maps to a `NodeExecutor`: native control-flow
+//! kinds resolve to executors in [`control_flow`], while capability-backed kinds
+//! (which reach the outside world via [`crate::caps`]) resolve to executors in
+//! [`integration`]. The engine dispatches each node to its executor through
+//! `executor_for`.
 
 pub mod control_flow;
 pub mod integration;
