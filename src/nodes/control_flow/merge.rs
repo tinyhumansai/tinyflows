@@ -34,6 +34,7 @@ mod tests {
         Node {
             id: "m".to_string(),
             kind: NodeKind::Merge,
+            type_version: 1,
             name: "m".to_string(),
             config: Value::Null,
             ports: Vec::new(),

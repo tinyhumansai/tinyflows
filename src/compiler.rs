@@ -47,6 +47,7 @@ mod tests {
             nodes: vec![Node {
                 id: "t".to_string(),
                 kind: NodeKind::Trigger,
+                type_version: 1,
                 name: "start".to_string(),
                 config: serde_json::Value::Null,
                 ports: Vec::new(),

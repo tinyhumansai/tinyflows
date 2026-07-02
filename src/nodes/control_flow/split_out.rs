@@ -50,6 +50,7 @@ mod tests {
         Node {
             id: "s".to_string(),
             kind: NodeKind::SplitOut,
+            type_version: 1,
             name: "s".to_string(),
             config,
             ports: Vec::new(),
@@ -125,6 +126,7 @@ mod tests {
         let trigger = Node {
             id: "t".to_string(),
             kind: NodeKind::Trigger,
+            type_version: 1,
             name: "t".to_string(),
             config: Value::Null,
             ports: Vec::new(),

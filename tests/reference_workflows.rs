@@ -29,6 +29,7 @@ fn node(id: &str, kind: NodeKind, config: Value) -> Node {
     Node {
         id: id.to_string(),
         kind,
+        type_version: 1,
         name: id.to_string(),
         config,
         ports: vec![],

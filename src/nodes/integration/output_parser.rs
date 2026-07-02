@@ -34,6 +34,7 @@ mod tests {
         let node = Node {
             id: "p".into(),
             kind: NodeKind::OutputParser,
+            type_version: 1,
             name: "p".into(),
             config: Value::Null,
             ports: vec![],

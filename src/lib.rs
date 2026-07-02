@@ -26,6 +26,7 @@ pub mod data;
 pub mod engine;
 pub mod error;
 pub mod expr;
+pub mod migrate;
 pub mod model;
 pub mod nodes;
 pub mod observability;

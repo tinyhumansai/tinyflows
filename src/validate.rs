@@ -54,6 +54,7 @@ mod tests {
         Node {
             id: id.to_string(),
             kind,
+            type_version: 1,
             name: id.to_string(),
             config: serde_json::Value::Null,
             ports: Vec::new(),

@@ -40,6 +40,7 @@ mod tests {
                 Node {
                     id: "t".into(),
                     kind: NodeKind::Trigger,
+                    type_version: 1,
                     name: "t".into(),
                     config: Value::Null,
                     ports: vec![],
@@ -48,6 +49,7 @@ mod tests {
                 Node {
                     id: "n".into(),
                     kind,
+                    type_version: 1,
                     name: "n".into(),
                     config,
                     ports: vec![],

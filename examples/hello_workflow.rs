@@ -15,6 +15,7 @@ async fn main() {
             Node {
                 id: "t".into(),
                 kind: NodeKind::Trigger,
+                type_version: 1,
                 name: "start".into(),
                 config: Value::Null,
                 ports: vec![],
@@ -23,6 +24,7 @@ async fn main() {
             Node {
                 id: "greet".into(),
                 kind: NodeKind::Transform,
+                type_version: 1,
                 name: "greet".into(),
                 config: json!({ "set": { "greeting": "=item.name" } }),
                 ports: vec![],
