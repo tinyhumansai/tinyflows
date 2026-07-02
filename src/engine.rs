@@ -73,10 +73,15 @@ fn collect_input(state: &Value, predecessors: &[String]) -> Vec<Item> {
     items
 }
 
-/// Builds the partial state update a node contributes: `{ "nodes": { id: { items } } }`.
-fn items_update(node_id: &str, items: &[Item]) -> tinyagents::Result<Value> {
+/// Builds the partial state update a node contributes:
+/// `{ "nodes": { id: { items, port? } } }`. The chosen output `port` is recorded
+/// only when the node picked one, so conditional edges can route on it.
+fn items_update(node_id: &str, items: &[Item], port: Option<&str>) -> tinyagents::Result<Value> {
     let mut slot = Map::new();
     slot.insert("items".to_string(), serde_json::to_value(items)?);
+    if let Some(port) = port {
+        slot.insert("port".to_string(), Value::String(port.to_string()));
+    }
     let mut nodes = Map::new();
     nodes.insert(node_id.to_string(), Value::Object(slot));
     let mut root = Map::new();
@@ -106,18 +111,17 @@ pub async fn run(
         .id
         .clone();
 
-    // A1 lowers the linear path only; fan-out needs conditional/parallel lowering.
+    // Branching (multiple successors on DISTINCT ports) lowers to conditional
+    // edges. Two or more edges sharing a `from_port` is parallel fan-out, which
+    // still needs A2 parallel lowering.
     for node in &graph.nodes {
-        if graph
-            .edges
-            .iter()
-            .filter(|e| e.from_node == node.id)
-            .count()
-            > 1
-        {
-            return Err(EngineError::Unimplemented(
-                "branching / parallel lowering (stage A2)",
-            ));
+        let mut seen_ports = std::collections::HashSet::new();
+        for edge in graph.edges.iter().filter(|e| e.from_node == node.id) {
+            if !seen_ports.insert(edge.from_port.as_str()) {
+                return Err(EngineError::Unimplemented(
+                    "parallel fan-out lowering (stage A2)",
+                ));
+            }
         }
     }
 
@@ -157,18 +161,49 @@ pub async fn run(
                         .await
                         .map_err(|e| TinyAgentsError::Graph(e.to_string()))?
                 };
-                Ok(NodeResult::Update(items_update(&node.id, &output.items)?))
+                Ok(NodeResult::Update(items_update(
+                    &node.id,
+                    &output.items,
+                    output.port.as_deref(),
+                )?))
             }
         });
     }
 
-    for edge in &graph.edges {
-        builder = builder.add_edge(edge.from_node.clone(), edge.to_node.clone());
-    }
     builder = builder.set_entry(trigger_id.clone());
     for node in &graph.nodes {
-        if !graph.edges.iter().any(|e| e.from_node == node.id) {
-            builder = builder.add_edge(node.id.clone(), END);
+        let outgoing: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.from_node == node.id)
+            .collect();
+        match outgoing.as_slice() {
+            // Leaf node: nothing routes out, so it terminates the run.
+            [] => builder = builder.add_edge(node.id.clone(), END),
+            // Single successor lowers to a plain static edge.
+            [edge] => builder = builder.add_edge(node.id.clone(), edge.to_node.clone()),
+            // Branching: distinct ports lower to conditional edges keyed on the
+            // port the node recorded into state (defaulting to `main`).
+            edges => {
+                let from = node.id.clone();
+                let routes: Vec<(String, String)> = edges
+                    .iter()
+                    .map(|e| (e.from_port.clone(), e.to_node.clone()))
+                    .collect();
+                builder = builder.add_conditional_edges(
+                    node.id.clone(),
+                    move |state: &Value| -> String {
+                        state
+                            .get("nodes")
+                            .and_then(|nodes| nodes.get(&from))
+                            .and_then(|slot| slot.get("port"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("main")
+                            .to_string()
+                    },
+                    routes,
+                );
+            }
         }
     }
 
@@ -176,7 +211,7 @@ pub async fn run(
         .compile()
         .map_err(|e| EngineError::Capability(e.to_string()))?;
 
-    let seed_items = items_update(&trigger_id, &[Item::new(input.clone())])
+    let seed_items = items_update(&trigger_id, &[Item::new(input.clone())], None)
         .map_err(|e| EngineError::Capability(e.to_string()))?;
     let mut initial = json!({ "run": { "trigger": input } });
     merge(&mut initial, seed_items);
@@ -234,14 +269,17 @@ mod tests {
 
     #[tokio::test]
     async fn linear_edge_drives_downstream_node() {
-        // trigger -> transform: the transform executor is a stage-A2 stub, so the
-        // run reaches it and surfaces its error — proving edge lowering + dispatch.
+        // trigger -> output_parser (a passthrough): proves edge lowering + dispatch
+        // by checking the trigger items flow through to the downstream node.
         let graph = WorkflowGraph {
-            nodes: vec![node("t", NodeKind::Trigger), node("x", NodeKind::Transform)],
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("p", NodeKind::OutputParser),
+            ],
             edges: vec![Edge {
                 from_node: "t".to_string(),
                 from_port: "main".to_string(),
-                to_node: "x".to_string(),
+                to_node: "p".to_string(),
                 to_port: "main".to_string(),
             }],
             ..Default::default()
@@ -249,12 +287,61 @@ mod tests {
         let compiled = compile(&graph).expect("compile");
         let caps = mock_capabilities();
 
-        let error = run(&compiled, Value::Null, &caps)
+        let outcome = run(&compiled, json!({ "x": 1 }), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["p"]["items"][0]["json"],
+            json!({ "x": 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_routes_only_the_taken_branch() {
+        // trigger -> condition(field=active) branches to pass_a (true) / pass_b
+        // (false), both passthroughs. A truthy input must run only the true branch.
+        let mut condition = node("c", NodeKind::Condition);
+        condition.config = json!({ "field": "active" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                condition,
+                node("pass_a", NodeKind::OutputParser),
+                node("pass_b", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "c".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "c".to_string(),
+                    from_port: "true".to_string(),
+                    to_node: "pass_a".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "c".to_string(),
+                    from_port: "false".to_string(),
+                    to_node: "pass_b".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "active": true }), &caps)
             .await
-            .expect_err("transform stub should surface");
+            .expect("run");
         assert!(
-            error.to_string().contains("transform"),
-            "unexpected error: {error}"
+            !outcome.output["nodes"]["pass_a"]["items"].is_null(),
+            "true branch should have run"
+        );
+        assert!(
+            outcome.output["nodes"]["pass_b"].is_null(),
+            "false branch should not have run"
         );
     }
 
