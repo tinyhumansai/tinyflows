@@ -1,7 +1,7 @@
 # tinyflows
 
-tinyflows is a Rust-based workflow management project inspired by tools like
-Zapier and n8n. The goal is to provide a small, reliable foundation for building,
+tinyflows is a Rust-based workflow management project. The goal is to provide a
+small, reliable foundation for building,
 running, and managing automation workflows with Rust-native performance and
 operational ergonomics.
 
@@ -11,10 +11,19 @@ tinyflows is in early development. The repository currently contains the initial
 Rust crate and project scaffolding. The public library surface is intentionally
 small while the workflow runtime takes shape.
 
+## Documentation
+
+The design and implementation docs live in [`docs/`](docs/README.md) — start with
+the [index](docs/README.md), then [Overview](docs/00-overview.md) and
+[Architecture](docs/01-architecture.md). The [roadmap](docs/08-roadmap.md) tracks
+staged delivery, and [OpenHuman integration](docs/09-openhuman-integration.md)
+covers how tinyflows is embedded downstream.
+
 ## Project Layout
 
-- `src/` - Rust application source.
-- `docs/` - Project documentation.
+- `src/` - Rust crate source (`model`, `validate`, `caps`, `nodes`, `compiler`,
+  `engine`, `error`).
+- `docs/` - Design documentation (see [`docs/README.md`](docs/README.md)).
 - `e2e/` - End-to-end testing assets and scenarios.
 - `wiki/` - GitHub Wiki source material.
 
