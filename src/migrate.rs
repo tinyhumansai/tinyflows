@@ -29,6 +29,26 @@ use serde_json::Value;
 /// Per-node `type_version` migrations will be registered here in the same way
 /// once a node kind's `config` shape changes (see the extension point below).
 ///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+/// use tinyflows::migrate::migrate;
+///
+/// // A versionless graph gains the current `schema_version` on load.
+/// let upgraded = migrate(json!({
+///     "name": "legacy",
+///     "nodes": [],
+///     "edges": []
+/// }))
+/// .unwrap();
+/// assert_eq!(upgraded["schema_version"], json!(1));
+///
+/// // An already-current document is returned unchanged in value.
+/// let current = json!({ "schema_version": 1, "name": "ok", "nodes": [], "edges": [] });
+/// assert_eq!(migrate(current.clone()).unwrap(), current);
+/// ```
+///
 /// # Errors
 ///
 /// Returns an error if a future migration step fails. The current no-op steps
@@ -124,5 +144,114 @@ mod tests {
             result.is_err(),
             "unknown node kind must fail to deserialize"
         );
+    }
+
+    #[test]
+    fn versionless_graph_gains_schema_and_node_type_version_defaults() {
+        // A graph with neither `schema_version` nor node `type_version` set.
+        let raw = json!({
+            "name": "legacy",
+            "nodes": [
+                { "id": "t", "kind": "trigger", "name": "Trigger" },
+                { "id": "a", "kind": "agent", "name": "Agent" }
+            ],
+            "edges": []
+        });
+
+        let upgraded = migrate(raw).expect("migrate");
+        // `schema_version` is stamped at the top level by migrate itself.
+        assert_eq!(upgraded["schema_version"], json!(CURRENT_SCHEMA_VERSION));
+
+        // Node `type_version` is filled by the serde default on deserialize.
+        let graph: WorkflowGraph = serde_json::from_value(upgraded).expect("deserialize");
+        assert_eq!(graph.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(graph.nodes.iter().all(|n| n.type_version == 1));
+    }
+
+    #[test]
+    fn already_current_document_passes_through_unchanged() {
+        let current = json!({
+            "schema_version": CURRENT_SCHEMA_VERSION,
+            "name": "ok",
+            "nodes": [
+                { "id": "t", "kind": "trigger", "type_version": 1, "name": "Trigger" }
+            ],
+            "edges": []
+        });
+
+        let out = migrate(current.clone()).expect("migrate");
+        // Value is byte-for-byte identical: no fields added, removed, or changed.
+        assert_eq!(out, current);
+    }
+
+    #[test]
+    fn migrate_is_idempotent() {
+        let raw = json!({
+            "name": "legacy",
+            "nodes": [ { "id": "t", "kind": "trigger", "name": "Trigger" } ],
+            "edges": []
+        });
+
+        let once = migrate(raw).expect("first migrate");
+        let twice = migrate(once.clone()).expect("second migrate");
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn explicit_zero_schema_version_is_upgraded() {
+        // An explicit `schema_version: 0` (predates the field semantically) is
+        // stamped up to the current version.
+        let raw = json!({
+            "schema_version": 0,
+            "name": "legacy",
+            "nodes": [],
+            "edges": []
+        });
+
+        let upgraded = migrate(raw).expect("migrate");
+        assert_eq!(upgraded["schema_version"], json!(CURRENT_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn non_object_input_is_returned_unchanged() {
+        // migrate reads `schema_version` defensively (absent → 0) and only
+        // stamps into `Value::Object`, so non-object JSON is passed through
+        // untouched rather than panicking.
+        assert_eq!(migrate(json!(42)).expect("number"), json!(42));
+        assert_eq!(migrate(json!("text")).expect("string"), json!("text"));
+        assert_eq!(migrate(json!([1, 2, 3])).expect("array"), json!([1, 2, 3]));
+        assert_eq!(migrate(json!(null)).expect("null"), json!(null));
+    }
+
+    #[test]
+    fn full_graph_round_trips_through_migrate() {
+        // A complete graph migrates, deserializes, re-serializes, and migrates
+        // again to the same typed model.
+        let raw = json!({
+            "schema_version": 1,
+            "id": "wf_1",
+            "name": "demo",
+            "nodes": [
+                { "id": "t", "kind": "trigger", "type_version": 1, "name": "Trigger",
+                  "config": { "trigger_kind": "manual" } },
+                { "id": "a", "kind": "agent", "type_version": 1, "name": "Agent" }
+            ],
+            "edges": [
+                { "from_node": "t", "from_port": "main", "to_node": "a", "to_port": "main" }
+            ]
+        });
+
+        let upgraded = migrate(raw).expect("migrate");
+        let graph: WorkflowGraph =
+            serde_json::from_value(upgraded).expect("deserialize migrated graph");
+
+        let reserialized = serde_json::to_value(&graph).expect("serialize");
+        let remigrated = migrate(reserialized).expect("re-migrate");
+        let graph_again: WorkflowGraph =
+            serde_json::from_value(remigrated).expect("deserialize again");
+
+        assert_eq!(graph, graph_again);
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
     }
 }

@@ -38,6 +38,28 @@ pub fn is_expression(s: &str) -> bool {
 /// the [module docs](self)), returning its first output or [`Value::Null`].
 /// Non-expression values are returned as a literal clone.
 ///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+/// use tinyflows::expr::evaluate;
+///
+/// let scope = json!({ "user": { "name": "Ada" }, "nums": [1, 2, 3] });
+///
+/// // A simple dotted path walks the scope segment by segment.
+/// assert_eq!(evaluate(&json!("=user.name"), &scope), json!("Ada"));
+///
+/// // A leading dot routes to the jq engine; here, the array length.
+/// assert_eq!(evaluate(&json!("=.nums | length"), &scope), json!(3));
+///
+/// // A missing path yields null rather than erroring.
+/// assert_eq!(evaluate(&json!("=user.email"), &scope), json!(null));
+///
+/// // Non-expression values pass through as a literal clone.
+/// assert_eq!(evaluate(&json!("literal"), &scope), json!("literal"));
+/// assert_eq!(evaluate(&json!(42), &scope), json!(42));
+/// ```
+///
 /// [jq]: https://jqlang.org/
 #[must_use]
 pub fn evaluate(value: &Value, scope: &Value) -> Value {
@@ -195,5 +217,180 @@ mod tests {
         // `empty` produces no outputs.
         let scope = json!({});
         assert_eq!(evaluate(&json!("=empty"), &scope), Value::Null);
+    }
+
+    // --- is_expression -----------------------------------------------------
+
+    #[test]
+    fn is_expression_detects_equals_prefix() {
+        assert!(is_expression("=x"));
+        assert!(is_expression("=")); // bare `=` is still flagged as an expression
+        assert!(!is_expression("x"));
+        assert!(!is_expression("")); // empty is not an expression
+        assert!(!is_expression(" =x")); // leading space defeats the prefix
+    }
+
+    // --- literal passthrough ----------------------------------------------
+
+    #[test]
+    fn passes_through_non_equals_string() {
+        let scope = json!({ "a": 1 });
+        assert_eq!(evaluate(&json!("plain"), &scope), json!("plain"));
+        // A string that merely contains `=` (not a prefix) is still a literal.
+        assert_eq!(evaluate(&json!("a=b"), &scope), json!("a=b"));
+    }
+
+    #[test]
+    fn passes_through_non_string_scalars() {
+        let scope = json!({});
+        assert_eq!(evaluate(&json!(42), &scope), json!(42));
+        assert_eq!(evaluate(&json!(3.5), &scope), json!(3.5));
+        assert_eq!(evaluate(&json!(true), &scope), json!(true));
+        assert_eq!(evaluate(&json!(false), &scope), json!(false));
+        assert_eq!(evaluate(&json!(null), &scope), json!(null));
+    }
+
+    #[test]
+    fn passes_through_composite_literals() {
+        let scope = json!({});
+        assert_eq!(evaluate(&json!([1, 2, 3]), &scope), json!([1, 2, 3]));
+        assert_eq!(evaluate(&json!({ "k": "v" }), &scope), json!({ "k": "v" }));
+    }
+
+    // --- dotted-path fast path --------------------------------------------
+
+    #[test]
+    fn dotted_path_resolves_nested() {
+        let scope = json!({ "a": { "b": { "c": 7 } } });
+        assert_eq!(evaluate(&json!("=a.b.c"), &scope), json!(7));
+    }
+
+    #[test]
+    fn dotted_path_missing_segment_is_null() {
+        let scope = json!({ "a": { "b": {} } });
+        assert_eq!(evaluate(&json!("=a.b.c"), &scope), Value::Null);
+        // A missing top-level segment is also Null.
+        assert_eq!(evaluate(&json!("=x.y"), &scope), Value::Null);
+    }
+
+    #[test]
+    fn dotted_path_through_non_object_is_null() {
+        // Descending into a scalar (here a number) yields Null rather than
+        // panicking: `Value::get` on a non-object returns `None`.
+        let scope = json!({ "a": 5 });
+        assert_eq!(evaluate(&json!("=a.b"), &scope), Value::Null);
+        // Same for descending into an array with a name segment.
+        let scope = json!({ "a": [1, 2, 3] });
+        assert_eq!(evaluate(&json!("=a.b"), &scope), Value::Null);
+    }
+
+    #[test]
+    fn dotted_path_single_segment() {
+        let scope = json!({ "a": { "nested": true } });
+        assert_eq!(evaluate(&json!("=a"), &scope), json!({ "nested": true }));
+    }
+
+    // --- jq programs -------------------------------------------------------
+
+    #[test]
+    fn jq_add_sums_array() {
+        let scope = json!({ "item": { "nums": [1, 2, 3, 4] } });
+        assert_eq!(evaluate(&json!("=.item.nums | add"), &scope), json!(10));
+    }
+
+    #[test]
+    fn jq_length_of_string() {
+        let scope = json!({ "item": { "name": "hello" } });
+        assert_eq!(evaluate(&json!("=.item.name | length"), &scope), json!(5));
+    }
+
+    #[test]
+    fn jq_map_doubles_each_element() {
+        let scope = json!({ "item": { "nums": [1, 2, 3] } });
+        assert_eq!(
+            evaluate(&json!("=.item.nums | map(. * 2)"), &scope),
+            json!([2, 4, 6])
+        );
+    }
+
+    #[test]
+    fn jq_select_keeps_matching_input() {
+        // A passing predicate emits the input value.
+        let scope = json!({ "item": { "n": 10 } });
+        assert_eq!(
+            evaluate(&json!("=.item.n | select(. > 5)"), &scope),
+            json!(10)
+        );
+    }
+
+    #[test]
+    fn jq_select_filtering_out_yields_null() {
+        // A failing predicate produces no output, which maps to Null.
+        let scope = json!({ "item": { "n": 3 } });
+        assert_eq!(
+            evaluate(&json!("=.item.n | select(. > 5)"), &scope),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn jq_arithmetic() {
+        let scope = json!({ "item": { "a": 6, "b": 4 } });
+        assert_eq!(evaluate(&json!("=.item.a + .item.b"), &scope), json!(10));
+        assert_eq!(evaluate(&json!("=.item.a * .item.b"), &scope), json!(24));
+    }
+
+    #[test]
+    fn jq_array_index() {
+        let scope = json!({ "item": { "nums": [10, 20, 30] } });
+        assert_eq!(evaluate(&json!("=.item.nums[0]"), &scope), json!(10));
+        assert_eq!(evaluate(&json!("=.item.nums[2]"), &scope), json!(30));
+    }
+
+    #[test]
+    fn jq_object_construction() {
+        let scope = json!({ "item": { "first": "Ada", "last": "Lovelace" } });
+        assert_eq!(
+            evaluate(&json!("={name: .item.first, surname: .item.last}"), &scope),
+            json!({ "name": "Ada", "surname": "Lovelace" })
+        );
+    }
+
+    #[test]
+    fn jq_string_operations() {
+        let scope = json!({ "item": { "first": "Ada", "last": "Lovelace" } });
+        // String concatenation.
+        assert_eq!(
+            evaluate(&json!(r#"=.item.first + " " + .item.last"#), &scope),
+            json!("Ada Lovelace")
+        );
+        // A standard-library string builtin.
+        assert_eq!(
+            evaluate(&json!("=.item.first | ascii_upcase"), &scope),
+            json!("ADA")
+        );
+    }
+
+    #[test]
+    fn jq_first_output_only() {
+        // A program that yields multiple outputs returns only the first.
+        let scope = json!({});
+        assert_eq!(evaluate(&json!("=1, 2, 3"), &scope), json!(1));
+    }
+
+    #[test]
+    fn item_shorthand_versus_leading_dot() {
+        // `=item.x` takes the segment-walk fast path; `=.item.x` takes jq.
+        // Both must resolve to the same value for a plain object scope.
+        let scope = json!({ "item": { "x": 99 } });
+        assert_eq!(evaluate(&json!("=item.x"), &scope), json!(99));
+        assert_eq!(evaluate(&json!("=.item.x"), &scope), json!(99));
+    }
+
+    #[test]
+    fn jq_malformed_program_is_null() {
+        let scope = json!({ "item": {} });
+        assert_eq!(evaluate(&json!("=.item |"), &scope), Value::Null);
+        assert_eq!(evaluate(&json!("=(((("), &scope), Value::Null);
     }
 }
