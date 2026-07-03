@@ -254,4 +254,89 @@ mod tests {
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.edges.len(), 1);
     }
+
+    // --- property-based tests ---------------------------------------------
+    //
+    // `migrate` is a pure JSON-to-JSON function applied to untrusted persisted
+    // input, so it must never panic and must be idempotent. A bounded JSON
+    // strategy exercises objects, arrays, and scalars — including malformed
+    // `schema_version` shapes — cheaply.
+
+    use proptest::prelude::*;
+
+    /// A bounded, recursive `serde_json::Value` strategy: shallow nesting with a
+    /// few elements per level so migration runs fast over arbitrary documents.
+    fn arb_json() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            "[A-Za-z0-9_]{0,8}".prop_map(Value::from),
+        ];
+        leaf.prop_recursive(3, 16, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(Value::from),
+                prop::collection::hash_map("[A-Za-z_][A-Za-z0-9_]{0,5}", inner, 0..4)
+                    .prop_map(|m| Value::from(m.into_iter().collect::<serde_json::Map<_, _>>())),
+            ]
+        })
+    }
+
+    /// A strategy that sometimes injects a `schema_version` field of an
+    /// arbitrary JSON shape (integer, string, null, …) into an object, so the
+    /// defensive `as_u64` read is exercised against non-integer versions.
+    fn arb_json_with_schema_version() -> impl Strategy<Value = Value> {
+        (arb_json(), prop::option::of(arb_json())).prop_map(|(base, maybe_version)| {
+            let mut map = match base {
+                Value::Object(m) => m,
+                other => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("inner".to_string(), other);
+                    m
+                }
+            };
+            if let Some(version) = maybe_version {
+                map.insert("schema_version".to_string(), version);
+            }
+            Value::Object(map)
+        })
+    }
+
+    proptest! {
+        /// `migrate` never panics on arbitrary bounded JSON input.
+        #[test]
+        fn prop_migrate_never_panics(value in arb_json()) {
+            let _ = migrate(value);
+        }
+
+        /// `migrate` never panics even when `schema_version` has a bogus shape.
+        #[test]
+        fn prop_migrate_never_panics_with_schema_version(value in arb_json_with_schema_version()) {
+            let _ = migrate(value);
+        }
+
+        /// Migration is idempotent: re-migrating an already-migrated value is a
+        /// no-op in value.
+        #[test]
+        fn prop_migrate_is_idempotent(value in arb_json_with_schema_version()) {
+            if let Ok(once) = migrate(value) {
+                let twice = migrate(once.clone()).expect("second migrate cannot fail");
+                prop_assert_eq!(once, twice);
+            }
+        }
+
+        /// Any `Ok` result that is a JSON object carries the current schema
+        /// version stamp; non-object inputs pass through unstamped.
+        #[test]
+        fn prop_migrate_object_is_stamped(value in arb_json_with_schema_version()) {
+            if let Ok(out) = migrate(value)
+                && let Value::Object(map) = &out
+            {
+                prop_assert_eq!(
+                    map.get("schema_version").and_then(Value::as_u64),
+                    Some(u64::from(CURRENT_SCHEMA_VERSION))
+                );
+            }
+        }
+    }
 }
