@@ -140,6 +140,38 @@ This is the [`hello_workflow`](examples/hello_workflow.rs) example — run it wi
 cargo run --example hello_workflow --features mock
 ```
 
+## Examples
+
+The crate ships seven runnable examples under [`examples/`](examples/). Each is
+gated on the `mock` cargo feature, so run them with:
+
+```sh
+cargo run --example <name> --features mock
+```
+
+| Example | What it shows |
+|---------|---------------|
+| `hello_workflow` | Build → compile → run a `trigger → transform` workflow against the mock capabilities. |
+| `conditional_branch` | IF routing: a `condition` node takes exactly one of its `true` / `false` branches. |
+| `parallel_and_merge` | Parallel fan-out (a node's same-port successors run concurrently) joined by a `merge` fan-in barrier. |
+| `capability_pipeline` | A linear `http_request → code → agent → tool_call` pipeline through the host capability traits (mocked). |
+| `error_handling` | Per-node `retry` plus `on_error: "route"` recovering a failing node via its `error` port. |
+| `hitl_approval` | A `requires_approval` gate pauses the run (`pending_approvals`), then `run_resumable(...).resume(...)` continues from the checkpoint. |
+| `jq_expressions` | The jaq-backed jq engine in a `transform` node (e.g. `=.item.prices | add`). |
+
+Omitting `--features mock` is harmless: the demo body is
+`#[cfg(feature = "mock")]`-gated, so a default build stays green and the example
+just prints a hint to re-run with the feature enabled.
+
+Run all of them in one go:
+
+```sh
+for ex in hello_workflow conditional_branch parallel_and_merge \
+          capability_pipeline error_handling hitl_approval jq_expressions; do
+  cargo run --example "$ex" --features mock
+done
+```
+
 ## Node catalog
 
 | Kind | What it does |

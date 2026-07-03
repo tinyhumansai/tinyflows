@@ -82,12 +82,37 @@ Notes:
   `CompiledWorkflow`; `run` drives it and returns a `RunOutcome` whose `output`
   is the final run state (`{ run, nodes: { id: { items } } }`).
 
-## Run the example
+## Examples
 
-The crate ships the same program as a runnable example:
+The crate ships the same program as a runnable example, alongside six more that
+demonstrate the rest of the engine. All seven live under `examples/` and are
+gated on the `mock` cargo feature, so run any of them with:
 
 ```bash
-cargo run --example hello_workflow --features mock
+cargo run --example <name> --features mock
+```
+
+| Example | What it shows |
+|---------|---------------|
+| `hello_workflow` | Build → compile → run a `trigger → transform` workflow against the mock capabilities. |
+| `conditional_branch` | IF routing: a `condition` node takes exactly one of its `true` / `false` branches. |
+| `parallel_and_merge` | Parallel fan-out (a node's same-port successors run concurrently) joined by a `merge` fan-in barrier. |
+| `capability_pipeline` | A linear `http_request → code → agent → tool_call` pipeline through the host capability traits (mocked). |
+| `error_handling` | Per-node `retry` plus `on_error: "route"` recovering a failing node via its `error` port. |
+| `hitl_approval` | A `requires_approval` gate pauses the run (`pending_approvals`), then `run_resumable(...).resume(...)` continues from the checkpoint. |
+| `jq_expressions` | The jaq-backed jq engine in a `transform` node (e.g. `=.item.prices | add`). |
+
+Omitting `--features mock` is harmless: each demo body is
+`#[cfg(feature = "mock")]`-gated, so a default build stays green and the example
+just prints a hint to re-run with the feature enabled.
+
+To run all of them in one go:
+
+```bash
+for ex in hello_workflow conditional_branch parallel_and_merge \
+          capability_pipeline error_handling hitl_approval jq_expressions; do
+  cargo run --example "$ex" --features mock
+done
 ```
 
 Next: read [Architecture](Architecture) for how the pipeline works, or the
