@@ -20,9 +20,21 @@ use std::time::Instant;
 
 use serde_json::{Map, Value, json};
 use tinyagents::{
-    Command, CompiledGraph, END, GraphBuilder, InMemoryCheckpointer, Interrupt, NodeResult,
-    StateReducer, TinyAgentsError,
+    Command, CompiledGraph, END, GraphBuilder, Interrupt, NodeResult, StateReducer, TinyAgentsError,
 };
+
+/// Checkpointer types re-exported from `tinyagents` so a host can name and
+/// implement them without taking a direct dependency on `tinyagents`.
+///
+/// A host that wants durable, cross-process HITL resume implements
+/// [`Checkpointer<serde_json::Value>`] (or reuses [`FileCheckpointer`]) and
+/// injects it via [`run_with_checkpointer`] / [`resume_with_checkpointer`]. The
+/// engine keys persisted state by a caller-supplied `thread_id`.
+///
+/// [`InMemoryCheckpointer`] is the process-local default used by [`run`],
+/// [`run_with_observer`], [`run_resumable`], and [`resume`]; [`DurabilityMode`]
+/// configures how aggressively a checkpointer persists.
+pub use tinyagents::{Checkpointer, DurabilityMode, FileCheckpointer, InMemoryCheckpointer};
 
 use crate::caps::Capabilities;
 use crate::compiler::CompiledWorkflow;
@@ -156,39 +168,46 @@ pub async fn run_with_observer(
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
 ) -> Result<RunOutcome> {
-    let (_graph, _thread_id, outcome) =
-        build_and_run(workflow, input, capabilities, observer).await?;
+    // Default (non-injectable) path: a process-local in-memory checkpointer,
+    // keyed by the trigger id — identical behavior to before checkpointer
+    // injection existed.
+    let checkpointer: Arc<dyn Checkpointer<Value>> =
+        Arc::new(InMemoryCheckpointer::<Value>::default());
+    let thread_id = default_thread_id(workflow)?;
+    let (_graph, _thread_id, outcome) = build_and_run(
+        workflow,
+        input,
+        capabilities,
+        observer,
+        checkpointer,
+        thread_id,
+    )
+    .await?;
     Ok(outcome)
 }
 
-/// Builds the `tinyagents` graph for `workflow`, drives the first run under a
-/// checkpointed thread, and returns the still-live compiled graph, the run's
-/// thread id, and the [`RunOutcome`].
+/// Builds and compiles the `tinyagents` graph for `workflow`, attaching the
+/// host-supplied `checkpointer`, and returns the compiled graph together with
+/// the graph's entry (trigger) node id.
 ///
-/// Shared by [`run_with_observer`] — which discards the graph — and
-/// [`run_resumable`], which keeps it (and thus its checkpointer) alive so a later
-/// [`ResumableRun::resume`] can replay forward from the persisted checkpoint
-/// without re-executing already-completed nodes.
+/// Node handlers capture `observer` (to fire `on_step_finish`) and the shared
+/// `steps` sink. This does **not** run the graph — callers either drive it (via
+/// `run_with_thread`, see [`build_and_run`]) or resume it from a persisted
+/// checkpoint (via `resume`, see [`resume_with_checkpointer`]). Keeping graph
+/// construction separate is what lets a host rebuild the identical graph in a
+/// fresh process, re-attach the same durable `checkpointer`, and resume.
 ///
 /// # Errors
-/// Same as [`run`].
-async fn build_and_run(
+/// Returns an [`EngineError`] if the workflow has no trigger or if compilation
+/// fails.
+fn build_graph(
     workflow: &CompiledWorkflow,
-    input: Value,
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
-) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome)> {
+    steps: &Arc<Mutex<Vec<ExecutionStep>>>,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+) -> Result<(CompiledGraph<Value, Value>, String)> {
     let graph = &workflow.graph;
-
-    // Process-local, monotonic run id — no time/random source.
-    let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
-    observer.on_run_start(&run_id);
-
-    // Node handlers stream finished steps here (they also fire
-    // `on_step_finish`); the engine folds this into the final `Run`. A shared
-    // `Mutex` is the simplest correct sink across the `'static + Send + Sync`
-    // handler closures, which can't otherwise push to a common `Vec`.
-    let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
 
     let trigger = graph
         .trigger()
@@ -536,21 +555,80 @@ async fn build_and_run(
         }
     }
 
-    // A checkpointer (plus a thread id on the run below) is required for
-    // tinyagents to persist the interrupt boundary and hand pending approvals
-    // back to us; an in-memory one keeps the crate host-agnostic and dep-free.
+    // A checkpointer (plus a thread id on the run) is required for tinyagents to
+    // persist the interrupt boundary and hand pending approvals back to us. The
+    // checkpointer is host-injected: the default entry points supply an
+    // in-memory one to keep the crate host-agnostic and dep-free, while a host
+    // can inject a durable store for cross-process resume.
     let compiled = builder
         .compile()
         .map_err(|e| EngineError::Capability(e.to_string()))?
-        .with_checkpointer(Arc::new(InMemoryCheckpointer::<Value>::default()));
+        .with_checkpointer(checkpointer);
+
+    Ok((compiled, trigger_id))
+}
+
+/// The default thread id for a run: the workflow's trigger (entry) node id.
+///
+/// Used by the non-injectable entry points ([`run`], [`run_with_observer`],
+/// [`run_resumable`]) so a run is keyed under a stable, workflow-derived id —
+/// preserving the pre-injectable-checkpointer behavior exactly.
+///
+/// # Errors
+/// Returns [`EngineError::Validation`] if the workflow has no trigger node.
+fn default_thread_id(workflow: &CompiledWorkflow) -> Result<String> {
+    Ok(workflow
+        .graph
+        .trigger()
+        .ok_or(EngineError::Validation(ValidationError::MissingTrigger))?
+        .id
+        .clone())
+}
+
+/// Builds the `tinyagents` graph for `workflow` under the supplied
+/// `checkpointer`, drives the first run keyed under `thread_id`, and returns the
+/// still-live compiled graph, that `thread_id`, and the [`RunOutcome`].
+///
+/// Shared by [`run_with_observer`] / [`run_with_checkpointer`] — which discard
+/// the graph — and [`run_resumable`], which keeps it (and thus its checkpointer)
+/// alive so a later [`ResumableRun::resume`] can replay forward from the
+/// persisted checkpoint without re-executing already-completed nodes.
+///
+/// # Errors
+/// Same as [`run`].
+async fn build_and_run(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    observer: &Arc<dyn RunObserver>,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: String,
+) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome)> {
+    // Process-local, monotonic run id — no time/random source.
+    let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
+    observer.on_run_start(&run_id);
+
+    // Node handlers stream finished steps here (they also fire
+    // `on_step_finish`); the engine folds this into the final `Run`. A shared
+    // `Mutex` is the simplest correct sink across the `'static + Send + Sync`
+    // handler closures, which can't otherwise push to a common `Vec`.
+    let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Build and compile the graph under the host-supplied checkpointer;
+    // `trigger_id` is the graph's entry node.
+    let (compiled, trigger_id) =
+        build_graph(workflow, capabilities, observer, &steps, checkpointer)?;
 
     let seed_items = items_update(&trigger_id, &[Item::new(input.clone())], None)
         .map_err(|e| EngineError::Capability(e.to_string()))?;
     let mut initial = json!({ "run": { "trigger": input } });
     merge(&mut initial, seed_items);
 
+    // The run is keyed under the caller-supplied `thread_id` (the default paths
+    // pass the trigger id, preserving prior behavior); this is where the
+    // checkpointer persists the interrupt boundary.
     let execution = compiled
-        .run_with_thread(trigger_id.clone(), initial)
+        .run_with_thread(thread_id.clone(), initial)
         .await
         .map_err(|e| EngineError::Capability(e.to_string()))?;
 
@@ -581,7 +659,7 @@ async fn build_and_run(
 
     Ok((
         compiled,
-        trigger_id,
+        thread_id,
         RunOutcome {
             output: execution.state,
             pending_approvals,
@@ -719,12 +797,138 @@ pub async fn run_resumable(
     capabilities: &Capabilities,
 ) -> Result<ResumableRun> {
     let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
-    let (graph, thread_id, outcome) =
-        build_and_run(workflow, input, capabilities, &observer).await?;
+    // Default (non-injectable) path: a process-local in-memory checkpointer,
+    // kept alive on the returned `ResumableRun`, keyed by the trigger id.
+    let checkpointer: Arc<dyn Checkpointer<Value>> =
+        Arc::new(InMemoryCheckpointer::<Value>::default());
+    let thread_id = default_thread_id(workflow)?;
+    let (graph, thread_id, outcome) = build_and_run(
+        workflow,
+        input,
+        capabilities,
+        &observer,
+        checkpointer,
+        thread_id,
+    )
+    .await?;
     Ok(ResumableRun {
         graph,
         thread_id,
         outcome,
+    })
+}
+
+/// Runs `workflow` under a **host-injected** `checkpointer`, keying the run's
+/// persisted state by the caller-supplied `thread_id`.
+///
+/// This is the durable, cross-process entry point. Unlike [`run`] — which uses a
+/// process-local [`InMemoryCheckpointer`] keyed by the trigger id — this drives
+/// the run under whatever [`Checkpointer`] the host supplies (for example a
+/// database-backed run ledger), keyed by a stable `thread_id` the host chooses.
+/// When the run pauses at a human-in-the-loop approval gate, its interrupt
+/// boundary is persisted into the host's checkpointer under `thread_id`; the
+/// returned [`RunOutcome::pending_approvals`] lists the gate node ids awaiting
+/// approval, and their downstream did not run.
+///
+/// A host can then continue the run later — even after a process restart — by
+/// rebuilding its [`Capabilities`] and the same checkpointer and calling
+/// [`resume_with_checkpointer`] with the same `thread_id`.
+///
+/// A no-op [`RunObserver`] is installed; all execution behavior (retry,
+/// `on_error`, HITL interrupts, conditional routing, tracing) is identical to
+/// [`run`].
+///
+/// # Errors
+/// Same as [`run`]: returns an [`EngineError`] if lowering, compilation, or
+/// execution (including any node executor error) fails.
+pub async fn run_with_checkpointer(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+) -> Result<RunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    let (_graph, _thread_id, outcome) = build_and_run(
+        workflow,
+        input,
+        capabilities,
+        &observer,
+        checkpointer,
+        thread_id.to_string(),
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Resumes a run that was previously started with [`run_with_checkpointer`],
+/// continuing it **from the persisted checkpoint** in the host-injected
+/// `checkpointer`.
+///
+/// This is the durable, cross-process resume path. It rebuilds the identical
+/// `tinyagents` graph for `workflow`, re-attaches the **same** `checkpointer`,
+/// and resumes the persisted `thread_id` — so a host can run, persist to its
+/// own durable store, and later (even after a full process restart) reconstruct
+/// its [`Capabilities`] plus checkpointer and pick the run back up by
+/// `thread_id`. Nodes that already completed before the pause are not
+/// re-executed; tinyagents replays forward from the interrupt boundary.
+///
+/// `newly_approved` are the gate node ids being approved. Approval flows through
+/// the same mechanism [`ResumableRun::resume`] uses: [`Command::resume`]
+/// delivers a resume value that reaches the interrupted gate via
+/// `NodeContext::resume`, which the gate treats as approval. The ids are also
+/// recorded into the run's approvals for downstream visibility. (Note: in
+/// tinyagents the accompanying state update is ignored on resume, so the resume
+/// value itself is the operative approval channel.)
+///
+/// Returns a fresh [`RunOutcome`]: `output` is the resumed run's final state and
+/// `pending_approvals` lists any gate still awaiting approval (empty once the
+/// run completes).
+///
+/// # Errors
+/// Returns [`EngineError`] if rebuilding/compiling the graph fails, or
+/// [`EngineError::Capability`] if the checkpointed resume fails — for example
+/// when the `checkpointer` holds no pending checkpoint for `thread_id`.
+pub async fn resume_with_checkpointer(
+    workflow: &CompiledWorkflow,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+    newly_approved: Vec<String>,
+) -> Result<RunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Rebuild the identical graph and re-attach the SAME checkpointer, so
+    // `resume` loads the state persisted under `thread_id`.
+    let (compiled, _trigger_id) =
+        build_graph(workflow, capabilities, &observer, &steps, checkpointer)?;
+
+    // Approvals recorded for downstream visibility. On resume the interrupted
+    // gate is approved because the resume value reaches it via
+    // `NodeContext::resume`; the `with_update` mirrors `ResumableRun::resume`
+    // (tinyagents ignores it on resume, so the resume value is the real
+    // approval channel).
+    let approvals_update = json!({
+        "run": { "trigger": { "approvals": newly_approved } }
+    });
+    let execution = compiled
+        .resume(
+            thread_id,
+            Command::resume(json!(true)).with_update(approvals_update),
+        )
+        .await
+        .map_err(|e| EngineError::Capability(e.to_string()))?;
+
+    let pending_approvals: Vec<String> = execution
+        .interrupts
+        .iter()
+        .map(|interrupt| interrupt.node.as_str().to_string())
+        .collect();
+
+    Ok(RunOutcome {
+        output: execution.state,
+        pending_approvals,
     })
 }
 
@@ -2136,5 +2340,122 @@ mod tests {
             outcome.output["nodes"]["t"]["items"][0]["json"],
             json!({ "seed": 7 })
         );
+    }
+
+    // ---- Host-injectable checkpointer -------------------------------------
+
+    /// Compile-time proof that the handles a host holds across the gap between
+    /// run and resume are thread-safe: [`ResumableRun`] (kept alive across a
+    /// HITL pause) and [`RunOutcome`] (returned from every entry point) must be
+    /// `Send + Sync` so a host can move them between tasks/threads.
+    #[test]
+    fn resumable_run_and_outcome_are_send_sync() {
+        fn _assert<T: Send + Sync>() {}
+        _assert::<ResumableRun>();
+        _assert::<RunOutcome>();
+    }
+
+    #[tokio::test]
+    async fn durable_resume_via_injected_checkpointer() {
+        // A SHARED, externally-held checkpointer simulates a host's durable store
+        // that survives across "processes": we run under it, then rebuild caps +
+        // graph and resume from it by thread id alone.
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+
+        // trigger -> gate{requires_approval} -> downstream(output_parser).
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "gate"), edge("gate", "downstream")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+
+        // "Process 1": run under the host checkpointer, pausing at the gate.
+        let caps = mock_capabilities();
+        let paused = run_with_checkpointer(&compiled, json!({}), &caps, cp.clone(), "thread-A")
+            .await
+            .expect("run_with_checkpointer");
+        assert_eq!(
+            paused.pending_approvals,
+            vec!["gate".to_string()],
+            "the gate must be reported pending"
+        );
+        assert!(
+            paused.output["nodes"]["downstream"].is_null(),
+            "downstream must not run behind a pending gate"
+        );
+
+        // "Process 2": fresh caps, same durable checkpointer + thread id.
+        let caps = mock_capabilities();
+        let done = resume_with_checkpointer(
+            &compiled,
+            &caps,
+            cp.clone(),
+            "thread-A",
+            vec!["gate".to_string()],
+        )
+        .await
+        .expect("resume_with_checkpointer");
+        assert!(
+            done.pending_approvals.is_empty(),
+            "nothing should be pending once the gate is approved, got {:?}",
+            done.pending_approvals
+        );
+        assert!(
+            !done.output["nodes"]["downstream"]["items"].is_null(),
+            "downstream should run once the run resumes from the durable checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_run_and_resumable_unchanged_by_injectable_checkpointer() {
+        // Regression: the default (non-injectable) `run` and `run_resumable`
+        // paths must behave exactly as before. `run` drives a linear passthrough
+        // to completion; `run_resumable` pauses at a gate and resumes from its
+        // own in-memory checkpoint.
+        let linear = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("p", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "p")],
+            ..Default::default()
+        };
+        let compiled = compile(&linear).expect("compile");
+        let caps = mock_capabilities();
+        let outcome = run(&compiled, json!({ "x": 1 }), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["p"]["items"][0]["json"],
+            json!({ "x": 1 })
+        );
+        assert!(outcome.pending_approvals.is_empty());
+
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let gated = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "gate"), edge("gate", "downstream")],
+            ..Default::default()
+        };
+        let compiled = compile(&gated).expect("compile");
+        let caps = mock_capabilities();
+        let rr = run_resumable(&compiled, json!({}), &caps)
+            .await
+            .expect("run_resumable");
+        assert!(rr.outcome().pending_approvals.contains(&"gate".to_string()));
+        assert!(rr.outcome().output["nodes"]["downstream"].is_null());
+        let done = rr.resume(vec!["gate".to_string()]).await.expect("resume");
+        assert!(done.pending_approvals.is_empty());
+        assert!(!done.output["nodes"]["downstream"]["items"].is_null());
     }
 }
