@@ -1458,4 +1458,683 @@ mod tests {
             "downstream should run once the run resumes from the checkpoint"
         );
     }
+
+    // ---- Additional comprehensive coverage ----------------------------------
+
+    /// A `main`-port edge from `from` to `to` — the common wiring in these tests.
+    fn edge(from: &str, to: &str) -> Edge {
+        Edge {
+            from_node: from.to_string(),
+            from_port: "main".to_string(),
+            to_node: to.to_string(),
+            to_port: "main".to_string(),
+        }
+    }
+
+    /// A `port`-port edge, for branching nodes that emit on a named port.
+    fn port_edge(from: &str, port: &str, to: &str) -> Edge {
+        Edge {
+            from_node: from.to_string(),
+            from_port: port.to_string(),
+            to_node: to.to_string(),
+            to_port: "main".to_string(),
+        }
+    }
+
+    /// An `output_parser` gate that requires human approval before it runs.
+    fn gate(id: &str) -> Node {
+        let mut g = node(id, NodeKind::OutputParser);
+        g.config = json!({ "requires_approval": true });
+        g
+    }
+
+    #[tokio::test]
+    async fn linear_three_node_passthrough() {
+        // trigger -> a -> b -> c, all output_parser passthroughs. The trigger
+        // payload must flow unchanged all the way to the terminal node.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("a", NodeKind::OutputParser),
+                node("b", NodeKind::OutputParser),
+                node("c", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "a"), edge("a", "b"), edge("b", "c")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "n": 1 }), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["a"]["items"][0]["json"],
+            json!({ "n": 1 })
+        );
+        assert_eq!(
+            outcome.output["nodes"]["b"]["items"][0]["json"],
+            json!({ "n": 1 })
+        );
+        assert_eq!(
+            outcome.output["nodes"]["c"]["items"][0]["json"],
+            json!({ "n": 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_truthy_takes_true_branch_only() {
+        // condition(field=active) with a truthy input runs only the `true` branch.
+        let mut condition = node("c", NodeKind::Condition);
+        condition.config = json!({ "field": "active" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                condition,
+                node("yes", NodeKind::OutputParser),
+                node("no", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "c"),
+                port_edge("c", "true", "yes"),
+                port_edge("c", "false", "no"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "active": true }), &caps)
+            .await
+            .expect("run");
+        assert!(
+            !outcome.output["nodes"]["yes"]["items"].is_null(),
+            "true branch must run for a truthy input"
+        );
+        assert!(
+            outcome.output["nodes"]["no"].is_null(),
+            "false branch must not run for a truthy input"
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_falsey_takes_false_branch_only() {
+        // condition(field=active) with a falsey input runs only the `false` branch.
+        let mut condition = node("c", NodeKind::Condition);
+        condition.config = json!({ "field": "active" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                condition,
+                node("yes", NodeKind::OutputParser),
+                node("no", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "c"),
+                port_edge("c", "true", "yes"),
+                port_edge("c", "false", "no"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "active": false }), &caps)
+            .await
+            .expect("run");
+        assert!(
+            outcome.output["nodes"]["yes"].is_null(),
+            "true branch must not run for a falsey input"
+        );
+        assert!(
+            !outcome.output["nodes"]["no"]["items"].is_null(),
+            "false branch must run for a falsey input"
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_without_field_uses_whole_item() {
+        // No `field`: the whole (non-empty) input item is the truthiness subject,
+        // so a non-empty object routes to the `true` branch.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("c", NodeKind::Condition),
+                node("yes", NodeKind::OutputParser),
+                node("no", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "c"),
+                port_edge("c", "true", "yes"),
+                port_edge("c", "false", "no"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "x": 1 }), &caps).await.expect("run");
+        assert!(
+            !outcome.output["nodes"]["yes"]["items"].is_null(),
+            "a non-empty object item is truthy and routes true"
+        );
+        assert!(
+            outcome.output["nodes"]["no"].is_null(),
+            "false branch must not run"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_field_matching_case_routes_there() {
+        // switch(field=kind) with input kind="a" routes only to the `a` case; the
+        // `default` fallback does not run.
+        let mut switch = node("sw", NodeKind::Switch);
+        switch.config = json!({ "field": "kind" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                switch,
+                node("case_a", NodeKind::OutputParser),
+                node("fallback", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "sw"),
+                port_edge("sw", "a", "case_a"),
+                port_edge("sw", "default", "fallback"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "kind": "a" }), &caps)
+            .await
+            .expect("run");
+        assert!(
+            !outcome.output["nodes"]["case_a"]["items"].is_null(),
+            "matching `a` case must run"
+        );
+        assert!(
+            outcome.output["nodes"]["fallback"].is_null(),
+            "default fallback must not run when a case matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_no_match_routes_to_default() {
+        // switch(field=kind) with a missing `kind` yields a null case value, which
+        // the impl maps to the `default` port; only the fallback runs.
+        let mut switch = node("sw", NodeKind::Switch);
+        switch.config = json!({ "field": "kind" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                switch,
+                node("case_a", NodeKind::OutputParser),
+                node("fallback", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "sw"),
+                port_edge("sw", "a", "case_a"),
+                port_edge("sw", "default", "fallback"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "other": "z" }), &caps)
+            .await
+            .expect("run");
+        assert!(
+            outcome.output["nodes"]["case_a"].is_null(),
+            "no case matches, so the `a` branch must not run"
+        );
+        assert!(
+            !outcome.output["nodes"]["fallback"]["items"].is_null(),
+            "a null case value routes to the default fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_fan_out_of_three_runs_all() {
+        // trigger fans out on port `main` to three successors; all must run.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("a", NodeKind::OutputParser),
+                node("b", NodeKind::OutputParser),
+                node("c", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "a"), edge("t", "b"), edge("t", "c")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "v": 1 }), &caps).await.expect("run");
+        for id in ["a", "b", "c"] {
+            assert!(
+                !outcome.output["nodes"][id]["items"].is_null(),
+                "fan-out branch {id} should have run"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_fan_in_concatenates_three_items() {
+        // trigger -> d, which fans out to a, b, c (each a passthrough of the single
+        // trigger item); all three feed merge `m`. The barrier holds until all
+        // three complete, and merge concatenates their items => exactly 3 items.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("d", NodeKind::OutputParser),
+                node("a", NodeKind::OutputParser),
+                node("b", NodeKind::OutputParser),
+                node("c", NodeKind::OutputParser),
+                node("m", NodeKind::Merge),
+            ],
+            edges: vec![
+                edge("t", "d"),
+                edge("d", "a"),
+                edge("d", "b"),
+                edge("d", "c"),
+                edge("a", "m"),
+                edge("b", "m"),
+                edge("c", "m"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "v": 1 }), &caps).await.expect("run");
+        let merged = outcome.output["nodes"]["m"]["items"]
+            .as_array()
+            .expect("merge should have produced an items array");
+        assert_eq!(
+            merged.len(),
+            3,
+            "merge should concatenate one item from each of the 3 branches"
+        );
+    }
+
+    #[tokio::test]
+    async fn diamond_merge_produces_two_items() {
+        // Diamond: trigger -> d, d fans out to a & b, both merge at m, then m -> done.
+        // The merge sees exactly 2 items and passes them to the node past the barrier.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("d", NodeKind::OutputParser),
+                node("a", NodeKind::OutputParser),
+                node("b", NodeKind::OutputParser),
+                node("m", NodeKind::Merge),
+                node("done", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "d"),
+                edge("d", "a"),
+                edge("d", "b"),
+                edge("a", "m"),
+                edge("b", "m"),
+                edge("m", "done"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "v": 1 }), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["m"]["items"]
+                .as_array()
+                .expect("merge items")
+                .len(),
+            2,
+            "two branches merge into two items"
+        );
+        assert_eq!(
+            outcome.output["nodes"]["done"]["items"]
+                .as_array()
+                .expect("done items")
+                .len(),
+            2,
+            "the node past the barrier receives both merged items"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_error_stop_fails_the_run() {
+        // A tool_call with no `slug` errors deterministically; the default `stop`
+        // policy makes the whole run return Err.
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), node("x", NodeKind::ToolCall)],
+            edges: vec![edge("t", "x")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        assert!(
+            run(&compiled, json!({}), &caps).await.is_err(),
+            "a failing node under the default stop policy must fail the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_error_continue_completes_with_error_item() {
+        // `on_error: continue` turns the failure into an error item on the default
+        // port and lets the run complete Ok.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "on_error": "continue" });
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), tool],
+            edges: vec![edge("t", "x")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({}), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["x"]["items"][0]["json"]["error"]["node"],
+            json!("x")
+        );
+    }
+
+    #[tokio::test]
+    async fn on_error_route_delivers_error_item_to_recovery_node() {
+        // `on_error: route` emits the error item on the `error` port; a recovery
+        // node wired from that port receives it, and the main-port branch does not.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "on_error": "route" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                tool,
+                node("recover", NodeKind::OutputParser),
+                node("normal", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "x"),
+                port_edge("x", "error", "recover"),
+                port_edge("x", "main", "normal"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({}), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["recover"]["items"][0]["json"]["error"]["node"],
+            json!("x"),
+            "recovery node must receive the routed error item"
+        );
+        assert!(
+            outcome.output["nodes"]["normal"].is_null(),
+            "the main branch must not run when the error routes to `error`"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_item_has_node_and_message_fields() {
+        // Assert the concrete shape of the emitted error item: json.error carries a
+        // `node` (the failing node id) and a non-empty `message`.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "on_error": "continue" });
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), tool],
+            edges: vec![edge("t", "x")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({}), &caps).await.expect("run");
+        let err = &outcome.output["nodes"]["x"]["items"][0]["json"]["error"];
+        assert_eq!(err["node"], json!("x"));
+        assert!(
+            err["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "error item must carry a non-empty message, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_max_attempts_then_continue_completes() {
+        // `retry.max_attempts` retries the failing node; after they are exhausted,
+        // `on_error: continue` yields the error item and the run completes.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "retry": { "max_attempts": 4 }, "on_error": "continue" });
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), tool],
+            edges: vec![edge("t", "x")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({}), &caps).await.expect("run");
+        let err = &outcome.output["nodes"]["x"]["items"][0]["json"]["error"];
+        assert_eq!(err["node"], json!("x"));
+        assert!(err["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn hitl_gate_pauses_and_blocks_downstream() {
+        // A requires_approval gate with no approval pauses the run: reported pending
+        // and its downstream never runs.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate("g"),
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "g"), edge("g", "downstream")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "x": 1 }), &caps).await.expect("run");
+        assert!(
+            outcome.pending_approvals.contains(&"g".to_string()),
+            "gate should be reported pending"
+        );
+        assert!(
+            outcome.output["nodes"]["downstream"].is_null(),
+            "downstream must not run behind a pending gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn hitl_two_gates_resume_one_leaves_next_pending() {
+        // Two sequential gates: g1 -> g2 -> done. Resuming g1 lets g2 become the new
+        // pending gate (done still blocked); a second resume of g2 completes the run.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate("g1"),
+                gate("g2"),
+                node("done", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "g1"), edge("g1", "g2"), edge("g2", "done")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let rr = run_resumable(&compiled, json!({}), &caps)
+            .await
+            .expect("run_resumable");
+        assert!(
+            rr.outcome().pending_approvals.contains(&"g1".to_string()),
+            "g1 should be the first pending gate"
+        );
+        assert!(
+            !rr.outcome().pending_approvals.contains(&"g2".to_string()),
+            "g2 is not reached until g1 is approved"
+        );
+
+        let after_g1 = rr.resume(vec!["g1".to_string()]).await.expect("resume g1");
+        assert!(
+            after_g1.pending_approvals.contains(&"g2".to_string()),
+            "g2 becomes pending after g1 is approved, got {:?}",
+            after_g1.pending_approvals
+        );
+        assert!(
+            after_g1.output["nodes"]["done"].is_null(),
+            "done stays blocked while g2 is pending"
+        );
+
+        let done = rr.resume(vec!["g2".to_string()]).await.expect("resume g2");
+        assert!(
+            done.pending_approvals.is_empty(),
+            "no gate pending once both are approved, got {:?}",
+            done.pending_approvals
+        );
+        assert!(
+            !done.output["nodes"]["done"]["items"].is_null(),
+            "done runs once both gates are approved"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_via_input_proceeds_immediately() {
+        // Listing the gate id in the run input's `approvals` lets it proceed on the
+        // first run with no pause: nothing pending, gate and downstream both run.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate("g"),
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "g"), edge("g", "downstream")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "approvals": ["g"] }), &caps)
+            .await
+            .expect("run");
+        assert!(
+            outcome.pending_approvals.is_empty(),
+            "an input-approved gate leaves nothing pending"
+        );
+        assert!(
+            !outcome.output["nodes"]["g"]["items"].is_null(),
+            "the approved gate itself runs"
+        );
+        assert!(
+            !outcome.output["nodes"]["downstream"]["items"].is_null(),
+            "downstream runs once the gate is approved via input"
+        );
+    }
+
+    /// A [`RunObserver`] that counts run-start / run-finish and records step ids,
+    /// so a test can assert every hook fired the right number of times.
+    #[derive(Default)]
+    struct FullCapture {
+        starts: Mutex<u32>,
+        finishes: Mutex<u32>,
+        steps: Mutex<Vec<String>>,
+    }
+
+    impl RunObserver for FullCapture {
+        fn on_run_start(&self, _run_id: &str) {
+            *self.starts.lock().unwrap() += 1;
+        }
+
+        fn on_step_finish(&self, step: &ExecutionStep) {
+            self.steps.lock().unwrap().push(step.node_id.clone());
+        }
+
+        fn on_run_finish(&self, _run: &Run) {
+            *self.finishes.lock().unwrap() += 1;
+        }
+    }
+
+    #[tokio::test]
+    async fn observer_fires_start_finish_and_run_finish_counts() {
+        // trigger -> a -> b. on_run_start fires once, on_run_finish once, and
+        // on_step_finish fires once per non-trigger node (a, b) — never the trigger.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("a", NodeKind::OutputParser),
+                node("b", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "a"), edge("a", "b")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let capture = Arc::new(FullCapture::default());
+        let observer: Arc<dyn RunObserver> = capture.clone();
+        run_with_observer(&compiled, json!({ "x": 1 }), &caps, &observer)
+            .await
+            .expect("run");
+
+        assert_eq!(*capture.starts.lock().unwrap(), 1, "on_run_start once");
+        assert_eq!(*capture.finishes.lock().unwrap(), 1, "on_run_finish once");
+        let steps = capture.steps.lock().unwrap();
+        assert_eq!(steps.len(), 2, "one step per non-trigger node");
+        assert!(steps.contains(&"a".to_string()));
+        assert!(steps.contains(&"b".to_string()));
+        assert!(
+            !steps.contains(&"t".to_string()),
+            "the trigger must not produce a step"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_level_knobs_do_not_break_execution() {
+        // A trigger carrying run-level recursion_limit + node_timeout_secs drives a
+        // multi-node chain to completion, proving the knobs are wired without harm.
+        let mut trigger = node("t", NodeKind::Trigger);
+        trigger.config = json!({ "recursion_limit": 100, "node_timeout_secs": 30 });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                trigger,
+                node("a", NodeKind::OutputParser),
+                node("b", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "a"), edge("a", "b")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "x": 1 }), &caps).await.expect("run");
+        assert_eq!(
+            outcome.output["nodes"]["b"]["items"][0]["json"],
+            json!({ "x": 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_only_completes_cleanly() {
+        // A lone trigger runs to completion with nothing pending and its payload
+        // seeded as the trigger node's single item.
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger)],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = run(&compiled, json!({ "seed": 7 }), &caps)
+            .await
+            .expect("run");
+        assert!(
+            outcome.pending_approvals.is_empty(),
+            "a trigger-only run has nothing pending"
+        );
+        assert_eq!(
+            outcome.output["nodes"]["t"]["items"][0]["json"],
+            json!({ "seed": 7 })
+        );
+    }
 }
