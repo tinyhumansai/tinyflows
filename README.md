@@ -41,7 +41,9 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
   sub-graph.
 - Human-in-the-loop approval gating: a node with `requires_approval` pauses the
   run and is surfaced via `RunOutcome::pending_approvals`; `engine::resume`
-  approves and continues.
+  approves and continues. A host can also drive durable, cross-process resume by
+  injecting a `Checkpointer` via `engine::run_with_checkpointer` /
+  `resume_with_checkpointer`.
 - Observability via `tracing` plus a `RunObserver` hook and `Run` /
   `ExecutionStep` records.
 
@@ -209,8 +211,11 @@ Not yet:
 - A full jq/jaq expression engine — a minimal `=`-dotted-path evaluator ships as
   an interim.
 - Retry backoff timing and per-node timeouts.
-- Durable, checkpointed super-step replay (`resume` currently re-executes
-  deterministically).
+- Automatic checkpointed super-step replay. Durable, cross-process resume is
+  already supported by injecting a `Checkpointer`
+  (`engine::run_with_checkpointer` / `resume_with_checkpointer`); only the
+  super-step replay optimization that skips re-executing completed nodes on the
+  in-process `resume` path remains.
 - Visual and agent-first authoring (host-side).
 - The OpenHuman host integration (Phase B, a separate repo).
 - Publishing to crates.io.

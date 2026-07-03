@@ -21,7 +21,9 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 - **Observability** — `tracing` plus a `RunObserver` and `Run` / `ExecutionStep`
   records.
 - **Human-in-the-loop** — approval gating (`requires_approval` →
-  `RunOutcome::pending_approvals`) with `engine::resume`.
+  `RunOutcome::pending_approvals`) with `engine::resume`, plus durable,
+  cross-process resume by injecting a `Checkpointer`
+  (`run_with_checkpointer` / `resume_with_checkpointer`).
 - **Credentials** — opaque, host-managed `connection_ref`s (the crate never sees
   secrets).
 - **Versioning** — `schema_version` / `type_version` axes plus load-time
@@ -35,8 +37,11 @@ Being honest about what's ahead:
   A minimal `=`-dotted-path interim ships today.
 - **Retry timing** — backoff and per-node timeouts (retries currently re-attempt
   without a delay, keeping the crate runtime-agnostic).
-- **Durable replay** — checkpointed super-step replay for resumable runs (resume
-  is currently deterministic re-execution).
+- **Automatic super-step replay** — durable, cross-process resume is already
+  supported via a host-injected `Checkpointer` (`run_with_checkpointer` /
+  `resume_with_checkpointer`); what remains is the checkpointed super-step
+  *replay* optimization that skips re-executing already-completed nodes on the
+  in-process `resume` path.
 - **Authoring surfaces** — visual canvas and agent-first chat authoring
   (host-side).
 - **OpenHuman host integration** — the first downstream host (a separate repo).

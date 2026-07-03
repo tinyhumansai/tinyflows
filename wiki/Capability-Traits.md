@@ -31,9 +31,17 @@ secrets; the host resolves the reference to credentials inside its implementatio
 ## The `Capabilities` bundle
 
 The engine receives a `Capabilities` struct — the per-run bundle of host
-implementations. It currently wires four: `llm`, `tools`, `http`, and `code`
-(each an `Arc<dyn Trait>`). `StateStore` is defined for durable, resumable state
-and is implemented by hosts that need it.
+implementations. It bundles all five host capabilities: `llm`, `tools`, `http`,
+`code`, and `state` (each an `Arc<dyn Trait>`). Nodes reach each one through
+`ctx.caps` during execution — for example, durable key/value state via
+`ctx.caps.state`.
+
+Durable, cross-process human-in-the-loop resume is available by implementing
+`Checkpointer<serde_json::Value>` and driving the run via
+`engine::run_with_checkpointer` / `resume_with_checkpointer` under a stable
+`thread_id`: a run can persist its paused approval boundary to the host's store
+and resume later, even after a process restart. The in-process `run_resumable`
+remains the simple, non-durable path.
 
 ## Deeper reading
 

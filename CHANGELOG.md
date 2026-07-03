@@ -41,6 +41,16 @@ host-agnostic workflow engine.
   migration framework for evolving workflow definitions.
 - **jq expression engine** backed by [`jaq`](https://crates.io/crates/jaq-core),
   with a dotted-path shorthand for simple field access.
+- **Injectable checkpointer for durable, cross-process HITL resume**:
+  `engine::run_with_checkpointer` / `resume_with_checkpointer` accept a
+  host-implemented `Checkpointer<serde_json::Value>` keyed by a `thread_id`, so a
+  run can pause at an approval gate, persist to the host's durable store, and
+  resume later — even across a process restart. `Checkpointer`, `FileCheckpointer`,
+  `InMemoryCheckpointer`, and `DurabilityMode` are re-exported from `tinyagents`.
+  (The in-process `run_resumable` remains the simple path.)
+- **`StateStore` wired into the `Capabilities` bundle**: the bundle now carries
+  all five host capabilities (`llm`, `tools`, `http`, `code`, `state`), and nodes
+  reach durable key/value state via `ctx.caps.state`.
 - **Reference-workflow end-to-end test suite** and a runnable
   `hello_workflow` example.
 

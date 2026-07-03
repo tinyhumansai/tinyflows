@@ -56,8 +56,9 @@ fan-out correct. Field references use `=`-prefixed expressions.
 ## Host-agnostic seam
 
 The crate never hard-codes an LLM, tool, HTTP, code, or persistence vendor.
-Anything touching the outside world goes through a **capability trait** bundled in
-`Capabilities` and injected by the host — see [Capability Traits](Capability-Traits).
+Anything touching the outside world goes through a **capability trait** — one of
+the five bundled in `Capabilities` (`llm`, `tools`, `http`, `code`, `state`) and
+injected by the host — see [Capability Traits](Capability-Traits).
 
 ## Deeper reading
 
