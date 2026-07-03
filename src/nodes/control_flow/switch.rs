@@ -22,7 +22,8 @@ impl NodeExecutor for SwitchNode {
             .first()
             .map(|i| i.json.clone())
             .unwrap_or(serde_json::Value::Null);
-        let scope = serde_json::json!({ "item": item, "run": ctx.run });
+        let items: Vec<serde_json::Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
+        let scope = serde_json::json!({ "item": item, "items": items, "run": ctx.run });
         let value = if let Some(expr) = ctx.node.config.get("expression") {
             crate::expr::evaluate(expr, &scope)
         } else if let Some(field) = ctx

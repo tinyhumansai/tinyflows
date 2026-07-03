@@ -67,7 +67,7 @@ pub fn evaluate(value: &Value, scope: &Value) -> Value {
         Some(s) if is_expression(s) => {
             let expr = s[1..].trim();
             if is_simple_dotted_path(expr) {
-                resolve(expr, scope)
+                resolve_path(expr, scope)
             } else {
                 run_jq(expr, scope)
             }
@@ -76,9 +76,63 @@ pub fn evaluate(value: &Value, scope: &Value) -> Value {
     }
 }
 
+/// Recursively resolves every `=`-expression embedded anywhere in a config
+/// `value`, evaluating each against `scope`.
+///
+/// This is the data-binding entry point used by capability-backed integration
+/// nodes: it walks a whole config tree and replaces each leaf that is a
+/// `=`-expression string with the result of [`evaluate`], leaving everything
+/// else untouched. The traversal is structural:
+///
+/// - an [`Object`](Value::Object) maps each of its values through `resolve`,
+///   keeping keys as-is;
+/// - an [`Array`](Value::Array) maps each element through `resolve`;
+/// - a [`String`](Value::String) that [`is_expression`] is evaluated with
+///   [`evaluate`] (a missing dotted path yields [`Value::Null`]);
+/// - any other value (non-`=` string, number, bool, null) is returned as a
+///   literal clone.
+///
+/// Resolution is therefore backward-compatible: config with no `=`-prefixed
+/// strings round-trips unchanged.
+///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+/// use tinyflows::expr::resolve;
+///
+/// let scope = json!({ "item": { "name": "Ada", "xs": [1, 2, 3] } });
+/// let cfg = json!({
+///     "slug": "slack.send",
+///     "args": { "text": "=item.name", "count": "=.item.xs | length" },
+///     "literal": 7,
+/// });
+/// assert_eq!(
+///     resolve(&cfg, &scope),
+///     json!({
+///         "slug": "slack.send",
+///         "args": { "text": "Ada", "count": 3 },
+///         "literal": 7,
+///     })
+/// );
+/// ```
+#[must_use]
+pub fn resolve(value: &Value, scope: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), resolve(v, scope)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(|v| resolve(v, scope)).collect()),
+        Value::String(s) if is_expression(s) => evaluate(value, scope),
+        _ => value.clone(),
+    }
+}
+
 /// Resolves a simple dotted path (e.g. `a.b`) by walking `scope` segment by
 /// segment; a missing segment yields [`Value::Null`].
-fn resolve(path: &str, scope: &Value) -> Value {
+fn resolve_path(path: &str, scope: &Value) -> Value {
     let mut current = scope;
     for segment in path.split('.').filter(|s| !s.is_empty()) {
         match current.get(segment) {
@@ -392,6 +446,61 @@ mod tests {
         let scope = json!({ "item": {} });
         assert_eq!(evaluate(&json!("=.item |"), &scope), Value::Null);
         assert_eq!(evaluate(&json!("=(((("), &scope), Value::Null);
+    }
+
+    // --- resolve (recursive config data-binding) --------------------------
+
+    #[test]
+    fn resolve_maps_nested_objects_and_arrays() {
+        let scope = json!({ "item": { "name": "Ada", "id": 7 } });
+        let cfg = json!({
+            "slug": "x.y",
+            "args": { "text": "=item.name", "list": ["=item.id", "static"] },
+        });
+        assert_eq!(
+            resolve(&cfg, &scope),
+            json!({
+                "slug": "x.y",
+                "args": { "text": "Ada", "list": [7, "static"] },
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_passes_through_non_expression_leaves() {
+        let scope = json!({ "item": { "name": "Ada" } });
+        // Non-`=` strings, numbers, bools, and null all pass through unchanged.
+        assert_eq!(resolve(&json!("plain"), &scope), json!("plain"));
+        assert_eq!(resolve(&json!("a=b"), &scope), json!("a=b"));
+        assert_eq!(resolve(&json!(42), &scope), json!(42));
+        assert_eq!(resolve(&json!(3.5), &scope), json!(3.5));
+        assert_eq!(resolve(&json!(true), &scope), json!(true));
+        assert_eq!(resolve(&json!(null), &scope), json!(null));
+    }
+
+    #[test]
+    fn resolve_missing_dotted_path_is_null() {
+        let scope = json!({ "item": { "name": "Ada" } });
+        assert_eq!(
+            resolve(&json!({ "who": "=item.email" }), &scope),
+            json!({ "who": null })
+        );
+    }
+
+    #[test]
+    fn resolve_evaluates_jaq_program_in_nested_field() {
+        let scope = json!({ "item": { "xs": [1, 2, 3, 4] } });
+        assert_eq!(
+            resolve(&json!({ "n": "=.item.xs | length" }), &scope),
+            json!({ "n": 4 })
+        );
+    }
+
+    #[test]
+    fn resolve_leaves_config_without_expressions_unchanged() {
+        let scope = json!({ "item": { "name": "Ada" } });
+        let cfg = json!({ "a": 1, "b": ["x", 2, true], "c": { "d": "plain" } });
+        assert_eq!(resolve(&cfg, &scope), cfg);
     }
 
     // --- property-based tests ---------------------------------------------

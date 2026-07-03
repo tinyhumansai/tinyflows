@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+## [0.3.0] - YYYY-MM-DD
+
+_Next (unreleased) minor._
+
+### Added
+
+- Integration nodes (`agent`, `tool_call`, `http_request`) now resolve `=`
+  expressions in their config against the node's input, enabling inline
+  data-binding from upstream output; new `expr::resolve` recursively evaluates
+  `=`-expressions anywhere in a config value, and the binding scope is
+  `{ item, items, run }` (the first input item, all input items, and the run
+  payload). A minor bump is warranted because a config string starting with `=`
+  now evaluates where it was previously carried through as a literal.
+
 ## [0.2.0] - YYYY-MM-DD
 
 First functional release: the crate graduates from a skeleton to a working,

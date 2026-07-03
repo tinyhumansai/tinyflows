@@ -13,13 +13,15 @@ pub struct HttpRequestNode;
 #[async_trait]
 impl NodeExecutor for HttpRequestNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
+        // Data-binding: resolve any `=`-expressions in the config against the
+        // node's input before treating the config as the request descriptor.
+        let scope = crate::nodes::expr_scope(&ctx);
+        let cfg = crate::expr::resolve(&ctx.node.config, &scope);
         // The node's config is the request descriptor; the host's HttpClient interprets it.
-        let conn = ctx
-            .node
-            .config
+        let conn = cfg
             .get("connection_ref")
             .and_then(serde_json::Value::as_str);
-        let response = ctx.caps.http.request(ctx.node.config.clone(), conn).await?;
+        let response = ctx.caps.http.request(cfg.clone(), conn).await?;
         Ok(NodeOutput::main(vec![Item::new(response)]))
     }
 }
@@ -108,6 +110,33 @@ mod tests {
         assert_eq!(out.items[0].json["request"]["method"], "POST");
         assert_eq!(out.items[0].json["request"]["url"], "https://api.test/x");
         assert_eq!(out.items[0].json["connection"], "http:acct_2");
+    }
+
+    #[tokio::test]
+    async fn resolves_expressions_in_config_against_input() {
+        // `url` and `body.q` are `=`-expressions bound to the input item; the mock
+        // HTTP client echoes the resolved request descriptor.
+        let node = Node {
+            id: "n".into(),
+            kind: NodeKind::HttpRequest,
+            type_version: 1,
+            name: "n".into(),
+            config: json!({ "method": "POST", "url": "=item.url", "body": { "q": "=item.q" } }),
+            ports: vec![],
+            position: None,
+        };
+        let input = vec![Item::new(json!({ "url": "https://a", "q": "hi" }))];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = HttpRequestNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items[0].json["request"]["url"], "https://a");
+        assert_eq!(out.items[0].json["request"]["body"]["q"], "hi");
     }
 
     #[tokio::test]

@@ -13,23 +13,18 @@ pub struct ToolCallNode;
 #[async_trait]
 impl NodeExecutor for ToolCallNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
-        let slug = ctx
-            .node
-            .config
+        // Data-binding: resolve any `=`-expressions in the config against the
+        // node's input before reading the tool call's fields.
+        let scope = crate::nodes::expr_scope(&ctx);
+        let cfg = crate::expr::resolve(&ctx.node.config, &scope);
+        let slug = cfg
             .get("slug")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| {
                 EngineError::Capability("tool_call node: missing `slug` in config".to_string())
             })?;
-        let args = ctx
-            .node
-            .config
-            .get("args")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let conn = ctx
-            .node
-            .config
+        let args = cfg.get("args").cloned().unwrap_or(serde_json::Value::Null);
+        let conn = cfg
             .get("connection_ref")
             .and_then(serde_json::Value::as_str);
         let result = ctx.caps.tools.invoke(slug, args, conn).await?;
@@ -111,6 +106,7 @@ mod tests {
     }
 
     use super::ToolCallNode;
+    use crate::data::Item;
     use crate::error::EngineError;
     use crate::nodes::{NodeContext, NodeExecutor};
 
@@ -146,6 +142,25 @@ mod tests {
             matches!(err, EngineError::Capability(ref m) if m.contains("slug")),
             "expected a capability error mentioning `slug`, got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn resolves_expression_in_args_against_input() {
+        // `args.text` is a `=`-expression that must bind to the input item's
+        // `name`; the mock tool echoes the args it was invoked with.
+        let node = tool_node(json!({ "slug": "x.y", "args": { "text": "=item.name" } }));
+        let input = vec![Item::new(json!({ "name": "X" }))];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = ToolCallNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items[0].json["tool"], "x.y");
+        assert_eq!(out.items[0].json["args"]["text"], "X");
     }
 
     #[tokio::test]

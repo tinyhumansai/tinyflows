@@ -19,9 +19,12 @@ impl NodeExecutor for TransformNode {
             .get("set")
             .and_then(serde_json::Value::as_object)
             .cloned();
+        let items: Vec<serde_json::Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
         let mut out = Vec::with_capacity(ctx.input.len());
         for (index, item) in ctx.input.iter().enumerate() {
-            let scope = serde_json::json!({ "item": item.json.clone(), "run": ctx.run });
+            // `item` is this loop's current item; `items` exposes the full input
+            // batch for consistency with the integration-node data-binding scope.
+            let scope = serde_json::json!({ "item": item.json.clone(), "items": items.clone(), "run": ctx.run });
             let mut json = item.json.clone();
             if let Some(set) = &set {
                 if !json.is_object() {

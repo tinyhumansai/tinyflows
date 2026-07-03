@@ -33,6 +33,27 @@ pub struct NodeContext<'a> {
     pub caps: &'a Capabilities,
 }
 
+/// Builds the expression scope for a node from its runtime [`NodeContext`].
+///
+/// The returned object is the `.` input for `=`-expressions evaluated over a
+/// node's config (see [`crate::expr::resolve`]). It exposes exactly what
+/// `NodeContext` makes available:
+///
+/// - `item` — the first input item's `json`, or [`Value::Null`] when there is
+///   no input;
+/// - `items` — the `json` of every input item, in order;
+/// - `run` — the run metadata / trigger payload (`ctx.run`).
+#[must_use]
+pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
+    let item = ctx
+        .input
+        .first()
+        .map(|i| i.json.clone())
+        .unwrap_or(Value::Null);
+    let items: Vec<Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
+    serde_json::json!({ "item": item, "items": items, "run": ctx.run })
+}
+
 /// The outcome of executing a single node: the items it emits and (for branching
 /// nodes) which output port to follow.
 #[derive(Debug, Clone, Default)]

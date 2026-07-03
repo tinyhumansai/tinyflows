@@ -28,6 +28,16 @@ examples without any real backend.
 connection id) that names the account a call acts as. The crate never sees real
 secrets; the host resolves the reference to credentials inside its implementation.
 
+## Data-binding in config
+
+The capability-backed integration nodes (`agent`, `tool_call`, `http_request`)
+resolve `=` expressions embedded anywhere in their config before the config
+reaches the host implementation. Each expression is evaluated against the
+`{ item, items, run }` scope — the node's first input item, all of its input
+items, and the run payload — so a node can bind upstream output straight into its
+parameters (e.g. `args: { "text": "=item.name" }`). Values that do not start with
+`=` pass through as literals, so existing config is unaffected.
+
 ## The `Capabilities` bundle
 
 The engine receives a `Capabilities` struct — the per-run bundle of host

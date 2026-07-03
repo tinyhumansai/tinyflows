@@ -15,13 +15,15 @@ pub struct AgentNode;
 #[async_trait]
 impl NodeExecutor for AgentNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
+        // Data-binding: resolve any `=`-expressions in the config against the
+        // node's input before treating the config as the completion request.
+        let scope = crate::nodes::expr_scope(&ctx);
+        let cfg = crate::expr::resolve(&ctx.node.config, &scope);
         // A3-basic: the node config is the completion request; sub-port wiring is a later refinement.
-        let conn = ctx
-            .node
-            .config
+        let conn = cfg
             .get("connection_ref")
             .and_then(serde_json::Value::as_str);
-        let response = ctx.caps.llm.complete(ctx.node.config.clone(), conn).await?;
+        let response = ctx.caps.llm.complete(cfg.clone(), conn).await?;
         Ok(NodeOutput::main(vec![Item::new(response)]))
     }
 }
@@ -112,6 +114,24 @@ mod tests {
         // The mock LLM echoes the whole config under `completion` and the conn ref.
         assert_eq!(out.items[0].json["completion"]["prompt"], "hi");
         assert_eq!(out.items[0].json["connection"], "acct_9");
+    }
+
+    #[tokio::test]
+    async fn resolves_expression_in_config_against_input() {
+        // `prompt` is a `=`-expression bound to the input item's `name`; the mock
+        // LLM echoes the resolved request under `completion`.
+        let node = agent_node(json!({ "prompt": "=item.name" }));
+        let input = vec![Item::new(json!({ "name": "X" }))];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = AgentNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items[0].json["completion"]["prompt"], "X");
     }
 
     #[tokio::test]
