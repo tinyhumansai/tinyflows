@@ -40,4 +40,5 @@ default = []
 mock = []
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+async-trait = "0.1"
