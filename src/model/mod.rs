@@ -27,6 +27,10 @@ use serde::{Deserialize, Serialize};
 /// Graphs persisted with a lower `schema_version` are upgraded on load by
 /// [`crate::migrate`]. Bumping this constant is a breaking JSON-format change
 /// and must ship with a migration.
+///
+/// ```
+/// assert_eq!(tinyflows::model::CURRENT_SCHEMA_VERSION, 1);
+/// ```
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// Stable identifier for a node within a [`WorkflowGraph`].
@@ -107,6 +111,22 @@ fn default_port() -> String {
 }
 
 /// A complete, serializable workflow definition.
+///
+/// A freshly [`Default`](WorkflowGraph::default)-constructed graph is stamped
+/// with the [`CURRENT_SCHEMA_VERSION`], and JSON that omits the version fields
+/// deserializes with the same defaults, so persisted and in-memory graphs agree:
+///
+/// ```
+/// use tinyflows::model::{WorkflowGraph, CURRENT_SCHEMA_VERSION};
+///
+/// let fresh = WorkflowGraph::default();
+/// assert_eq!(fresh.schema_version, CURRENT_SCHEMA_VERSION);
+///
+/// // JSON that predates the `schema_version` field still loads as current.
+/// let loaded: WorkflowGraph =
+///     serde_json::from_str(r#"{"name":"demo","nodes":[],"edges":[]}"#).unwrap();
+/// assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowGraph {
     /// Overall model-shape version. Defaults to [`CURRENT_SCHEMA_VERSION`] so
@@ -144,6 +164,23 @@ impl Default for WorkflowGraph {
 
 impl WorkflowGraph {
     /// Returns the graph's trigger node, if it has exactly one.
+    ///
+    /// Returns `None` for a graph with zero triggers *or* more than one, so
+    /// callers can treat "not exactly one trigger" uniformly.
+    ///
+    /// ```
+    /// use tinyflows::model::WorkflowGraph;
+    ///
+    /// // An empty graph has no trigger.
+    /// assert!(WorkflowGraph::default().trigger().is_none());
+    ///
+    /// // A graph deserialized with a single trigger returns it.
+    /// let graph: WorkflowGraph = serde_json::from_str(
+    ///     r#"{"nodes":[{"id":"t","kind":"trigger","name":"start"}],"edges":[]}"#,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(graph.trigger().map(|n| n.id.as_str()), Some("t"));
+    /// ```
     #[must_use]
     pub fn trigger(&self) -> Option<&Node> {
         let mut triggers = self.nodes.iter().filter(|n| n.kind == NodeKind::Trigger);
@@ -163,6 +200,23 @@ impl WorkflowGraph {
     /// Returns the ids of the **direct** successors of `start` — the target node
     /// of each edge leaving it (immediate neighbors only, not the transitive
     /// closure; ids may repeat if multiple edges connect the same pair).
+    ///
+    /// ```
+    /// use tinyflows::model::WorkflowGraph;
+    ///
+    /// let graph: WorkflowGraph = serde_json::from_str(
+    ///     r#"{
+    ///       "nodes":[
+    ///         {"id":"t","kind":"trigger","name":"start"},
+    ///         {"id":"a","kind":"agent","name":"a"}
+    ///       ],
+    ///       "edges":[{"from_node":"t","to_node":"a"}]
+    ///     }"#,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(graph.successors("t"), vec!["a"]);
+    /// assert!(graph.successors("a").is_empty());
+    /// ```
     #[must_use]
     pub fn successors(&self, start: &str) -> Vec<&str> {
         self.edges
@@ -225,5 +279,147 @@ mod tests {
         assert_eq!(graph.trigger().map(|n| n.id.as_str()), Some("t"));
         assert_eq!(graph.node("a").map(|n| n.id.as_str()), Some("a"));
         assert!(graph.node("missing").is_none());
+    }
+
+    #[test]
+    fn default_stamps_current_schema_version() {
+        let graph = WorkflowGraph::default();
+        assert_eq!(graph.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(graph.schema_version, 1);
+        assert!(graph.id.is_none());
+        assert_eq!(graph.name, "");
+        assert!(graph.nodes.is_empty());
+        assert!(graph.edges.is_empty());
+    }
+
+    #[test]
+    fn trigger_returns_none_with_zero_triggers() {
+        let graph = WorkflowGraph {
+            nodes: vec![node("a", NodeKind::Agent)],
+            ..Default::default()
+        };
+        assert!(graph.trigger().is_none());
+    }
+
+    #[test]
+    fn trigger_returns_none_with_multiple_triggers() {
+        let graph = WorkflowGraph {
+            nodes: vec![node("t1", NodeKind::Trigger), node("t2", NodeKind::Trigger)],
+            ..Default::default()
+        };
+        assert!(graph.trigger().is_none());
+    }
+
+    #[test]
+    fn trigger_returns_the_single_trigger() {
+        let graph = WorkflowGraph {
+            nodes: vec![node("a", NodeKind::Agent), node("t", NodeKind::Trigger)],
+            ..Default::default()
+        };
+        assert_eq!(graph.trigger().map(|n| n.id.as_str()), Some("t"));
+    }
+
+    #[test]
+    fn successors_lists_direct_edge_targets() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("a", NodeKind::Agent),
+                node("b", NodeKind::Agent),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "a".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "b".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(graph.successors("t"), vec!["a", "b"]);
+        assert!(graph.successors("a").is_empty());
+        assert!(graph.successors("missing").is_empty());
+    }
+
+    #[test]
+    fn successors_may_repeat_for_parallel_edges() {
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), node("a", NodeKind::Agent)],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "a".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "other".to_string(),
+                    to_node: "a".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(graph.successors("t"), vec!["a", "a"]);
+    }
+
+    #[test]
+    fn round_trip_preserves_version_fields() {
+        let graph = WorkflowGraph {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            id: Some("wf_1".to_string()),
+            name: "demo".to_string(),
+            nodes: vec![Node {
+                id: "t".to_string(),
+                kind: NodeKind::Trigger,
+                type_version: 3,
+                name: "t".to_string(),
+                config: serde_json::json!({"mode": "manual"}),
+                ports: Vec::new(),
+                position: None,
+            }],
+            edges: Vec::new(),
+        };
+        let json = serde_json::to_string(&graph).expect("serialize");
+        assert!(json.contains("\"schema_version\":1"));
+        assert!(json.contains("\"type_version\":3"));
+        let back: WorkflowGraph = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(graph, back);
+        assert_eq!(back.nodes[0].type_version, 3);
+    }
+
+    #[test]
+    fn omitted_version_fields_use_serde_defaults() {
+        // A graph and node authored before the version fields existed.
+        let json = r#"{
+            "name": "legacy",
+            "nodes": [{"id": "t", "kind": "trigger", "name": "start"}],
+            "edges": []
+        }"#;
+        let graph: WorkflowGraph = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(graph.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(graph.nodes[0].type_version, default_type_version());
+        assert_eq!(graph.nodes[0].type_version, 1);
+        // Other `#[serde(default)]` fields fill in too.
+        assert!(graph.id.is_none());
+        assert!(graph.nodes[0].config.is_null());
+        assert!(graph.nodes[0].ports.is_empty());
+        assert!(graph.nodes[0].position.is_none());
+    }
+
+    #[test]
+    fn edge_from_port_defaults_to_main() {
+        let json = r#"{"from_node":"t","to_node":"a","to_port":"custom"}"#;
+        let edge: Edge = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(edge.from_port, "main");
+        assert_eq!(edge.to_port, "custom");
     }
 }

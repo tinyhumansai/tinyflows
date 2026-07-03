@@ -53,3 +53,86 @@ pub enum EngineError {
 
 /// Convenience result alias for compile/run operations.
 pub type Result<T> = std::result::Result<T, EngineError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_error_display() {
+        assert_eq!(
+            ValidationError::MissingTrigger.to_string(),
+            "workflow has no trigger node"
+        );
+        assert_eq!(
+            ValidationError::MultipleTriggers(vec!["t1".to_string(), "t2".to_string()]).to_string(),
+            "workflow has multiple trigger nodes: [\"t1\", \"t2\"]"
+        );
+        assert_eq!(
+            ValidationError::UnknownNode("ghost".to_string()).to_string(),
+            "edge references unknown node id: ghost"
+        );
+        assert_eq!(
+            ValidationError::DuplicateNodeId("dup".to_string()).to_string(),
+            "duplicate node id: dup"
+        );
+        assert_eq!(
+            ValidationError::IllegalCycle("loop".to_string()).to_string(),
+            "illegal cycle detected involving node: loop"
+        );
+        assert_eq!(
+            ValidationError::InvalidNodeConfig {
+                node: "n1".to_string(),
+                reason: "missing url".to_string(),
+            }
+            .to_string(),
+            "invalid config for node n1: missing url"
+        );
+    }
+
+    #[test]
+    fn engine_error_display() {
+        assert_eq!(
+            EngineError::Unimplemented("checkpoint replay").to_string(),
+            "not yet implemented: checkpoint replay"
+        );
+        assert_eq!(
+            EngineError::Capability("http timed out".to_string()).to_string(),
+            "capability error: http timed out"
+        );
+        assert_eq!(
+            EngineError::Validation(ValidationError::MissingTrigger).to_string(),
+            "validation failed: workflow has no trigger node"
+        );
+    }
+
+    #[test]
+    fn validation_error_converts_into_engine_error() {
+        let engine: EngineError = ValidationError::MissingTrigger.into();
+        assert!(matches!(
+            engine,
+            EngineError::Validation(ValidationError::MissingTrigger)
+        ));
+    }
+
+    #[test]
+    fn question_mark_operator_lifts_validation_error() {
+        fn inner() -> Result<()> {
+            Err(ValidationError::DuplicateNodeId("dup".to_string()))?;
+            Ok(())
+        }
+        match inner() {
+            Err(EngineError::Validation(ValidationError::DuplicateNodeId(id))) => {
+                assert_eq!(id, "dup");
+            }
+            other => panic!("expected lifted validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validation_error_is_comparable_and_cloneable() {
+        let err = ValidationError::UnknownNode("x".to_string());
+        assert_eq!(err.clone(), err);
+        assert_ne!(err, ValidationError::MissingTrigger);
+    }
+}

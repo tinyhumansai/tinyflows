@@ -127,4 +127,78 @@ mod tests {
             Err(ValidationError::UnknownNode("ghost".to_string()))
         );
     }
+
+    #[test]
+    fn rejects_empty_graph_as_missing_trigger() {
+        let graph = WorkflowGraph::default();
+        assert_eq!(validate(&graph), Err(ValidationError::MissingTrigger));
+    }
+
+    #[test]
+    fn rejects_edge_with_unknown_from_node() {
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger)],
+            edges: vec![Edge {
+                from_node: "ghost".to_string(),
+                from_port: "main".to_string(),
+                to_node: "t".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::UnknownNode("ghost".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_edge_with_unknown_to_node() {
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), node("a", NodeKind::Agent)],
+            edges: vec![Edge {
+                from_node: "a".to_string(),
+                from_port: "main".to_string(),
+                to_node: "ghost".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::UnknownNode("ghost".to_string()))
+        );
+    }
+
+    #[test]
+    fn multiple_triggers_error_carries_all_ids() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t1", NodeKind::Trigger),
+                node("t2", NodeKind::Trigger),
+                node("t3", NodeKind::Trigger),
+            ],
+            ..Default::default()
+        };
+        match validate(&graph) {
+            Err(ValidationError::MultipleTriggers(ids)) => {
+                assert_eq!(ids, vec!["t1", "t2", "t3"]);
+            }
+            other => panic!("expected MultipleTriggers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_id_is_reported_before_trigger_checks() {
+        // Two agents sharing an id and no trigger: the duplicate-id check runs
+        // first, so that is the error surfaced.
+        let graph = WorkflowGraph {
+            nodes: vec![node("dup", NodeKind::Agent), node("dup", NodeKind::Agent)],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::DuplicateNodeId("dup".to_string()))
+        );
+    }
 }
