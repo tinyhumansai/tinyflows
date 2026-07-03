@@ -50,5 +50,41 @@ mod tests {
         };
         let out = OutputParserNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items, input);
+        assert_eq!(out.port, None, "passthrough stays on the main port");
+    }
+
+    fn parser_node() -> Node {
+        Node {
+            id: "p".into(),
+            kind: NodeKind::OutputParser,
+            type_version: 1,
+            name: "p".into(),
+            config: Value::Null,
+            ports: vec![],
+            position: None,
+        }
+    }
+
+    async fn run_parser(input: Vec<Item>) -> Vec<Item> {
+        let node = parser_node();
+        let caps = mock_capabilities();
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &Value::Null,
+            caps: &caps,
+        };
+        OutputParserNode.execute(ctx).await.expect("execute").items
+    }
+
+    #[tokio::test]
+    async fn passes_single_item_through() {
+        let input = vec![Item::new(json!({ "only": 1 }))];
+        assert_eq!(run_parser(input.clone()).await, input);
+    }
+
+    #[tokio::test]
+    async fn empty_input_yields_no_items() {
+        assert!(run_parser(vec![]).await.is_empty());
     }
 }

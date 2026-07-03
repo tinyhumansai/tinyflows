@@ -78,4 +78,78 @@ mod tests {
             "hi"
         );
     }
+
+    use super::AgentNode;
+    use crate::data::Item;
+    use crate::nodes::{NodeContext, NodeExecutor};
+
+    fn agent_node(config: Value) -> Node {
+        Node {
+            id: "n".into(),
+            kind: NodeKind::Agent,
+            type_version: 1,
+            name: "n".into(),
+            config,
+            ports: vec![],
+            position: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn threads_connection_ref_and_echoes_config() {
+        let node = agent_node(json!({ "prompt": "hi", "connection_ref": "acct_9" }));
+        let input = vec![Item::new(json!({ "seed": 1 }))];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = AgentNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items.len(), 1);
+        // The mock LLM echoes the whole config under `completion` and the conn ref.
+        assert_eq!(out.items[0].json["completion"]["prompt"], "hi");
+        assert_eq!(out.items[0].json["connection"], "acct_9");
+    }
+
+    #[tokio::test]
+    async fn missing_connection_ref_is_null() {
+        let node = agent_node(json!({ "prompt": "hi" }));
+        let input = vec![];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = AgentNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items[0].json["connection"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn emits_exactly_one_item_regardless_of_input_count() {
+        // The agent turn is driven by config, not by mapping over input, so it
+        // always emits a single completion item.
+        let node = agent_node(json!({ "prompt": "hi" }));
+        let input = vec![
+            Item::new(json!({ "a": 1 })),
+            Item::new(json!({ "b": 2 })),
+            Item::new(json!({ "c": 3 })),
+        ];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = AgentNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(out.port, None);
+    }
 }

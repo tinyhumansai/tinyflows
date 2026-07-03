@@ -118,6 +118,71 @@ mod tests {
         assert_eq!(output.items[0].paired_item, Some(0));
     }
 
+    async fn run_split(config: Value, input: Vec<Item>) -> Vec<Item> {
+        let node = split_out_node(config);
+        let caps = mock_capabilities();
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &Value::Null,
+            caps: &caps,
+        };
+        SplitOutNode.execute(ctx).await.expect("execute").items
+    }
+
+    #[tokio::test]
+    async fn missing_path_key_emits_single_null_item() {
+        // The configured path names a key that is absent → resolves to `null`,
+        // which is non-array → one item carrying `null`, paired to input 0.
+        let out = run_split(
+            json!({ "path": "nope" }),
+            vec![Item::new(json!({ "items": [1, 2] }))],
+        )
+        .await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].json, Value::Null);
+        assert_eq!(out[0].paired_item, Some(0));
+    }
+
+    #[tokio::test]
+    async fn empty_array_emits_no_items() {
+        let out = run_split(
+            json!({ "path": "items" }),
+            vec![Item::new(json!({ "items": [] }))],
+        )
+        .await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn multiple_inputs_preserve_pairing_index() {
+        let input = vec![
+            Item::new(json!({ "items": [1, 2] })),
+            Item::new(json!({ "items": [3] })),
+        ];
+        let out = run_split(json!({ "path": "items" }), input).await;
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].json, json!(1));
+        assert_eq!(out[0].paired_item, Some(0));
+        assert_eq!(out[1].json, json!(2));
+        assert_eq!(out[1].paired_item, Some(0));
+        assert_eq!(out[2].json, json!(3));
+        assert_eq!(
+            out[2].paired_item,
+            Some(1),
+            "the second input's element pairs to index 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_input_emits_no_items() {
+        assert!(
+            run_split(json!({ "path": "items" }), vec![])
+                .await
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn drives_end_to_end_via_engine() {
         use crate::compiler::compile;
