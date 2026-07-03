@@ -75,7 +75,10 @@ pub trait StateStore: Send + Sync {
 
 /// The bundle of capabilities handed to the engine for a run.
 ///
-/// Construct one per run from the host's concrete implementations.
+/// Construct one per run from the host's concrete implementations. It carries
+/// all five host-injected capabilities: the [`LlmProvider`], [`ToolInvoker`],
+/// [`HttpClient`], [`CodeRunner`], and [`StateStore`]. Nodes reach each one
+/// through `ctx.caps` during execution.
 #[derive(Clone)]
 pub struct Capabilities {
     /// LLM provider for agent / output-parser nodes.
@@ -86,6 +89,12 @@ pub struct Capabilities {
     pub http: Arc<dyn HttpClient>,
     /// Sandboxed code runner for `code` nodes.
     pub code: Arc<dyn CodeRunner>,
+    /// Durable key/value state store for stateful workflows.
+    ///
+    /// The host implements [`StateStore`] (for example, OpenHuman's
+    /// run-ledger-backed store) and nodes access durable state through
+    /// `ctx.caps.state`.
+    pub state: Arc<dyn StateStore>,
 }
 
 #[cfg(test)]
@@ -118,6 +127,7 @@ mod tests {
         assert!(Arc::ptr_eq(&caps.tools, &clone.tools));
         assert!(Arc::ptr_eq(&caps.http, &clone.http));
         assert!(Arc::ptr_eq(&caps.code, &clone.code));
+        assert!(Arc::ptr_eq(&caps.state, &clone.state));
     }
 
     #[tokio::test]

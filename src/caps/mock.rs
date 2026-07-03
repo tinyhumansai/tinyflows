@@ -87,6 +87,7 @@ pub fn mock_capabilities() -> Capabilities {
         tools: Arc::new(MockTools),
         http: Arc::new(MockHttp),
         code: Arc::new(MockCode),
+        state: Arc::new(MockStateStore::default()),
     }
 }
 
@@ -178,6 +179,17 @@ mod tests {
         // Storing again overwrites the previous value.
         store.store("k", json!(2)).await.unwrap();
         assert_eq!(store.load("k").await.unwrap(), Some(json!(2)));
+    }
+
+    #[tokio::test]
+    async fn mock_capabilities_state_store_round_trips_through_bundle() {
+        let caps = mock_capabilities();
+        // A missing key reads back as `None`.
+        assert!(caps.state.load("k").await.unwrap().is_none());
+
+        // A stored value is readable through the same bundle handle.
+        caps.state.store("k", json!({"v": 1})).await.unwrap();
+        assert_eq!(caps.state.load("k").await.unwrap(), Some(json!({"v": 1})));
     }
 
     #[tokio::test]
