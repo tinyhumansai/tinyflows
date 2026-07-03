@@ -76,4 +76,61 @@ mod tests {
             .expect("run");
         assert_eq!(out.output["nodes"]["n"]["items"][0]["json"]["status"], 200);
     }
+
+    use super::HttpRequestNode;
+    use crate::data::Item;
+    use crate::nodes::{NodeContext, NodeExecutor};
+
+    #[tokio::test]
+    async fn echoes_method_url_and_threads_connection() {
+        let node = Node {
+            id: "n".into(),
+            kind: NodeKind::HttpRequest,
+            type_version: 1,
+            name: "n".into(),
+            config: json!({ "method": "POST", "url": "https://api.test/x", "connection_ref": "http:acct_2" }),
+            ports: vec![],
+            position: None,
+        };
+        let input = vec![Item::new(json!({ "seed": 1 }))];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = HttpRequestNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items.len(), 1);
+        // The mock HTTP client echoes the request descriptor and the conn ref.
+        assert_eq!(out.items[0].json["status"], 200);
+        assert_eq!(out.items[0].json["request"]["method"], "POST");
+        assert_eq!(out.items[0].json["request"]["url"], "https://api.test/x");
+        assert_eq!(out.items[0].json["connection"], "http:acct_2");
+    }
+
+    #[tokio::test]
+    async fn missing_connection_ref_is_null() {
+        let node = Node {
+            id: "n".into(),
+            kind: NodeKind::HttpRequest,
+            type_version: 1,
+            name: "n".into(),
+            config: json!({ "method": "GET", "url": "u" }),
+            ports: vec![],
+            position: None,
+        };
+        let input = vec![];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = HttpRequestNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items[0].json["connection"], Value::Null);
+    }
 }

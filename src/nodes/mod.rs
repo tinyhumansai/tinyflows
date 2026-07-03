@@ -109,3 +109,117 @@ pub(crate) fn executor_for(kind: &NodeKind) -> Box<dyn NodeExecutor> {
         NodeKind::Transform => Box::new(control_flow::TransformNode),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caps::mock::mock_capabilities;
+    use crate::data::Item;
+    use crate::model::Node;
+    use serde_json::json;
+
+    /// Every [`NodeKind`] variant, so the coverage below stays exhaustive.
+    fn all_kinds() -> Vec<NodeKind> {
+        use NodeKind::{
+            Agent, Code, Condition, HttpRequest, Merge, OutputParser, SplitOut, SubWorkflow,
+            Switch, ToolCall, Transform, Trigger,
+        };
+        vec![
+            Trigger,
+            Agent,
+            ToolCall,
+            HttpRequest,
+            Code,
+            Condition,
+            Switch,
+            Merge,
+            SplitOut,
+            Transform,
+            OutputParser,
+            SubWorkflow,
+        ]
+    }
+
+    /// Minimal config that lets each kind execute successfully.
+    fn config_for(kind: &NodeKind) -> Value {
+        match kind {
+            NodeKind::ToolCall => json!({ "slug": "demo" }),
+            NodeKind::SubWorkflow => json!({
+                "workflow": { "nodes": [{ "id": "ct", "kind": "trigger", "name": "ct" }], "edges": [] }
+            }),
+            _ => Value::Null,
+        }
+    }
+
+    fn node(kind: NodeKind, config: Value) -> Node {
+        Node {
+            id: "n".into(),
+            kind,
+            type_version: 1,
+            name: "n".into(),
+            config,
+            ports: vec![],
+            position: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_for_is_total_and_every_executor_runs() {
+        let caps = mock_capabilities();
+        let run = Value::Null;
+        for kind in all_kinds() {
+            let node = node(kind.clone(), config_for(&kind));
+            let input = vec![Item::new(json!({ "x": 1 }))];
+            let exec = executor_for(&kind);
+            let out = exec
+                .execute(NodeContext {
+                    node: &node,
+                    input: &input,
+                    run: &run,
+                    caps: &caps,
+                })
+                .await;
+            assert!(
+                out.is_ok(),
+                "executor for {kind:?} should run: {:?}",
+                out.err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn trigger_executor_passes_input_through() {
+        let caps = mock_capabilities();
+        let run = Value::Null;
+        let node = node(NodeKind::Trigger, Value::Null);
+        let input = vec![Item::new(json!({ "a": 1 })), Item::new(json!({ "b": 2 }))];
+        let out = executor_for(&NodeKind::Trigger)
+            .execute(NodeContext {
+                node: &node,
+                input: &input,
+                run: &run,
+                caps: &caps,
+            })
+            .await
+            .expect("execute");
+        assert_eq!(out.items, input);
+        assert_eq!(out.port, None);
+    }
+
+    #[test]
+    fn node_output_constructors_have_expected_shapes() {
+        let items = vec![Item::new(json!({ "a": 1 }))];
+
+        let main = NodeOutput::main(items.clone());
+        assert_eq!(main.port, None);
+        assert_eq!(main.items, items);
+
+        let routed = NodeOutput::routed(items.clone(), "true");
+        assert_eq!(routed.port.as_deref(), Some("true"));
+        assert_eq!(routed.items, items);
+
+        let empty = NodeOutput::empty();
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.port, None);
+    }
+}

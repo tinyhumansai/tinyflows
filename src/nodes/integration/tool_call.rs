@@ -109,4 +109,61 @@ mod tests {
             "composio:slack:acct_1"
         );
     }
+
+    use super::ToolCallNode;
+    use crate::error::EngineError;
+    use crate::nodes::{NodeContext, NodeExecutor};
+
+    fn tool_node(config: Value) -> Node {
+        Node {
+            id: "n".into(),
+            kind: NodeKind::ToolCall,
+            type_version: 1,
+            name: "n".into(),
+            config,
+            ports: vec![],
+            position: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_slug_is_a_capability_error() {
+        let node = tool_node(json!({ "args": { "x": 1 } }));
+        let input = vec![];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let err = ToolCallNode
+            .execute(ctx)
+            .await
+            .expect_err("missing slug must error");
+        assert!(
+            matches!(err, EngineError::Capability(ref m) if m.contains("slug")),
+            "expected a capability error mentioning `slug`, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_args_default_to_null() {
+        let node = tool_node(json!({ "slug": "noop" }));
+        let input = vec![];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        let out = ToolCallNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(out.items[0].json["tool"], "noop");
+        assert_eq!(out.items[0].json["args"], Value::Null);
+        assert_eq!(out.items[0].json["connection"], Value::Null);
+    }
 }

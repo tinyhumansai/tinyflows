@@ -39,10 +39,13 @@ impl NodeExecutor for SubWorkflowNode {
 mod tests {
     use serde_json::{Value, json};
 
+    use super::SubWorkflowNode;
     use crate::caps::mock::mock_capabilities;
     use crate::compiler::compile;
     use crate::engine::run;
+    use crate::error::EngineError;
     use crate::model::{Edge, Node, NodeKind, WorkflowGraph};
+    use crate::nodes::{NodeContext, NodeExecutor};
 
     fn node(id: &str, kind: NodeKind) -> Node {
         Node {
@@ -54,6 +57,43 @@ mod tests {
             ports: Vec::new(),
             position: None,
         }
+    }
+
+    async fn execute_err(config: Value) -> EngineError {
+        let mut sw = node("sw", NodeKind::SubWorkflow);
+        sw.config = config;
+        let input = vec![];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &sw,
+            input: &input,
+            run: &run_meta,
+            caps: &caps,
+        };
+        SubWorkflowNode
+            .execute(ctx)
+            .await
+            .expect_err("expected an error")
+    }
+
+    #[tokio::test]
+    async fn missing_workflow_config_is_a_capability_error() {
+        let err = execute_err(Value::Null).await;
+        assert!(
+            matches!(err, EngineError::Capability(ref m) if m.contains("workflow")),
+            "expected a capability error mentioning `workflow`, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_workflow_value_is_a_capability_error() {
+        // A non-graph value under `workflow` fails to deserialize into a graph.
+        let err = execute_err(json!({ "workflow": 123 })).await;
+        assert!(
+            matches!(err, EngineError::Capability(ref m) if m.contains("invalid workflow")),
+            "expected a capability error about an invalid workflow, got: {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -51,10 +51,13 @@ impl NodeExecutor for SwitchNode {
 mod tests {
     use serde_json::{Value, json};
 
+    use super::SwitchNode;
     use crate::caps::mock::mock_capabilities;
     use crate::compiler::compile;
+    use crate::data::Item;
     use crate::engine::run;
     use crate::model::{Edge, Node, NodeKind, WorkflowGraph};
+    use crate::nodes::{NodeContext, NodeExecutor};
 
     fn node(id: &str, kind: NodeKind) -> Node {
         Node {
@@ -66,6 +69,116 @@ mod tests {
             ports: Vec::new(),
             position: None,
         }
+    }
+
+    /// Executes the switch node directly and returns `(routed_port, items)`.
+    async fn route(config: Value, input: Vec<Item>) -> (String, Vec<Item>) {
+        let mut sw = node("sw", NodeKind::Switch);
+        sw.config = config;
+        let caps = mock_capabilities();
+        let run = Value::Null;
+        let ctx = NodeContext {
+            node: &sw,
+            input: &input,
+            run: &run,
+            caps: &caps,
+        };
+        let out = SwitchNode.execute(ctx).await.expect("execute");
+        (out.port.expect("switch always routes to a port"), out.items)
+    }
+
+    #[tokio::test]
+    async fn field_string_value_selects_port() {
+        let (port, _) = route(
+            json!({ "field": "type" }),
+            vec![Item::new(json!({ "type": "a" }))],
+        )
+        .await;
+        assert_eq!(port, "a");
+    }
+
+    #[tokio::test]
+    async fn expression_value_selects_port() {
+        // A dotted-path expression over `{ item, run }`.
+        let (port, _) = route(
+            json!({ "expression": "=item.type" }),
+            vec![Item::new(json!({ "type": "b" }))],
+        )
+        .await;
+        assert_eq!(port, "b");
+    }
+
+    #[tokio::test]
+    async fn expression_takes_precedence_over_field() {
+        // Both keys present: the expression wins.
+        let (port, _) = route(
+            json!({ "expression": "=item.wanted", "field": "ignored" }),
+            vec![Item::new(json!({ "wanted": "x", "ignored": "y" }))],
+        )
+        .await;
+        assert_eq!(port, "x");
+    }
+
+    #[tokio::test]
+    async fn jq_expression_selects_port() {
+        // A non-dotted jq program is run by the jaq engine; its numeric output is
+        // stringified to name the port.
+        let (port, _) = route(
+            json!({ "expression": "=.item.items | length" }),
+            vec![Item::new(json!({ "items": [1, 2, 3] }))],
+        )
+        .await;
+        assert_eq!(port, "3");
+    }
+
+    #[tokio::test]
+    async fn numeric_discriminant_is_stringified() {
+        let (port, _) = route(json!({ "field": "n" }), vec![Item::new(json!({ "n": 5 }))]).await;
+        assert_eq!(port, "5");
+    }
+
+    #[tokio::test]
+    async fn boolean_discriminant_is_stringified() {
+        let (port, _) = route(
+            json!({ "field": "b" }),
+            vec![Item::new(json!({ "b": true }))],
+        )
+        .await;
+        assert_eq!(port, "true");
+    }
+
+    #[tokio::test]
+    async fn missing_field_key_routes_default() {
+        let (port, _) = route(
+            json!({ "field": "absent" }),
+            vec![Item::new(json!({ "type": "a" }))],
+        )
+        .await;
+        assert_eq!(port, "default");
+    }
+
+    #[tokio::test]
+    async fn no_discriminant_config_routes_default() {
+        let (port, _) = route(Value::Null, vec![Item::new(json!({ "type": "a" }))]).await;
+        assert_eq!(port, "default");
+    }
+
+    #[tokio::test]
+    async fn empty_input_routes_default_and_passes_no_items() {
+        let (port, items) = route(json!({ "field": "type" }), vec![]).await;
+        assert_eq!(port, "default");
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn all_input_items_are_forwarded_on_the_chosen_port() {
+        let input = vec![
+            Item::new(json!({ "type": "a", "i": 1 })),
+            Item::new(json!({ "i": 2 })),
+        ];
+        let (port, items) = route(json!({ "field": "type" }), input.clone()).await;
+        assert_eq!(port, "a", "the first item selects the port");
+        assert_eq!(items, input, "every input item is routed through");
     }
 
     #[tokio::test]
