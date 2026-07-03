@@ -11,11 +11,14 @@ homepage = "https://github.com/tinyhumansai/tinyflows"
 documentation = "https://docs.rs/tinyflows"
 keywords = ["automation", "workflow", "orchestration", "pipeline"]
 categories = ["command-line-utilities", "development-tools"]
+# Anchored with a leading `/` so a bare name like `README.md` doesn't also match
+# nested files (e.g. the gitignored `local/**/README.md`) and leak them into the
+# published package.
 include = [
-    "src/**/*.rs",
-    "Cargo.toml",
-    "README.md",
-    "LICENSE",
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
 ]
 
 [dependencies]
