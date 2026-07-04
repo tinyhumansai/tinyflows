@@ -36,6 +36,19 @@ use tinyagents::{
 /// configures how aggressively a checkpointer persists.
 pub use tinyagents::{Checkpointer, DurabilityMode, FileCheckpointer, InMemoryCheckpointer};
 
+/// Graph-observability types re-exported from `tinyagents` so a host can
+/// journal a run's durable [`GraphObservation`]s without taking a direct
+/// dependency on `tinyagents`.
+///
+/// Inject a [`GraphEventJournal`] via [`run_with_checkpointer_journaled`] /
+/// [`resume_with_checkpointer_journaled`]; every graph event the run emits is
+/// wrapped into a [`GraphObservation`] and appended under the run's
+/// `tinyagents` run id (returned on [`JournaledRunOutcome`]), so the host can
+/// read the slice back (`journal.read_from(run_id, 0)`) and e.g. export it to
+/// Langfuse. [`InMemoryGraphEventJournal`] is a process-local implementation
+/// suitable for per-run capture.
+pub use tinyagents::{GraphEventJournal, GraphObservation, InMemoryGraphEventJournal};
+
 use crate::caps::Capabilities;
 use crate::compiler::CompiledWorkflow;
 use crate::data::Item;
@@ -58,6 +71,32 @@ pub struct RunOutcome {
     /// whose id was not present in the run input's `approvals` array; its
     /// downstream did not run. Empty for a fully completed run.
     pub pending_approvals: Vec<String>,
+}
+
+/// The `tinyagents`-minted identifiers of the underlying graph run.
+///
+/// A [`GraphEventJournal`] attached to a run keys that run's
+/// [`GraphObservation`]s by `run_id`, so a host that journaled a run reads the
+/// slice back with `journal.read_from(&run_id, 0)`. `root_run_id` is the root
+/// of the recursion tree (equal to `run_id` for a top-level run) and is what
+/// Langfuse-style exporters default their trace id to.
+#[derive(Debug, Clone)]
+pub struct GraphRunIds {
+    /// The run id of this graph execution — the journal's stream key.
+    pub run_id: String,
+    /// The root run id of the recursion tree (equals `run_id` at top level).
+    pub root_run_id: String,
+}
+
+/// The result of a journaled workflow run: the plain [`RunOutcome`] plus the
+/// [`GraphRunIds`] needed to read the run's [`GraphObservation`]s back out of
+/// the journal the caller injected.
+#[derive(Debug, Clone)]
+pub struct JournaledRunOutcome {
+    /// The workflow-level outcome (final state + pending approval gates).
+    pub outcome: RunOutcome,
+    /// The `tinyagents` run ids the injected journal keys observations by.
+    pub graph_run_ids: GraphRunIds,
 }
 
 /// Reducer that deep-merges each node's partial `{ "nodes": { id: { items } } }`
@@ -174,13 +213,14 @@ pub async fn run_with_observer(
     let checkpointer: Arc<dyn Checkpointer<Value>> =
         Arc::new(InMemoryCheckpointer::<Value>::default());
     let thread_id = default_thread_id(workflow)?;
-    let (_graph, _thread_id, outcome) = build_and_run(
+    let (_graph, _thread_id, outcome, _run_ids) = build_and_run(
         workflow,
         input,
         capabilities,
         observer,
         checkpointer,
         thread_id,
+        None,
     )
     .await?;
     Ok(outcome)
@@ -197,6 +237,11 @@ pub async fn run_with_observer(
 /// construction separate is what lets a host rebuild the identical graph in a
 /// fresh process, re-attach the same durable `checkpointer`, and resume.
 ///
+/// When `journal` is supplied the compiled graph is additionally wired with
+/// `tinyagents`' durable event journal (see
+/// [`CompiledGraph::with_event_journal`]), so every emitted graph event is
+/// recorded as a [`GraphObservation`] keyed by the run's `tinyagents` run id.
+///
 /// # Errors
 /// Returns an [`EngineError`] if the workflow has no trigger or if compilation
 /// fails.
@@ -206,6 +251,7 @@ fn build_graph(
     observer: &Arc<dyn RunObserver>,
     steps: &Arc<Mutex<Vec<ExecutionStep>>>,
     checkpointer: Arc<dyn Checkpointer<Value>>,
+    journal: Option<Arc<dyn GraphEventJournal>>,
 ) -> Result<(CompiledGraph<Value, Value>, String)> {
     let graph = &workflow.graph;
 
@@ -560,10 +606,18 @@ fn build_graph(
     // checkpointer is host-injected: the default entry points supply an
     // in-memory one to keep the crate host-agnostic and dep-free, while a host
     // can inject a durable store for cross-process resume.
-    let compiled = builder
+    let mut compiled = builder
         .compile()
         .map_err(|e| EngineError::Capability(e.to_string()))?
         .with_checkpointer(checkpointer);
+
+    // Opt-in durable observability: with a journal attached, tinyagents wraps
+    // every emitted graph event into a `GraphObservation` (stamped with run
+    // lineage + step) and appends it under the run id.
+    if let Some(journal) = journal {
+        tracing::debug!("attaching graph event journal to compiled workflow graph");
+        compiled = compiled.with_event_journal(journal);
+    }
 
     Ok((compiled, trigger_id))
 }
@@ -603,7 +657,8 @@ async fn build_and_run(
     observer: &Arc<dyn RunObserver>,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: String,
-) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome)> {
+    journal: Option<Arc<dyn GraphEventJournal>>,
+) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome, GraphRunIds)> {
     // Process-local, monotonic run id — no time/random source.
     let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
     observer.on_run_start(&run_id);
@@ -616,8 +671,14 @@ async fn build_and_run(
 
     // Build and compile the graph under the host-supplied checkpointer;
     // `trigger_id` is the graph's entry node.
-    let (compiled, trigger_id) =
-        build_graph(workflow, capabilities, observer, &steps, checkpointer)?;
+    let (compiled, trigger_id) = build_graph(
+        workflow,
+        capabilities,
+        observer,
+        &steps,
+        checkpointer,
+        journal,
+    )?;
 
     let seed_items = items_update(&trigger_id, &[Item::new(input.clone())], None)
         .map_err(|e| EngineError::Capability(e.to_string()))?;
@@ -657,6 +718,13 @@ async fn build_and_run(
     };
     observer.on_run_finish(&run_record);
 
+    // The tinyagents-minted run ids: a journal (when attached) keys this run's
+    // observations by `run_id`, so surface both ids to the caller.
+    let graph_run_ids = GraphRunIds {
+        run_id: execution.run_id.as_str().to_string(),
+        root_run_id: execution.root_run_id.as_str().to_string(),
+    };
+
     Ok((
         compiled,
         thread_id,
@@ -664,6 +732,7 @@ async fn build_and_run(
             output: execution.state,
             pending_approvals,
         },
+        graph_run_ids,
     ))
 }
 
@@ -802,13 +871,14 @@ pub async fn run_resumable(
     let checkpointer: Arc<dyn Checkpointer<Value>> =
         Arc::new(InMemoryCheckpointer::<Value>::default());
     let thread_id = default_thread_id(workflow)?;
-    let (graph, thread_id, outcome) = build_and_run(
+    let (graph, thread_id, outcome, _run_ids) = build_and_run(
         workflow,
         input,
         capabilities,
         &observer,
         checkpointer,
         thread_id,
+        None,
     )
     .await?;
     Ok(ResumableRun {
@@ -849,13 +919,14 @@ pub async fn run_with_checkpointer(
     thread_id: &str,
 ) -> Result<RunOutcome> {
     let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
-    let (_graph, _thread_id, outcome) = build_and_run(
+    let (_graph, _thread_id, outcome, _run_ids) = build_and_run(
         workflow,
         input,
         capabilities,
         &observer,
         checkpointer,
         thread_id.to_string(),
+        None,
     )
     .await?;
     Ok(outcome)
@@ -896,13 +967,123 @@ pub async fn resume_with_checkpointer(
     thread_id: &str,
     newly_approved: Vec<String>,
 ) -> Result<RunOutcome> {
+    let (outcome, _run_ids) = resume_with_checkpointer_inner(
+        workflow,
+        capabilities,
+        checkpointer,
+        thread_id,
+        newly_approved,
+        None,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Like [`run_with_checkpointer`], but additionally attaches the host-supplied
+/// `journal`: every graph event the run emits is recorded as a durable
+/// [`GraphObservation`] keyed by the run's `tinyagents` run id, which is
+/// returned on the [`JournaledRunOutcome`] so the host can read the exact
+/// slice back (`journal.read_from(&graph_run_ids.run_id, 0)`) — for example to
+/// export the run to Langfuse after it settles.
+///
+/// All execution behavior is identical to [`run_with_checkpointer`]; the
+/// journal sits off the hot path (appends are best-effort inside `tinyagents`)
+/// and never fails the run.
+///
+/// # Errors
+/// Same as [`run_with_checkpointer`].
+pub async fn run_with_checkpointer_journaled(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+    journal: Arc<dyn GraphEventJournal>,
+) -> Result<JournaledRunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    let (_graph, _thread_id, outcome, graph_run_ids) = build_and_run(
+        workflow,
+        input,
+        capabilities,
+        &observer,
+        checkpointer,
+        thread_id.to_string(),
+        Some(journal),
+    )
+    .await?;
+    tracing::debug!(
+        run_id = %graph_run_ids.run_id,
+        root_run_id = %graph_run_ids.root_run_id,
+        "journaled workflow run finished"
+    );
+    Ok(JournaledRunOutcome {
+        outcome,
+        graph_run_ids,
+    })
+}
+
+/// Like [`resume_with_checkpointer`], but additionally attaches the
+/// host-supplied `journal` to the resumed run (see
+/// [`run_with_checkpointer_journaled`] for the journaling contract). The
+/// resumed execution mints a **new** `tinyagents` run id — returned on the
+/// [`JournaledRunOutcome`] — so the host reads the resume's observations under
+/// that id, not the original run's.
+///
+/// # Errors
+/// Same as [`resume_with_checkpointer`].
+pub async fn resume_with_checkpointer_journaled(
+    workflow: &CompiledWorkflow,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+    newly_approved: Vec<String>,
+    journal: Arc<dyn GraphEventJournal>,
+) -> Result<JournaledRunOutcome> {
+    let (outcome, graph_run_ids) = resume_with_checkpointer_inner(
+        workflow,
+        capabilities,
+        checkpointer,
+        thread_id,
+        newly_approved,
+        Some(journal),
+    )
+    .await?;
+    tracing::debug!(
+        run_id = %graph_run_ids.run_id,
+        root_run_id = %graph_run_ids.root_run_id,
+        "journaled workflow resume finished"
+    );
+    Ok(JournaledRunOutcome {
+        outcome,
+        graph_run_ids,
+    })
+}
+
+/// Shared implementation of the checkpointed resume path: rebuilds the graph
+/// (optionally journaled), re-attaches the same `checkpointer`, and resumes
+/// `thread_id`. Returns the outcome plus the resumed execution's
+/// `tinyagents`-minted run ids.
+async fn resume_with_checkpointer_inner(
+    workflow: &CompiledWorkflow,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+    newly_approved: Vec<String>,
+    journal: Option<Arc<dyn GraphEventJournal>>,
+) -> Result<(RunOutcome, GraphRunIds)> {
     let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
     let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Rebuild the identical graph and re-attach the SAME checkpointer, so
     // `resume` loads the state persisted under `thread_id`.
-    let (compiled, _trigger_id) =
-        build_graph(workflow, capabilities, &observer, &steps, checkpointer)?;
+    let (compiled, _trigger_id) = build_graph(
+        workflow,
+        capabilities,
+        &observer,
+        &steps,
+        checkpointer,
+        journal,
+    )?;
 
     // Approvals recorded for downstream visibility. On resume the interrupted
     // gate is approved because the resume value reaches it via
@@ -926,10 +1107,18 @@ pub async fn resume_with_checkpointer(
         .map(|interrupt| interrupt.node.as_str().to_string())
         .collect();
 
-    Ok(RunOutcome {
-        output: execution.state,
-        pending_approvals,
-    })
+    let graph_run_ids = GraphRunIds {
+        run_id: execution.run_id.as_str().to_string(),
+        root_run_id: execution.root_run_id.as_str().to_string(),
+    };
+
+    Ok((
+        RunOutcome {
+            output: execution.state,
+            pending_approvals,
+        },
+        graph_run_ids,
+    ))
 }
 
 #[cfg(test)]
@@ -1000,6 +1189,81 @@ mod tests {
             outcome.output["nodes"]["p"]["items"][0]["json"],
             json!({ "x": 1 })
         );
+    }
+
+    #[tokio::test]
+    async fn journaled_run_records_graph_observations() {
+        // trigger -> output_parser under run_with_checkpointer_journaled: the
+        // injected in-memory journal must hold this run's durable
+        // GraphObservations (node started/completed) under the tinyagents run
+        // id returned on the JournaledRunOutcome.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("p", NodeKind::OutputParser),
+            ],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "p".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+        let checkpointer: Arc<dyn Checkpointer<Value>> =
+            Arc::new(InMemoryCheckpointer::<Value>::default());
+        let journal = Arc::new(InMemoryGraphEventJournal::new());
+
+        let journaled = run_with_checkpointer_journaled(
+            &compiled,
+            json!({ "x": 1 }),
+            &caps,
+            checkpointer,
+            "thread-journal-1",
+            journal.clone(),
+        )
+        .await
+        .expect("journaled run");
+
+        // The workflow outcome is unchanged from the plain checkpointed path.
+        assert_eq!(
+            journaled.outcome.output["nodes"]["p"]["items"][0]["json"],
+            json!({ "x": 1 })
+        );
+        assert!(journaled.outcome.pending_approvals.is_empty());
+
+        // The returned run id is the journal's stream key: reading it back
+        // replays the run's durable observations.
+        let run_id = &journaled.graph_run_ids.run_id;
+        assert!(!run_id.is_empty(), "run id must be surfaced");
+        assert_eq!(
+            journaled.graph_run_ids.root_run_id, *run_id,
+            "top-level run: root run id equals run id"
+        );
+        let observations = journal.read_from(run_id, 0).await.expect("read journal");
+        assert!(
+            !observations.is_empty(),
+            "journal must hold observations for run {run_id}"
+        );
+
+        let kinds: Vec<&str> = observations.iter().map(|o| o.event.kind()).collect();
+        // Both graph nodes ran: their handler start/completion events are
+        // journaled, alongside the run lifecycle.
+        assert!(kinds.contains(&"run.started"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"node.started"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"node.completed"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"run.completed"), "kinds: {kinds:?}");
+        // Every observation is keyed by the surfaced run id and stamped with
+        // the caller's thread id.
+        for obs in &observations {
+            assert_eq!(obs.run_id.as_str(), run_id);
+            assert_eq!(
+                obs.thread_id.as_ref().map(|t| t.as_str()),
+                Some("thread-journal-1")
+            );
+        }
     }
 
     #[tokio::test]
