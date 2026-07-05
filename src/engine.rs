@@ -485,9 +485,26 @@ fn build_graph(
             // `{ "rejected": [<gate id>, …] }` denies the named gate(s).
             let resume_value = ctx.resume.clone();
             // A checkpointed resume (see `ResumableRun::resume`) delivers a resume
-            // value to the interrupted node via `NodeContext::resume`; its presence
-            // approves this gate so the run proceeds forward from the checkpoint.
-            let resumed = ctx.resume.is_some();
+            // value to the interrupted node via `NodeContext::resume`. A resume
+            // approves *this* gate only when it is a bare `true` (backward-compat,
+            // the single-interrupt case) or when this gate's id is explicitly
+            // listed in the structured resume value's `approved` array. A
+            // structured resume that names neither this gate in `approved` nor in
+            // `rejected` leaves it pending — critical when several parallel gates
+            // are interrupted and the host resolves only some of them.
+            let approved_by_resume = match ctx.resume.as_ref() {
+                Some(Value::Bool(true)) => true,
+                Some(v) => v
+                    .get("approved")
+                    .and_then(Value::as_array)
+                    .is_some_and(|approved| {
+                        approved
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|id| id == node.id)
+                    }),
+                None => false,
+            };
             async move {
                 // Wraps a node's partial update: a fan-out node drives all of its
                 // successors via a `Command::goto`, everything else emits a plain
@@ -559,13 +576,14 @@ fn build_graph(
                         }));
                         if has_error_edge {
                             // Route the denial to the `error` port so a recovery
-                            // sub-graph runs. A plain update (not `emit`) so the
-                            // conditional-edge router keys on the recorded port.
-                            return Ok(NodeResult::Update(items_update(
-                                &node.id,
-                                &[item],
-                                Some("error"),
-                            )?));
+                            // sub-graph runs. Use `emit`: when the gate's error-port
+                            // recovery edges fan out (≥2 same-port successors) the
+                            // node is command-routed and has no conditional router to
+                            // key on the recorded port, so the branches must be driven
+                            // directly via a `Command::goto`; a single/mixed-port error
+                            // edge falls back to a plain update the conditional-edge
+                            // router consumes.
+                            return Ok(emit(items_update(&node.id, &[item], Some("error"))?));
                         }
                         // No error branch to route to — fail the run so the denial
                         // is not silently swallowed.
@@ -585,9 +603,10 @@ fn build_graph(
                                 .filter_map(Value::as_str)
                                 .any(|id| id == node.id)
                         });
-                    // `resumed` is set when a checkpointed resume delivered a
-                    // resume value to this interrupted gate — that approves it.
-                    if !approved && !resumed {
+                    // `approved_by_resume` is set when a checkpointed resume
+                    // delivered an approval (bare `true`, or this gate listed in
+                    // the structured `approved` array) to this interrupted gate.
+                    if !approved && !approved_by_resume {
                         tracing::info!(node = %node.id, "node paused awaiting approval");
                         let payload = if node.config.is_null() {
                             json!({})
@@ -1080,13 +1099,19 @@ impl ResumableRun {
     /// example, when there is no pending checkpoint to resume from).
     pub async fn resume(&self, newly_approved: Vec<String>) -> Result<RunOutcome> {
         let approvals_update = json!({
-            "run": { "trigger": { "approvals": newly_approved } }
+            "run": { "trigger": { "approvals": newly_approved.clone() } }
         });
+        // Deliver the explicit `approved` gate id list as the resume value.
+        // tinyagents ignores the `with_update` state write on resume, so the
+        // resume value is the sole approval channel: each interrupted gate
+        // proceeds only if its id is listed, leaving any other parallel gate
+        // pending rather than blanket-approving every interrupt with a bare `true`.
         let execution = self
             .graph
             .resume(
                 self.thread_id.as_str(),
-                Command::resume(json!(true)).with_update(approvals_update),
+                Command::resume(json!({ "approved": newly_approved }))
+                    .with_update(approvals_update),
             )
             .await
             .map_err(|e| EngineError::Capability(e.to_string()))?;
@@ -1437,16 +1462,18 @@ async fn resume_with_checkpointer_inner(
     let approvals_update = json!({
         "run": { "trigger": { "approvals": newly_approved.clone() } }
     });
-    // The resume value delivered to the interrupted gate(s): a bare `true`
-    // (backward-compatible bare approval) when nothing was denied, otherwise a
-    // structured value carrying the denied gate ids so the gate handlers can
-    // route/fail them (see the `denied` branch in `build_graph`).
-    let resume_value = if rejected.is_empty() {
-        json!(true)
-    } else {
+    if !rejected.is_empty() {
         tracing::info!(?rejected, "resuming with denied approval gate(s)");
-        json!({ "approved": newly_approved, "rejected": rejected })
-    };
+    }
+    // Always deliver a structured resume value carrying the explicit `approved`
+    // and `rejected` gate id lists. tinyagents ignores the `with_update` state
+    // write on resume, so this value is the sole approval channel and each
+    // interrupted gate decides for itself: gates in `approved` proceed, gates in
+    // `rejected` route to their `error` port (or fail), and gates in neither stay
+    // pending. This is essential when several parallel gates are interrupted and
+    // the host resolves only some of them — a bare `true` would blanket-approve
+    // every interrupt regardless of the host's decision.
+    let resume_value = json!({ "approved": newly_approved, "rejected": rejected });
     let execution = compiled
         .resume(
             thread_id,
@@ -3174,6 +3201,133 @@ mod tests {
             result.is_err(),
             "denying a gate with no error port must fail the run"
         );
+    }
+
+    #[tokio::test]
+    async fn parallel_gates_resume_one_leaves_the_other_pending() {
+        // trigger fans out to two parallel gates g1 and g2 (both on the `main`
+        // port), each feeding its own downstream. Resuming with only g1 approved
+        // must run g1's downstream while g2 — listed in neither `approved` nor
+        // `rejected` — stays pending and its downstream stays blocked. A bare
+        // `true` resume value would blanket-approve g2 too and wrongly run d2.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate("g1"),
+                gate("g2"),
+                node("d1", NodeKind::OutputParser),
+                node("d2", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "g1"),
+                edge("t", "g2"),
+                edge("g1", "d1"),
+                edge("g2", "d2"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        // The engine serializes interrupts across the fan-out: g1 is the first
+        // gate to pend; g2 pends only once g1 is resolved. The invariant this test
+        // guards is that approving g1 must NOT also approve g2 — a bare `true`
+        // resume value would blanket-approve every interrupted gate.
+        let rr = run_resumable(&compiled, json!({}), &caps)
+            .await
+            .expect("run_resumable");
+        assert_eq!(
+            rr.outcome().pending_approvals,
+            vec!["g1".to_string()],
+            "g1 is the first parallel gate to pend"
+        );
+
+        let after_g1 = rr.resume(vec!["g1".to_string()]).await.expect("resume g1");
+        assert!(
+            after_g1.pending_approvals.contains(&"g2".to_string()),
+            "g2 must stay pending when only g1 is approved (a bare-true resume \
+             would wrongly blanket-approve it), got {:?}",
+            after_g1.pending_approvals
+        );
+        assert!(
+            after_g1.output["nodes"]["d2"].is_null(),
+            "g2's downstream must NOT run while g2 is still pending"
+        );
+
+        // Resolving g2 too settles the run: no gate remains pending and g2's
+        // downstream finally runs.
+        let after_g2 = rr.resume(vec!["g2".to_string()]).await.expect("resume g2");
+        assert!(
+            after_g2.pending_approvals.is_empty(),
+            "no gate pending once both parallel gates are approved, got {:?}",
+            after_g2.pending_approvals
+        );
+        assert!(
+            !after_g2.output["nodes"]["d2"]["items"].is_null(),
+            "g2's downstream runs once g2 is approved"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_denying_a_gate_fans_out_to_multiple_error_recovery_nodes() {
+        // A denied gate whose `error` port fans out to TWO recovery nodes (≥2
+        // edges on the same port) is command-routed and has no conditional router;
+        // the denial must still drive BOTH recovery branches via the fan-out
+        // command path rather than a plain (unrouted) update.
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("recover_a", NodeKind::OutputParser),
+                node("recover_b", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "gate"),
+                port_edge("gate", "error", "recover_a"),
+                port_edge("gate", "error", "recover_b"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+
+        let caps = mock_capabilities();
+        let paused = run_with_checkpointer(
+            &compiled,
+            json!({}),
+            &caps,
+            cp.clone(),
+            "thread-fanout-deny",
+        )
+        .await
+        .expect("run_with_checkpointer");
+        assert_eq!(paused.pending_approvals, vec!["gate".to_string()]);
+
+        let caps = mock_capabilities();
+        let journal = Arc::new(InMemoryGraphEventJournal::new());
+        let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+        let denied = resume_with_checkpointer_journaled_observed(
+            &compiled,
+            &caps,
+            cp.clone(),
+            "thread-fanout-deny",
+            Vec::new(),
+            vec!["gate".to_string()],
+            journal,
+            &observer,
+        )
+        .await
+        .expect("resume with rejection");
+
+        for recovery in ["recover_a", "recover_b"] {
+            assert_eq!(
+                denied.outcome.output["nodes"][recovery]["items"][0]["json"]["error"]["node"],
+                json!("gate"),
+                "both fan-out error-recovery branches must run on denial: {recovery}"
+            );
+        }
     }
 
     #[tokio::test]
