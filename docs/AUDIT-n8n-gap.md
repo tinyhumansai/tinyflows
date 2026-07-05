@@ -22,7 +22,7 @@ Three things dominate the action list:
    as workflows get non-trivial — **BUG-2..6**.
 3. **The n8n gap is mostly breadth, not depth**: n8n has ~470 integration nodes +
    a rich per-item data model + triggers/webhooks/UI. tinyflows covers ~1% of nodes
-   by count but its *capability-trait* design means most of that breadth is the
+   by count but its _capability-trait_ design means most of that breadth is the
    host's job (Composio), not the engine's. The real engine-level gaps are
    **per-item semantics, triggers, and the expression language**.
 
@@ -32,20 +32,20 @@ Three things dominate the action list:
 
 12 node kinds. Wire names are snake_case; dispatch in `src/nodes/mod.rs:208`.
 
-| Kind | Role | Per-item? | Notes |
-|---|---|---|---|
-| `trigger` | sole entry, passthrough | batch | also holds run knobs `recursion_limit`, `node_timeout_secs`; `TriggerKind` is **dead code at runtime** |
-| `agent` | 1 LLM turn via `LlmProvider` | batch→1 | single tool hop (no multi-turn loop); `output_parser` inline; `chat_model`/`memory` sub-ports **not wired** |
-| `tool_call` | 1 integration action via `ToolInvoker` | batch→1 | `slug` required |
-| `http_request` | outbound HTTP via `HttpClient` | batch→1 | no pagination/retry-on-status/response-format in-crate |
-| `code` | sandboxed JS/Python via `CodeRunner` | batch→1 | **skips `=`-expression resolution**; silent JS default |
-| `condition` | 2-way IF | **first item decides whole batch** | `field` = top-level key only; no operators |
-| `switch` | N-way branch | **first item decides whole batch** | `=`-expr or `field`; **missing `nodes` scope** |
-| `merge` | fan-in barrier | batch | **no `mode`** (append/combine/SQL); barrier is engine-level |
-| `split_out` | fan-out array→items | per-item | `path` = top-level key only |
-| `transform` | field mapping | per-item | `set:{k:v-or-=expr}`; **missing `nodes` scope**; no delete/rename |
-| `output_parser` | JSON-schema validate + LLM auto-fix | per-item | schema **subset** ($ref/oneOf/bounds unsupported); skips `=`-resolution |
-| `sub_workflow` | run child graph | batch→1 | depth ≤8; **HITL/observer/cancel dropped in child**; skips `=`-resolution; double-wraps input |
+| Kind            | Role                                   | Per-item?                          | Notes                                                                                                       |
+| --------------- | -------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `trigger`       | sole entry, passthrough                | batch                              | also holds run knobs `recursion_limit`, `node_timeout_secs`; `TriggerKind` is **dead code at runtime**      |
+| `agent`         | 1 LLM turn via `LlmProvider`           | batch→1                            | single tool hop (no multi-turn loop); `output_parser` inline; `chat_model`/`memory` sub-ports **not wired** |
+| `tool_call`     | 1 integration action via `ToolInvoker` | batch→1                            | `slug` required                                                                                             |
+| `http_request`  | outbound HTTP via `HttpClient`         | batch→1                            | no pagination/retry-on-status/response-format in-crate                                                      |
+| `code`          | sandboxed JS/Python via `CodeRunner`   | batch→1                            | **skips `=`-expression resolution**; silent JS default                                                      |
+| `condition`     | 2-way IF                               | **first item decides whole batch** | `field` = top-level key only; no operators                                                                  |
+| `switch`        | N-way branch                           | **first item decides whole batch** | `=`-expr or `field`; **missing `nodes` scope**                                                              |
+| `merge`         | fan-in barrier                         | batch                              | **no `mode`** (append/combine/SQL); barrier is engine-level                                                 |
+| `split_out`     | fan-out array→items                    | per-item                           | `path` = top-level key only                                                                                 |
+| `transform`     | field mapping                          | per-item                           | `set:{k:v-or-=expr}`; **missing `nodes` scope**; no delete/rename                                           |
+| `output_parser` | JSON-schema validate + LLM auto-fix    | per-item                           | schema **subset** ($ref/oneOf/bounds unsupported); skips `=`-resolution                                     |
+| `sub_workflow`  | run child graph                        | batch→1                            | depth ≤8; **HITL/observer/cancel dropped in child**; skips `=`-resolution; double-wraps input               |
 
 Cross-cutting (engine-level, all kinds): `on_error` (stop/continue/route),
 `retry` (fixed/exponential, cap 60s), `requires_approval` HITL gate, cooperative
@@ -56,6 +56,7 @@ cancellation, per-node `ExecutionStep` observability.
 ## 2. n8n gap analysis (what to port)
 
 ### 2a. Breadth gaps that are NOT the engine's job (host/Composio owns these)
+
 n8n ships ~470 `nodes-base` integrations (Slack, Notion, Postgres, Google*, AWS*, …)
 plus a full LangChain node family (agents, chains, memory, vector_store, embeddings,
 retrievers, rerankers, text_splitters, document_loaders, output_parser, tools, MCP).
@@ -65,25 +66,26 @@ work. Grounding already exists (`search_tool_catalog` builder tool).
 
 ### 2b. Engine-level gaps worth porting (ranked)
 
-| Priority | n8n feature | tinyflows today | Port recommendation |
-|---|---|---|---|
-| **P0** | **Per-item execution** — every node maps over items, IF/Switch **partition** items per-branch, node params evaluate per item | condition/switch route the **whole batch by first item**; agent/tool_call/http resolve config **once** against first item | Biggest semantic divergence. Add a per-item execution mode (at least to condition/switch, ideally integration nodes). Users porting n8n flows will hit this immediately. |
-| **P0** | **Triggers** — Webhook, Schedule, Manual, Form, Chat, polling triggers | `TriggerKind` modeled but **inert**; host fires runs. Webhook/chat/form/execute-by-workflow validate but **never auto-fire** (`flows/ops.rs:123`, `flows/bus.rs:232`) | Wire webhook→flow in the host webhooks domain (add a `flow` webhook target kind). Schedule + app_event + manual already work via cron/composio bus. |
-| **P1** | **Merge modes** — append, combine-by-key, combine-by-position, multiplex | `merge` = concat only | Add `mode` config to `merge` node. Combine-by-key is the common ask. |
-| **P1** | **Expression language** — `{{ }}` interpolation, `$json/$node/$items/$prevNode/$runIndex/$itemIndex`, pairedItem lineage, luxon `$now/$today`, `$env/$vars/$workflow/$execution` | whole-value `=` jq only; `nodes.<id>` (id, not name; latest-run only); no interpolation, no run/item index, no paired-item traversal, no env/vars/workflow metadata | Add string interpolation and a small set of built-ins (`$now`, `$workflow`, `$runIndex`). Named scope exists but is buggy (see BUG-2). |
-| **P1** | **Wait / delay node** (`Wait`, resume-after, resume-on-webhook) | none (only HITL approval interrupt) | A `wait` node (duration or until-webhook) is a common automation primitive; reuses the existing checkpoint/resume machinery. |
-| **P2** | **Loop/batching** (`SplitInBatches`/Loop Over Items) | cycles work but only via edge loops + `recursion_limit`; no batch-size loop node | Add a batched-loop node for large fan-outs. |
-| **P2** | **Filter / Set / Sort / Limit / Aggregate / Remove-Duplicates** item ops | only `transform` (set) + `split_out` | Add `filter`, `sort`, `limit`, `aggregate` — cheap, pure, high-value item ops. |
-| **P2** | **Error Trigger / error workflow**, **Stop-and-Error**, **NoOp**, **Sticky Note** | `on_error` per node; no error-workflow, no explicit no-op/stop nodes | `no_op` and `stop_and_error` are trivial; error-workflow is a host concern. |
-| **P2** | **Binary data pipeline** (files, MoveBinaryData, Read/Write, Compression) | `Item.binary` field exists but is **never projected into scope** and no node manipulates it | If OpenHuman needs file flows, wire binary through expressions + a couple of file nodes. |
-| **P3** | **Pinning / static test data**, node **disabled** flag, **notes/tags** | none (position/ports are editor-only metadata) | Editor-quality features; add when the builder UI matures. |
-| **P3** | **Sub-workflow input mapping & typed I/O** | child input is double-wrapped serialized items; output is the whole child run-state | Clean up the sub-workflow I/O contract (see BUG-4). |
+| Priority | n8n feature                                                                                                                                                                      | tinyflows today                                                                                                                                                       | Port recommendation                                                                                                                                                      |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **P0**   | **Per-item execution** — every node maps over items, IF/Switch **partition** items per-branch, node params evaluate per item                                                     | condition/switch route the **whole batch by first item**; agent/tool_call/http resolve config **once** against first item                                             | Biggest semantic divergence. Add a per-item execution mode (at least to condition/switch, ideally integration nodes). Users porting n8n flows will hit this immediately. |
+| **P0**   | **Triggers** — Webhook, Schedule, Manual, Form, Chat, polling triggers                                                                                                           | `TriggerKind` modeled but **inert**; host fires runs. Webhook/chat/form/execute-by-workflow validate but **never auto-fire** (`flows/ops.rs:123`, `flows/bus.rs:232`) | Wire webhook→flow in the host webhooks domain (add a `flow` webhook target kind). Schedule + app_event + manual already work via cron/composio bus.                      |
+| **P1**   | **Merge modes** — append, combine-by-key, combine-by-position, multiplex                                                                                                         | `merge` = concat only                                                                                                                                                 | Add `mode` config to `merge` node. Combine-by-key is the common ask.                                                                                                     |
+| **P1**   | **Expression language** — `{{ }}` interpolation, `$json/$node/$items/$prevNode/$runIndex/$itemIndex`, pairedItem lineage, luxon `$now/$today`, `$env/$vars/$workflow/$execution` | whole-value `=` jq only; `nodes.<id>` (id, not name; latest-run only); no interpolation, no run/item index, no paired-item traversal, no env/vars/workflow metadata   | Add string interpolation and a small set of built-ins (`$now`, `$workflow`, `$runIndex`). Named scope exists but is buggy (see BUG-2).                                   |
+| **P1**   | **Wait / delay node** (`Wait`, resume-after, resume-on-webhook)                                                                                                                  | none (only HITL approval interrupt)                                                                                                                                   | A `wait` node (duration or until-webhook) is a common automation primitive; reuses the existing checkpoint/resume machinery.                                             |
+| **P2**   | **Loop/batching** (`SplitInBatches`/Loop Over Items)                                                                                                                             | cycles work but only via edge loops + `recursion_limit`; no batch-size loop node                                                                                      | Add a batched-loop node for large fan-outs.                                                                                                                              |
+| **P2**   | **Filter / Set / Sort / Limit / Aggregate / Remove-Duplicates** item ops                                                                                                         | only `transform` (set) + `split_out`                                                                                                                                  | Add `filter`, `sort`, `limit`, `aggregate` — cheap, pure, high-value item ops.                                                                                           |
+| **P2**   | **Error Trigger / error workflow**, **Stop-and-Error**, **NoOp**, **Sticky Note**                                                                                                | `on_error` per node; no error-workflow, no explicit no-op/stop nodes                                                                                                  | `no_op` and `stop_and_error` are trivial; error-workflow is a host concern.                                                                                              |
+| **P2**   | **Binary data pipeline** (files, MoveBinaryData, Read/Write, Compression)                                                                                                        | `Item.binary` field exists but is **never projected into scope** and no node manipulates it                                                                           | If OpenHuman needs file flows, wire binary through expressions + a couple of file nodes.                                                                                 |
+| **P3**   | **Pinning / static test data**, node **disabled** flag, **notes/tags**                                                                                                           | none (position/ports are editor-only metadata)                                                                                                                        | Editor-quality features; add when the builder UI matures.                                                                                                                |
+| **P3**   | **Sub-workflow input mapping & typed I/O**                                                                                                                                       | child input is double-wrapped serialized items; output is the whole child run-state                                                                                   | Clean up the sub-workflow I/O contract (see BUG-4).                                                                                                                      |
 
 ---
 
 ## 3. Bugs (verified where noted)
 
 ### Security
+
 - **BUG-1 (verified, fix now) — jq expressions leak host env.** `run_jq` registers
   `jaq_std::funs()` (`src/expr.rs:302`); jaq-std's `env` builtin dumps
   `std::env::vars()` (jaq-std lib.rs:466). Any config value `"=env"` / `"=$ENV"`
@@ -93,12 +95,13 @@ work. Grounding already exists (`search_tool_catalog` builder tool).
   benign).
 
 ### Correctness — branching / merge
+
 - **BUG-2 (verified) — `switch` and `transform` never receive the `nodes` scope.**
   They hand-build `{item,items,run}` (`switch.rs:26`, `transform.rs:27`), so
   `=nodes.a.item.x` silently returns null exactly in the nodes where cross-node
   refs are most useful. Contradicts the module docs. Fix: use `expr_scope`.
 - **BUG-3 — mixed-port fan-out silently drops branches.** `fan_out_targets`
-  (`engine.rs:422`) only treats *all-same-port* multi-edges as parallel fan-out.
+  (`engine.rs:422`) only treats _all-same-port_ multi-edges as parallel fan-out.
   The common "fan out `main→a`,`main→b` + `error→h`" shape falls into conditional-edge
   lowering, whose route map (tinyagents builder) overwrites duplicate labels — one of
   `a`/`b` never runs. No validation rejects it.
@@ -110,6 +113,7 @@ work. Grounding already exists (`search_tool_catalog` builder tool).
   `false`) data leaks into a fan-in wired to the `true` port.
 
 ### Correctness — sub-workflow / lifecycle
+
 - **BUG-5 — HITL gate inside a `sub_workflow` is silently ignored.**
   `SubWorkflowNode::execute` keeps only `outcome.output`, discarding
   `pending_approvals`/`cancelled` (`sub_workflow.rs:123`). A child pausing at an
@@ -124,6 +128,7 @@ work. Grounding already exists (`search_tool_catalog` builder tool).
   doesn't strand failed runs.)
 
 ### Correctness — cancellation / timeout / retry
+
 - **BUG-7 — cancellation not checked inside the retry loop** (`engine.rs:671`): a
   node with large `max_attempts`+`backoff_ms` keeps retrying/sleeping for minutes
   after `cancel()`.
@@ -132,6 +137,7 @@ work. Grounding already exists (`search_tool_catalog` builder tool).
   node mid-3×20s-backoff).
 
 ### Consistency
+
 - **BUG-9 — expression binding is applied inconsistently.** `code`, `output_parser`,
   and `sub_workflow` read raw config and **skip `=`-resolution** — a `"=item.x"` in
   `code.source` or `sub_workflow.workflow_id` is treated as a literal. Every other
@@ -197,7 +203,7 @@ that is human-only via the UI `WorkflowProposalCard` → `flows_create`.
 ## 4b. Node I/O alignment (the agent ↔ tool_call handoff problem)
 
 **Root cause: there is no item envelope / output contract.** Every capability node
-wraps whatever its host capability returned *verbatim* into `Item.json`
+wraps whatever its host capability returned _verbatim_ into `Item.json`
 (`agent.rs:115` `Item::new(value)`, `tool_call.rs:31` `Item::new(result)`,
 `http_request.rs:24` `Item::new(response)`). The next node reads
 `item = input.first().json` (`nodes/mod.rs:62`) — a provider-native blob whose shape
@@ -206,19 +212,19 @@ producer emits matches what a consumer's expressions read.
 
 ### Exact emitted shapes (OpenHuman host)
 
-| Producer | `item.json` shape it emits | Stable? |
-|---|---|---|
-| `agent` (plain) | if the model text parses as JSON → **that parsed object/array verbatim**; else `{ "text": "…", … }` (`caps.rs:359,369`) | **No — runtime-dependent on model output** |
-| `agent` + tool sub-port | above **+ `tool_result: <tool output>`** merged in (`agent.rs:82`) | No |
-| `agent` + output_parser | **replaced entirely** by the schema-coerced value (`agent.rs:104`) | Shape = the schema, not the completion |
-| `tool_call` | `serde_json::to_value(<Composio execution result>)` — provider envelope (`caps.rs:968`) | Provider-native |
-| `http_request` | raw `HttpClient` response Value | Host-defined |
-| `code` | the runner's return Value | User-defined |
-| `split_out` | one item per array element of `path` | — |
+| Producer                | `item.json` shape it emits                                                                                              | Stable?                                    |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `agent` (plain)         | if the model text parses as JSON → **that parsed object/array verbatim**; else `{ "text": "…", … }` (`caps.rs:359,369`) | **No — runtime-dependent on model output** |
+| `agent` + tool sub-port | above **+ `tool_result: <tool output>`** merged in (`agent.rs:82`)                                                      | No                                         |
+| `agent` + output_parser | **replaced entirely** by the schema-coerced value (`agent.rs:104`)                                                      | Shape = the schema, not the completion     |
+| `tool_call`             | `serde_json::to_value(<Composio execution result>)` — provider envelope (`caps.rs:968`)                                 | Provider-native                            |
+| `http_request`          | raw `HttpClient` response Value                                                                                         | Host-defined                               |
+| `code`                  | the runner's return Value                                                                                               | User-defined                               |
+| `split_out`             | one item per array element of `path`                                                                                    | —                                          |
 
 So an `agent` node emits **three structurally different shapes** depending only on
 which sub-ports are configured, and the plain shape flips between "parsed model JSON"
-and `{text}` at *runtime* based on what the model said. Any downstream
+and `{text}` at _runtime_ based on what the model said. Any downstream
 `=item.<field>` is therefore guessing.
 
 ### The five concrete misalignments
@@ -230,7 +236,7 @@ and `{text}` at *runtime* based on what the model said. Any downstream
   up" symptom.
 - **M2 — inline tool vs `tool_call` node emit different shapes for the same tool.**
   An agent's inline tool result lands under `item.tool_result`
-  (`agent.rs:82`); the standalone `tool_call` node makes the result *be* `item.json`
+  (`agent.rs:82`); the standalone `tool_call` node makes the result _be_ `item.json`
   (`tool_call.rs:31`). Moving a tool from inline to a node (or back) silently breaks
   every downstream expression.
 - **M3 — fan-out doesn't fan integration nodes (the big one).** `agent`/`tool_call`/
