@@ -221,6 +221,52 @@ pub async fn run_with_observer(
         checkpointer,
         thread_id,
         None,
+        None,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// The maximum nesting depth for `sub_workflow` runs.
+///
+/// Each nested `sub_workflow` run (inline **or** by `workflow_id`) increments a
+/// `run.sub_workflow_depth` counter; once a child would exceed this bound the
+/// `sub_workflow` node refuses to run it. This is the engine's backstop against
+/// runaway or cyclic references (e.g. flow A → flow B → flow A by id): the chain
+/// is cut after at most this many levels regardless of how the cycle is formed.
+/// A direct self-reference is additionally caught statically by the node before
+/// any run starts (see [`crate::nodes::integration::SubWorkflowNode`]).
+pub const MAX_SUB_WORKFLOW_DEPTH: u64 = 8;
+
+/// Runs a nested child workflow for a `sub_workflow` node, threading the current
+/// nesting `depth` into the child run's `run.sub_workflow_depth`.
+///
+/// Behaves like [`run`] (no-op observer, process-local in-memory checkpointer)
+/// but seeds the depth counter so a further nested `sub_workflow` inside the
+/// child can read it back from `ctx.run` and enforce [`MAX_SUB_WORKFLOW_DEPTH`].
+/// Used only by the `sub_workflow` node's recursive execution.
+///
+/// # Errors
+/// Same as [`run`].
+pub(crate) async fn run_sub_workflow(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    depth: u64,
+) -> Result<RunOutcome> {
+    let checkpointer: Arc<dyn Checkpointer<Value>> =
+        Arc::new(InMemoryCheckpointer::<Value>::default());
+    let thread_id = default_thread_id(workflow)?;
+    let observer: Arc<dyn RunObserver> = Arc::new(crate::observability::NoopObserver);
+    let (_graph, _thread_id, outcome, _run_ids) = build_and_run(
+        workflow,
+        input,
+        capabilities,
+        &observer,
+        checkpointer,
+        thread_id,
+        None,
+        Some(json!({ "sub_workflow_depth": depth })),
     )
     .await?;
     Ok(outcome)
@@ -705,6 +751,7 @@ fn default_thread_id(workflow: &CompiledWorkflow) -> Result<String> {
 ///
 /// # Errors
 /// Same as [`run`].
+#[allow(clippy::too_many_arguments)]
 async fn build_and_run(
     workflow: &CompiledWorkflow,
     input: Value,
@@ -713,6 +760,7 @@ async fn build_and_run(
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: String,
     journal: Option<Arc<dyn GraphEventJournal>>,
+    run_meta_overlay: Option<Value>,
 ) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome, GraphRunIds)> {
     // Process-local, monotonic run id — no time/random source.
     let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
@@ -739,6 +787,13 @@ async fn build_and_run(
         .map_err(|e| EngineError::Capability(e.to_string()))?;
     let mut initial = json!({ "run": { "trigger": input } });
     merge(&mut initial, seed_items);
+    // Optional run-level metadata overlaid onto `run` before the run starts —
+    // e.g. the `sub_workflow_depth` counter a nested `sub_workflow` run threads
+    // to bound recursion (see [`run_sub_workflow`]). Merged (not overwritten) so
+    // it sits alongside `run.trigger`.
+    if let Some(overlay) = run_meta_overlay {
+        merge(&mut initial, json!({ "run": overlay }));
+    }
 
     // The run is keyed under the caller-supplied `thread_id` (the default paths
     // pass the trigger id, preserving prior behavior); this is where the
@@ -934,6 +989,7 @@ pub async fn run_resumable(
         checkpointer,
         thread_id,
         None,
+        None,
     )
     .await?;
     Ok(ResumableRun {
@@ -981,6 +1037,7 @@ pub async fn run_with_checkpointer(
         &observer,
         checkpointer,
         thread_id.to_string(),
+        None,
         None,
     )
     .await?;
@@ -1102,6 +1159,7 @@ pub async fn run_with_checkpointer_journaled_observed(
         checkpointer,
         thread_id.to_string(),
         Some(journal),
+        None,
     )
     .await?;
     tracing::debug!(

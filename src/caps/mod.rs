@@ -64,6 +64,25 @@ pub trait CodeRunner: Send + Sync {
     async fn run(&self, language: CodeLanguage, source: &str, input: Value) -> Result<Value>;
 }
 
+/// Resolves a saved workflow graph by its host-managed id.
+///
+/// A [`sub_workflow`](crate::nodes::integration) node may reference a child by a
+/// host `workflow_id` instead of embedding the child graph inline. The engine is
+/// deliberately persistence-free, so it delegates that lookup to this
+/// host-injected capability: the embedding application maps `workflow_id` onto
+/// whatever store it keeps saved workflows in and hands back the portable
+/// [`WorkflowGraph`](crate::model::WorkflowGraph) to run.
+#[async_trait]
+pub trait WorkflowResolver: Send + Sync {
+    /// Resolves `workflow_id` to the child [`WorkflowGraph`](crate::model::WorkflowGraph)
+    /// the referencing `sub_workflow` node should compile and run.
+    ///
+    /// # Errors
+    /// Returns an [`EngineError::Capability`](crate::error::EngineError::Capability)
+    /// when no workflow with that id exists, or when the host cannot load it.
+    async fn resolve(&self, workflow_id: &str) -> Result<crate::model::WorkflowGraph>;
+}
+
 /// Durable key/value state for a run (used by resumable / stateful workflows).
 #[async_trait]
 pub trait StateStore: Send + Sync {
@@ -95,6 +114,11 @@ pub struct Capabilities {
     /// run-ledger-backed store) and nodes access durable state through
     /// `ctx.caps.state`.
     pub state: Arc<dyn StateStore>,
+    /// Resolver for `sub_workflow` nodes that reference a child graph by a
+    /// host `workflow_id` rather than embedding it inline. The host implements
+    /// [`WorkflowResolver`] over its saved-workflow store; the engine calls it
+    /// only when a `sub_workflow` node carries a `workflow_id`.
+    pub resolver: Arc<dyn WorkflowResolver>,
 }
 
 #[cfg(test)]
@@ -128,6 +152,7 @@ mod tests {
         assert!(Arc::ptr_eq(&caps.http, &clone.http));
         assert!(Arc::ptr_eq(&caps.code, &clone.code));
         assert!(Arc::ptr_eq(&caps.state, &clone.state));
+        assert!(Arc::ptr_eq(&caps.resolver, &clone.resolver));
     }
 
     #[tokio::test]

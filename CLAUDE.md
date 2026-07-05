@@ -76,6 +76,9 @@ data flow), the full node catalog (control-flow + capability-backed), conditiona
 parallel routing with a merge barrier, per-node error handling (`on_error`/retry/error
 port), `tracing`/`RunObserver` observability, HITL approval gating + `engine::resume`,
 opaque `connection_ref`, and schema/`type_version` versioning are all implemented and
-tested (unit + reference-workflow e2e; `cargo publish --dry-run` clean). Ahead: full
-jq/jaq expressions, retry backoff/timeouts, durable checkpointed replay, and the
-OpenHuman host integration (Phase B). See `local/docs/08-roadmap.md`.
+tested (unit + reference-workflow e2e; `cargo publish --dry-run` clean). Also done:
+full jq/jaq `=`-expressions (`src/expr.rs`, routed to `jaq`), retry backoff
+(`fixed`/`exponential`) + per-node timeouts (`node_timeout_secs`), and
+sub-workflows by inline graph **or** host `workflow_id` (resolved via the injected
+`WorkflowResolver`, depth-bounded). Ahead: durable checkpointed super-step replay
+and deeper OpenHuman host integration (Phase B). See `local/docs/08-roadmap.md`.

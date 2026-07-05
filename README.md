@@ -206,11 +206,24 @@ observability, opaque `connection_ref` credentials, and `schema_version` /
 capabilities, guarded by a reference-workflow e2e suite, and
 `cargo publish --dry-run` is clean.
 
+Also implemented:
+
+- **A full jq/jaq expression engine.** Every `=`-prefixed string is a jq program
+  compiled and executed by [`jaq`](https://crates.io/crates/jaq) with the
+  evaluation scope as its input (`src/expr.rs`); a bare `=.item.name` dotted path
+  is served by a fast structural walk, while anything richer (filters, pipes,
+  `add`, …) routes to jaq.
+- **Retry backoff timing and per-node timeouts.** A node's `retry` config takes
+  `backoff_ms` plus `backoff: "fixed" | "exponential"` (capped at 60 s between
+  attempts), and a run-level `node_timeout_secs` on the trigger applies a
+  per-node timeout across the whole run.
+- **Sub-workflows by reference.** A `sub_workflow` node runs a child either from
+  an inline `workflow` graph or from a host-managed `workflow_id`, resolved
+  through the injected `WorkflowResolver` capability. Nesting is depth-bounded
+  and direct self-references are rejected.
+
 Not yet:
 
-- A full jq/jaq expression engine — a minimal `=`-dotted-path evaluator ships as
-  an interim.
-- Retry backoff timing and per-node timeouts.
 - Automatic checkpointed super-step replay. Durable, cross-process resume is
   already supported by injecting a `Checkpointer`
   (`engine::run_with_checkpointer` / `resume_with_checkpointer`); only the
