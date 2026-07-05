@@ -11,8 +11,10 @@ use serde_json::{Value, json};
 
 use crate::caps::{
     Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, StateStore, ToolInvoker,
+    WorkflowResolver,
 };
-use crate::error::Result;
+use crate::error::{EngineError, Result};
+use crate::model::WorkflowGraph;
 
 /// An [`LlmProvider`] that echoes the request back under a `completion` key.
 #[derive(Debug, Default, Clone)]
@@ -79,15 +81,54 @@ impl StateStore for MockStateStore {
     }
 }
 
+/// A [`WorkflowResolver`] backed by an in-memory `workflow_id` → graph map.
+///
+/// Empty by default (every `resolve` misses with a capability error), so a run
+/// that never uses `sub_workflow`-by-id is unaffected. Register graphs with
+/// [`MockWorkflowResolver::with`] to exercise the by-id path in tests.
+#[derive(Debug, Default, Clone)]
+pub struct MockWorkflowResolver {
+    workflows: std::collections::HashMap<String, WorkflowGraph>,
+}
+
+impl MockWorkflowResolver {
+    /// Registers `graph` under `id`, returning `self` for chaining.
+    #[must_use]
+    pub fn with(mut self, id: impl Into<String>, graph: WorkflowGraph) -> Self {
+        self.workflows.insert(id.into(), graph);
+        self
+    }
+}
+
+#[async_trait]
+impl WorkflowResolver for MockWorkflowResolver {
+    async fn resolve(&self, workflow_id: &str) -> Result<WorkflowGraph> {
+        self.workflows.get(workflow_id).cloned().ok_or_else(|| {
+            EngineError::Capability(format!("mock resolver: unknown workflow_id: {workflow_id}"))
+        })
+    }
+}
+
 /// Builds a [`Capabilities`] bundle wired entirely to the mock implementations.
+///
+/// The bundled [`MockWorkflowResolver`] is empty; use
+/// [`mock_capabilities_with_resolver`] to supply one that resolves ids.
 #[must_use]
 pub fn mock_capabilities() -> Capabilities {
+    mock_capabilities_with_resolver(MockWorkflowResolver::default())
+}
+
+/// Like [`mock_capabilities`], but with a caller-supplied [`WorkflowResolver`]
+/// so tests can exercise `sub_workflow`-by-id.
+#[must_use]
+pub fn mock_capabilities_with_resolver(resolver: impl WorkflowResolver + 'static) -> Capabilities {
     Capabilities {
         llm: Arc::new(MockLlm),
         tools: Arc::new(MockTools),
         http: Arc::new(MockHttp),
         code: Arc::new(MockCode),
         state: Arc::new(MockStateStore::default()),
+        resolver: Arc::new(resolver),
     }
 }
 

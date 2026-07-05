@@ -14,7 +14,7 @@
 //! predecessor is wired with waiting edges so it runs only once all of them
 //! finish).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -61,6 +61,43 @@ use crate::observability::{ExecutionStep, Run, RunObserver, RunStatus, StepStatu
 /// time- or random-based so ids stay deterministic within a process.
 static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(0);
 
+/// A cooperative cancellation signal for a workflow run.
+///
+/// Cheap to clone (an [`Arc`] around an atomic flag) and runtime-agnostic — the
+/// crate deliberately avoids depending on any executor's cancellation type. Hand
+/// a clone to a cancellable entry point ([`run_cancellable`] /
+/// [`resume_cancellable`]) and keep another; calling [`cancel`](Self::cancel)
+/// from anywhere flips the flag, and the run stops scheduling real node work at
+/// the next node boundary, returning a [`RunOutcome`] with
+/// [`cancelled`](RunOutcome::cancelled) set.
+///
+/// Cancellation is **cooperative and boundary-level**: a node already executing
+/// runs to completion; the token is checked before each node runs, so no *new*
+/// node work starts after cancellation. This complements (does not replace) a
+/// host's hard task-abort — it lets a run wind down cleanly rather than being
+/// dropped mid-await.
+#[derive(Debug, Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    /// Creates a fresh, un-cancelled token.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signals cancellation. Idempotent; safe to call from any thread.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether cancellation has been signalled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// The result of a completed workflow run.
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
@@ -71,6 +108,11 @@ pub struct RunOutcome {
     /// whose id was not present in the run input's `approvals` array; its
     /// downstream did not run. Empty for a fully completed run.
     pub pending_approvals: Vec<String>,
+    /// Whether the run observed a cancelled [`CancellationToken`] and wound down
+    /// early. When `true`, some downstream nodes were skipped (their slots in
+    /// `output` were not produced), so treat `output` as partial. Always `false`
+    /// for runs started without a token or that completed before any cancel.
+    pub cancelled: bool,
 }
 
 /// The `tinyagents`-minted identifiers of the underlying graph run.
@@ -221,6 +263,91 @@ pub async fn run_with_observer(
         checkpointer,
         thread_id,
         None,
+        None,
+        CancellationToken::new(),
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Like [`run`], but observes `token`: cancelling it stops the run from
+/// scheduling further node work at the next node boundary, and the returned
+/// [`RunOutcome`] has [`cancelled`](RunOutcome::cancelled) set. A node already
+/// executing when the token flips finishes; no *new* node work starts after
+/// cancellation. All other behavior is identical to [`run`].
+///
+/// This is the clean, engine-level cooperative-cancellation path, complementing a
+/// host's hard task-abort: the run winds down and returns a partial outcome rather
+/// than being dropped mid-await.
+///
+/// # Errors
+/// Same as [`run`].
+pub async fn run_cancellable(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    token: CancellationToken,
+) -> Result<RunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    let checkpointer: Arc<dyn Checkpointer<Value>> =
+        Arc::new(InMemoryCheckpointer::<Value>::default());
+    let thread_id = default_thread_id(workflow)?;
+    let (_graph, _thread_id, outcome, _run_ids) = build_and_run(
+        workflow,
+        input,
+        capabilities,
+        &observer,
+        checkpointer,
+        thread_id,
+        None,
+        None,
+        token,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// The maximum nesting depth for `sub_workflow` runs.
+///
+/// Each nested `sub_workflow` run (inline **or** by `workflow_id`) increments a
+/// `run.sub_workflow_depth` counter; once a child would exceed this bound the
+/// `sub_workflow` node refuses to run it. This is the engine's backstop against
+/// runaway or cyclic references (e.g. flow A → flow B → flow A by id): the chain
+/// is cut after at most this many levels regardless of how the cycle is formed.
+/// A direct self-reference is additionally caught statically by the node before
+/// any run starts (see [`crate::nodes::integration::SubWorkflowNode`]).
+pub const MAX_SUB_WORKFLOW_DEPTH: u64 = 8;
+
+/// Runs a nested child workflow for a `sub_workflow` node, threading the current
+/// nesting `depth` into the child run's `run.sub_workflow_depth`.
+///
+/// Behaves like [`run`] (no-op observer, process-local in-memory checkpointer)
+/// but seeds the depth counter so a further nested `sub_workflow` inside the
+/// child can read it back from `ctx.run` and enforce [`MAX_SUB_WORKFLOW_DEPTH`].
+/// Used only by the `sub_workflow` node's recursive execution.
+///
+/// # Errors
+/// Same as [`run`].
+pub(crate) async fn run_sub_workflow(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    depth: u64,
+) -> Result<RunOutcome> {
+    let checkpointer: Arc<dyn Checkpointer<Value>> =
+        Arc::new(InMemoryCheckpointer::<Value>::default());
+    let thread_id = default_thread_id(workflow)?;
+    let observer: Arc<dyn RunObserver> = Arc::new(crate::observability::NoopObserver);
+    let (_graph, _thread_id, outcome, _run_ids) = build_and_run(
+        workflow,
+        input,
+        capabilities,
+        &observer,
+        checkpointer,
+        thread_id,
+        None,
+        Some(json!({ "sub_workflow_depth": depth })),
+        CancellationToken::new(),
     )
     .await?;
     Ok(outcome)
@@ -252,6 +379,7 @@ fn build_graph(
     steps: &Arc<Mutex<Vec<ExecutionStep>>>,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     journal: Option<Arc<dyn GraphEventJournal>>,
+    token: CancellationToken,
 ) -> Result<(CompiledGraph<Value, Value>, String)> {
     let graph = &workflow.graph;
 
@@ -332,9 +460,17 @@ fn build_graph(
         let caps = capabilities.clone();
         let observer = observer.clone();
         let steps = steps.clone();
+        let token = token.clone();
         let is_trigger = node.kind == NodeKind::Trigger;
         // Successors to fan out to concurrently, or `None` for a non-fan-out node.
         let fan_out = fan_out_targets(&node.id);
+        // Whether the node has an outgoing edge on the `error` port. A denied
+        // approval gate (see the resume-deny path below) routes its error item
+        // there when present, and fails the run when absent.
+        let has_error_edge = graph
+            .edges
+            .iter()
+            .any(|e| e.from_node == node.id && e.from_port == "error");
 
         builder = builder.add_node(node.id.clone(), move |state: Value, ctx| {
             let node = node.clone();
@@ -342,11 +478,33 @@ fn build_graph(
             let caps = caps.clone();
             let observer = observer.clone();
             let steps = steps.clone();
+            let token = token.clone();
             let fan_out = fan_out.clone();
+            // The resume value delivered to this node on a checkpointed resume, if
+            // any. A bare `true` means "approve the interrupted gate"; a structured
+            // `{ "rejected": [<gate id>, …] }` denies the named gate(s).
+            let resume_value = ctx.resume.clone();
             // A checkpointed resume (see `ResumableRun::resume`) delivers a resume
-            // value to the interrupted node via `NodeContext::resume`; its presence
-            // approves this gate so the run proceeds forward from the checkpoint.
-            let resumed = ctx.resume.is_some();
+            // value to the interrupted node via `NodeContext::resume`. A resume
+            // approves *this* gate only when it is a bare `true` (backward-compat,
+            // the single-interrupt case) or when this gate's id is explicitly
+            // listed in the structured resume value's `approved` array. A
+            // structured resume that names neither this gate in `approved` nor in
+            // `rejected` leaves it pending — critical when several parallel gates
+            // are interrupted and the host resolves only some of them.
+            let approved_by_resume = match ctx.resume.as_ref() {
+                Some(Value::Bool(true)) => true,
+                Some(v) => v
+                    .get("approved")
+                    .and_then(Value::as_array)
+                    .is_some_and(|approved| {
+                        approved
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|id| id == node.id)
+                    }),
+                None => false,
+            };
             async move {
                 // Wraps a node's partial update: a fan-out node drives all of its
                 // successors via a `Command::goto`, everything else emits a plain
@@ -357,6 +515,19 @@ fn build_graph(
                     }
                     None => NodeResult::Update(update),
                 };
+
+                // Cooperative cancellation, checked at the node boundary before
+                // any real work. When the run's token is cancelled this node
+                // becomes a no-op: it emits an empty update on the default port
+                // and — crucially — does **not** fan out (a plain `Update`, not
+                // `emit`), so a fan-out node's parallel successors are not
+                // scheduled. Downstream nodes reached by static edges will hit
+                // this same check and no-op in turn, so the run winds down without
+                // starting further node work. The engine reports it as cancelled.
+                if token.is_cancelled() {
+                    tracing::info!(node = %node.id, "run cancelled; skipping node work");
+                    return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                }
 
                 if is_trigger {
                     // The trigger payload is pre-seeded into the state; no-op update
@@ -376,6 +547,51 @@ fn build_graph(
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 if requires_approval {
+                    // Human-in-the-loop **denial**. A resume delivered with a
+                    // structured value `{ "rejected": [<gate id>, …] }` (see
+                    // `resume_with_checkpointer_journaled_observed`) denies the
+                    // named gate rather than approving it: the gate emits an
+                    // error item on its `error` port when one is wired (so a
+                    // recovery branch can handle the rejection), or fails the run
+                    // when it has no `error` port. Checked before the approval
+                    // branch so a denial always wins over the bare-resume approval.
+                    let denied = resume_value
+                        .as_ref()
+                        .and_then(|v| v.get("rejected"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|rejected| {
+                            rejected
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .any(|id| id == node.id)
+                        });
+                    if denied {
+                        tracing::info!(node = %node.id, has_error_edge, "approval gate denied");
+                        let item = Item::new(json!({
+                            "error": {
+                                "message": "approval denied",
+                                "node": node.id,
+                                "denied": true,
+                            }
+                        }));
+                        if has_error_edge {
+                            // Route the denial to the `error` port so a recovery
+                            // sub-graph runs. Use `emit`: when the gate's error-port
+                            // recovery edges fan out (≥2 same-port successors) the
+                            // node is command-routed and has no conditional router to
+                            // key on the recorded port, so the branches must be driven
+                            // directly via a `Command::goto`; a single/mixed-port error
+                            // edge falls back to a plain update the conditional-edge
+                            // router consumes.
+                            return Ok(emit(items_update(&node.id, &[item], Some("error"))?));
+                        }
+                        // No error branch to route to — fail the run so the denial
+                        // is not silently swallowed.
+                        return Err(TinyAgentsError::Graph(format!(
+                            "approval gate '{}' was denied and has no `error` port to route to",
+                            node.id
+                        )));
+                    }
                     let approved = state
                         .get("run")
                         .and_then(|run| run.get("trigger"))
@@ -387,9 +603,10 @@ fn build_graph(
                                 .filter_map(Value::as_str)
                                 .any(|id| id == node.id)
                         });
-                    // `resumed` is set when a checkpointed resume delivered a
-                    // resume value to this interrupted gate — that approves it.
-                    if !approved && !resumed {
+                    // `approved_by_resume` is set when a checkpointed resume
+                    // delivered an approval (bare `true`, or this gate listed in
+                    // the structured `approved` array) to this interrupted gate.
+                    if !approved && !approved_by_resume {
                         tracing::info!(node = %node.id, "node paused awaiting approval");
                         let payload = if node.config.is_null() {
                             json!({})
@@ -650,6 +867,7 @@ fn default_thread_id(workflow: &CompiledWorkflow) -> Result<String> {
 ///
 /// # Errors
 /// Same as [`run`].
+#[allow(clippy::too_many_arguments)]
 async fn build_and_run(
     workflow: &CompiledWorkflow,
     input: Value,
@@ -658,6 +876,8 @@ async fn build_and_run(
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: String,
     journal: Option<Arc<dyn GraphEventJournal>>,
+    run_meta_overlay: Option<Value>,
+    token: CancellationToken,
 ) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome, GraphRunIds)> {
     // Process-local, monotonic run id — no time/random source.
     let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
@@ -678,12 +898,20 @@ async fn build_and_run(
         &steps,
         checkpointer,
         journal,
+        token.clone(),
     )?;
 
     let seed_items = items_update(&trigger_id, &[Item::new(input.clone())], None)
         .map_err(|e| EngineError::Capability(e.to_string()))?;
     let mut initial = json!({ "run": { "trigger": input } });
     merge(&mut initial, seed_items);
+    // Optional run-level metadata overlaid onto `run` before the run starts —
+    // e.g. the `sub_workflow_depth` counter a nested `sub_workflow` run threads
+    // to bound recursion (see [`run_sub_workflow`]). Merged (not overwritten) so
+    // it sits alongside `run.trigger`.
+    if let Some(overlay) = run_meta_overlay {
+        merge(&mut initial, json!({ "run": overlay }));
+    }
 
     // The run is keyed under the caller-supplied `thread_id` (the default paths
     // pass the trigger id, preserving prior behavior); this is where the
@@ -731,6 +959,9 @@ async fn build_and_run(
         RunOutcome {
             output: execution.state,
             pending_approvals,
+            // A cancelled token means at least one node boundary short-circuited,
+            // so surface the run as cancelled (its `output` is partial).
+            cancelled: token.is_cancelled(),
         },
         graph_run_ids,
     ))
@@ -787,6 +1018,47 @@ pub async fn resume(
     run(workflow, merged_input, capabilities).await
 }
 
+/// Like [`resume`], but observes `token`: cancelling it winds the resumed run
+/// down at the next node boundary and sets [`RunOutcome::cancelled`]. This is the
+/// re-run-based resume (the same deterministic replay [`resume`] performs), made
+/// cooperatively cancellable.
+///
+/// # Errors
+/// Same as [`resume`].
+pub async fn resume_cancellable(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    newly_approved: Vec<String>,
+    capabilities: &Capabilities,
+    token: CancellationToken,
+) -> Result<RunOutcome> {
+    let mut approvals: Vec<String> = input
+        .get("approvals")
+        .and_then(Value::as_array)
+        .map(|existing| {
+            existing
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in newly_approved {
+        if !approvals.contains(&id) {
+            approvals.push(id);
+        }
+    }
+
+    let mut merged_input = input;
+    if let Value::Object(map) = &mut merged_input {
+        map.insert("approvals".to_string(), json!(approvals));
+    } else {
+        merged_input = json!({ "approvals": approvals });
+    }
+
+    run_cancellable(workflow, merged_input, capabilities, token).await
+}
+
 /// A live, resumable workflow run.
 ///
 /// Unlike the re-run-based [`resume`], this keeps the compiled `tinyagents` graph
@@ -827,13 +1099,19 @@ impl ResumableRun {
     /// example, when there is no pending checkpoint to resume from).
     pub async fn resume(&self, newly_approved: Vec<String>) -> Result<RunOutcome> {
         let approvals_update = json!({
-            "run": { "trigger": { "approvals": newly_approved } }
+            "run": { "trigger": { "approvals": newly_approved.clone() } }
         });
+        // Deliver the explicit `approved` gate id list as the resume value.
+        // tinyagents ignores the `with_update` state write on resume, so the
+        // resume value is the sole approval channel: each interrupted gate
+        // proceeds only if its id is listed, leaving any other parallel gate
+        // pending rather than blanket-approving every interrupt with a bare `true`.
         let execution = self
             .graph
             .resume(
                 self.thread_id.as_str(),
-                Command::resume(json!(true)).with_update(approvals_update),
+                Command::resume(json!({ "approved": newly_approved }))
+                    .with_update(approvals_update),
             )
             .await
             .map_err(|e| EngineError::Capability(e.to_string()))?;
@@ -847,6 +1125,7 @@ impl ResumableRun {
         Ok(RunOutcome {
             output: execution.state,
             pending_approvals,
+            cancelled: false,
         })
     }
 }
@@ -879,6 +1158,8 @@ pub async fn run_resumable(
         checkpointer,
         thread_id,
         None,
+        None,
+        CancellationToken::new(),
     )
     .await?;
     Ok(ResumableRun {
@@ -927,6 +1208,8 @@ pub async fn run_with_checkpointer(
         checkpointer,
         thread_id.to_string(),
         None,
+        None,
+        CancellationToken::new(),
     )
     .await?;
     Ok(outcome)
@@ -967,13 +1250,16 @@ pub async fn resume_with_checkpointer(
     thread_id: &str,
     newly_approved: Vec<String>,
 ) -> Result<RunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
     let (outcome, _run_ids) = resume_with_checkpointer_inner(
         workflow,
         capabilities,
         checkpointer,
         thread_id,
         newly_approved,
+        Vec::new(),
         None,
+        &observer,
     )
     .await?;
     Ok(outcome)
@@ -1001,14 +1287,51 @@ pub async fn run_with_checkpointer_journaled(
     journal: Arc<dyn GraphEventJournal>,
 ) -> Result<JournaledRunOutcome> {
     let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    run_with_checkpointer_journaled_observed(
+        workflow,
+        input,
+        capabilities,
+        checkpointer,
+        thread_id,
+        journal,
+        &observer,
+    )
+    .await
+}
+
+/// Like [`run_with_checkpointer_journaled`], but additionally reports live
+/// run/step records to the host-supplied `observer` as the run executes
+/// ([`RunObserver::on_run_start`] once, [`RunObserver::on_step_finish`] per
+/// non-trigger node as it finishes, [`RunObserver::on_run_finish`] once at
+/// settle). This is the durable + journaled + observed entry point a host uses
+/// when it wants **both** post-run journal export **and** live per-step
+/// observation (e.g. incremental run-history persistence and a progress feed).
+///
+/// The observer is held as `Arc<dyn RunObserver>` and cloned into each node
+/// handler, which run across threads, so it must be cheap and non-blocking; see
+/// [`RunObserver`]'s contract.
+///
+/// # Errors
+/// Same as [`run_with_checkpointer_journaled`].
+pub async fn run_with_checkpointer_journaled_observed(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+    journal: Arc<dyn GraphEventJournal>,
+    observer: &Arc<dyn RunObserver>,
+) -> Result<JournaledRunOutcome> {
     let (_graph, _thread_id, outcome, graph_run_ids) = build_and_run(
         workflow,
         input,
         capabilities,
-        &observer,
+        observer,
         checkpointer,
         thread_id.to_string(),
         Some(journal),
+        None,
+        CancellationToken::new(),
     )
     .await?;
     tracing::debug!(
@@ -1039,13 +1362,54 @@ pub async fn resume_with_checkpointer_journaled(
     newly_approved: Vec<String>,
     journal: Arc<dyn GraphEventJournal>,
 ) -> Result<JournaledRunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    resume_with_checkpointer_journaled_observed(
+        workflow,
+        capabilities,
+        checkpointer,
+        thread_id,
+        newly_approved,
+        Vec::new(),
+        journal,
+        &observer,
+    )
+    .await
+}
+
+/// Like [`resume_with_checkpointer_journaled`], but additionally reports live
+/// step records to the host-supplied `observer` as the resumed run executes
+/// (each node that runs after the interrupt boundary fires
+/// [`RunObserver::on_step_finish`]). The durable + journaled + observed resume
+/// counterpart to [`run_with_checkpointer_journaled_observed`].
+///
+/// `newly_approved` gate ids proceed on resume; `rejected` gate ids are **denied**
+/// — each denied gate routes an error item to its `error` port (when one is
+/// wired) or fails the run (when it has none). Pass an empty `rejected` for the
+/// approve-only path; the two sets should be disjoint (a gate is approved or
+/// denied, not both).
+///
+/// # Errors
+/// Same as [`resume_with_checkpointer_journaled`].
+#[allow(clippy::too_many_arguments)]
+pub async fn resume_with_checkpointer_journaled_observed(
+    workflow: &CompiledWorkflow,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+    newly_approved: Vec<String>,
+    rejected: Vec<String>,
+    journal: Arc<dyn GraphEventJournal>,
+    observer: &Arc<dyn RunObserver>,
+) -> Result<JournaledRunOutcome> {
     let (outcome, graph_run_ids) = resume_with_checkpointer_inner(
         workflow,
         capabilities,
         checkpointer,
         thread_id,
         newly_approved,
+        rejected,
         Some(journal),
+        observer,
     )
     .await?;
     tracing::debug!(
@@ -1063,26 +1427,31 @@ pub async fn resume_with_checkpointer_journaled(
 /// (optionally journaled), re-attaches the same `checkpointer`, and resumes
 /// `thread_id`. Returns the outcome plus the resumed execution's
 /// `tinyagents`-minted run ids.
+#[allow(clippy::too_many_arguments)]
 async fn resume_with_checkpointer_inner(
     workflow: &CompiledWorkflow,
     capabilities: &Capabilities,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
     newly_approved: Vec<String>,
+    rejected: Vec<String>,
     journal: Option<Arc<dyn GraphEventJournal>>,
+    observer: &Arc<dyn RunObserver>,
 ) -> Result<(RunOutcome, GraphRunIds)> {
-    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
     let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Rebuild the identical graph and re-attach the SAME checkpointer, so
-    // `resume` loads the state persisted under `thread_id`.
+    // `resume` loads the state persisted under `thread_id`. Node handlers fire
+    // `observer.on_step_finish` for every node that runs after the interrupt
+    // boundary, so a host observer sees the resumed steps live.
     let (compiled, _trigger_id) = build_graph(
         workflow,
         capabilities,
-        &observer,
+        observer,
         &steps,
         checkpointer,
         journal,
+        CancellationToken::new(),
     )?;
 
     // Approvals recorded for downstream visibility. On resume the interrupted
@@ -1091,12 +1460,24 @@ async fn resume_with_checkpointer_inner(
     // (tinyagents ignores it on resume, so the resume value is the real
     // approval channel).
     let approvals_update = json!({
-        "run": { "trigger": { "approvals": newly_approved } }
+        "run": { "trigger": { "approvals": newly_approved.clone() } }
     });
+    if !rejected.is_empty() {
+        tracing::info!(?rejected, "resuming with denied approval gate(s)");
+    }
+    // Always deliver a structured resume value carrying the explicit `approved`
+    // and `rejected` gate id lists. tinyagents ignores the `with_update` state
+    // write on resume, so this value is the sole approval channel and each
+    // interrupted gate decides for itself: gates in `approved` proceed, gates in
+    // `rejected` route to their `error` port (or fail), and gates in neither stay
+    // pending. This is essential when several parallel gates are interrupted and
+    // the host resolves only some of them — a bare `true` would blanket-approve
+    // every interrupt regardless of the host's decision.
+    let resume_value = json!({ "approved": newly_approved, "rejected": rejected });
     let execution = compiled
         .resume(
             thread_id,
-            Command::resume(json!(true)).with_update(approvals_update),
+            Command::resume(resume_value).with_update(approvals_update),
         )
         .await
         .map_err(|e| EngineError::Capability(e.to_string()))?;
@@ -1116,6 +1497,9 @@ async fn resume_with_checkpointer_inner(
         RunOutcome {
             output: execution.state,
             pending_approvals,
+            // Checkpointed resume does not (yet) thread a caller token; a
+            // cancellable resume goes through `resume_cancellable`.
+            cancelled: false,
         },
         graph_run_ids,
     ))
@@ -2715,6 +3099,238 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_denying_a_gate_routes_to_its_error_port() {
+        // trigger -> gate{requires_approval}; gate has BOTH a `main` edge (to
+        // `downstream`) and an `error` edge (to `recover`). Denying the gate on
+        // resume must route the error item to `recover` and leave `downstream`
+        // untouched.
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+                node("recover", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "gate"),
+                port_edge("gate", "main", "downstream"),
+                port_edge("gate", "error", "recover"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+
+        let caps = mock_capabilities();
+        let paused = run_with_checkpointer(&compiled, json!({}), &caps, cp.clone(), "thread-deny")
+            .await
+            .expect("run_with_checkpointer");
+        assert_eq!(paused.pending_approvals, vec!["gate".to_string()]);
+
+        let caps = mock_capabilities();
+        let journal = Arc::new(InMemoryGraphEventJournal::new());
+        let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+        let denied = resume_with_checkpointer_journaled_observed(
+            &compiled,
+            &caps,
+            cp.clone(),
+            "thread-deny",
+            Vec::new(),               // nothing approved
+            vec!["gate".to_string()], // the gate is denied
+            journal,
+            &observer,
+        )
+        .await
+        .expect("resume with rejection");
+
+        assert!(
+            denied.outcome.pending_approvals.is_empty(),
+            "a denied gate is settled, not left pending"
+        );
+        assert_eq!(
+            denied.outcome.output["nodes"]["recover"]["items"][0]["json"]["error"]["node"],
+            json!("gate"),
+            "the denied gate must route its error item to the `error`-port recovery node"
+        );
+        assert!(
+            denied.outcome.output["nodes"]["downstream"].is_null(),
+            "the main branch must not run when the gate is denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_denying_a_gate_with_no_error_port_fails_the_run() {
+        // trigger -> gate{requires_approval} -> downstream, with NO `error` edge.
+        // Denying the gate must fail the run rather than silently swallow it.
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "gate"), edge("gate", "downstream")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+
+        let caps = mock_capabilities();
+        run_with_checkpointer(&compiled, json!({}), &caps, cp.clone(), "thread-deny-fail")
+            .await
+            .expect("run_with_checkpointer");
+
+        let caps = mock_capabilities();
+        let journal = Arc::new(InMemoryGraphEventJournal::new());
+        let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+        let result = resume_with_checkpointer_journaled_observed(
+            &compiled,
+            &caps,
+            cp.clone(),
+            "thread-deny-fail",
+            Vec::new(),
+            vec!["gate".to_string()],
+            journal,
+            &observer,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "denying a gate with no error port must fail the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_gates_resume_one_leaves_the_other_pending() {
+        // trigger fans out to two parallel gates g1 and g2 (both on the `main`
+        // port), each feeding its own downstream. Resuming with only g1 approved
+        // must run g1's downstream while g2 — listed in neither `approved` nor
+        // `rejected` — stays pending and its downstream stays blocked. A bare
+        // `true` resume value would blanket-approve g2 too and wrongly run d2.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate("g1"),
+                gate("g2"),
+                node("d1", NodeKind::OutputParser),
+                node("d2", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "g1"),
+                edge("t", "g2"),
+                edge("g1", "d1"),
+                edge("g2", "d2"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        // The engine serializes interrupts across the fan-out: g1 is the first
+        // gate to pend; g2 pends only once g1 is resolved. The invariant this test
+        // guards is that approving g1 must NOT also approve g2 — a bare `true`
+        // resume value would blanket-approve every interrupted gate.
+        let rr = run_resumable(&compiled, json!({}), &caps)
+            .await
+            .expect("run_resumable");
+        assert_eq!(
+            rr.outcome().pending_approvals,
+            vec!["g1".to_string()],
+            "g1 is the first parallel gate to pend"
+        );
+
+        let after_g1 = rr.resume(vec!["g1".to_string()]).await.expect("resume g1");
+        assert!(
+            after_g1.pending_approvals.contains(&"g2".to_string()),
+            "g2 must stay pending when only g1 is approved (a bare-true resume \
+             would wrongly blanket-approve it), got {:?}",
+            after_g1.pending_approvals
+        );
+        assert!(
+            after_g1.output["nodes"]["d2"].is_null(),
+            "g2's downstream must NOT run while g2 is still pending"
+        );
+
+        // Resolving g2 too settles the run: no gate remains pending and g2's
+        // downstream finally runs.
+        let after_g2 = rr.resume(vec!["g2".to_string()]).await.expect("resume g2");
+        assert!(
+            after_g2.pending_approvals.is_empty(),
+            "no gate pending once both parallel gates are approved, got {:?}",
+            after_g2.pending_approvals
+        );
+        assert!(
+            !after_g2.output["nodes"]["d2"]["items"].is_null(),
+            "g2's downstream runs once g2 is approved"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_denying_a_gate_fans_out_to_multiple_error_recovery_nodes() {
+        // A denied gate whose `error` port fans out to TWO recovery nodes (≥2
+        // edges on the same port) is command-routed and has no conditional router;
+        // the denial must still drive BOTH recovery branches via the fan-out
+        // command path rather than a plain (unrouted) update.
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("recover_a", NodeKind::OutputParser),
+                node("recover_b", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "gate"),
+                port_edge("gate", "error", "recover_a"),
+                port_edge("gate", "error", "recover_b"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+
+        let caps = mock_capabilities();
+        let paused = run_with_checkpointer(
+            &compiled,
+            json!({}),
+            &caps,
+            cp.clone(),
+            "thread-fanout-deny",
+        )
+        .await
+        .expect("run_with_checkpointer");
+        assert_eq!(paused.pending_approvals, vec!["gate".to_string()]);
+
+        let caps = mock_capabilities();
+        let journal = Arc::new(InMemoryGraphEventJournal::new());
+        let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+        let denied = resume_with_checkpointer_journaled_observed(
+            &compiled,
+            &caps,
+            cp.clone(),
+            "thread-fanout-deny",
+            Vec::new(),
+            vec!["gate".to_string()],
+            journal,
+            &observer,
+        )
+        .await
+        .expect("resume with rejection");
+
+        for recovery in ["recover_a", "recover_b"] {
+            assert_eq!(
+                denied.outcome.output["nodes"][recovery]["items"][0]["json"]["error"]["node"],
+                json!("gate"),
+                "both fan-out error-recovery branches must run on denial: {recovery}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn durable_resume_with_journal_surfaces_resume_observations() {
         // Same durable resume path as above, but with a graph event journal attached
         // to both halves. The resumed run returns its own tinyagents run id and the
@@ -2828,5 +3444,68 @@ mod tests {
         let done = rr.resume(vec!["gate".to_string()]).await.expect("resume");
         assert!(done.pending_approvals.is_empty());
         assert!(!done.output["nodes"]["downstream"]["items"].is_null());
+    }
+
+    #[tokio::test]
+    async fn uncancelled_token_runs_to_completion() {
+        // A fresh (never-cancelled) token behaves exactly like `run`.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("p", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "p")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let token = CancellationToken::new();
+        let outcome = run_cancellable(&compiled, json!({ "n": 1 }), &mock_capabilities(), token)
+            .await
+            .expect("run");
+        assert!(!outcome.cancelled);
+        assert_eq!(outcome.output["nodes"]["p"]["items"][0]["json"]["n"], 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_token_stops_run_and_reports_cancelled() {
+        // trigger -> bad (a tool_call with no `slug`, on_error defaulting to
+        // `stop`). If `bad` ever executed it would fail the whole run. Cancelling
+        // the token before the run means `bad` short-circuits at its node
+        // boundary instead of executing, so the run completes cleanly and reports
+        // cancelled — proving new node work is not scheduled after cancellation.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("bad", NodeKind::ToolCall),
+            ],
+            edges: vec![edge("t", "bad")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let token = CancellationToken::new();
+        token.cancel();
+        let outcome = run_cancellable(&compiled, json!({ "n": 1 }), &mock_capabilities(), token)
+            .await
+            .expect("cancelled run still returns Ok");
+        assert!(outcome.cancelled, "outcome should report cancelled");
+        // `bad` short-circuited: it emitted an empty item list, not a tool result
+        // and not a run-ending error.
+        let items = &outcome.output["nodes"]["bad"]["items"];
+        assert!(
+            items.as_array().is_some_and(|a| a.is_empty()),
+            "cancelled node should emit no items, got: {items:?}"
+        );
+    }
+
+    #[test]
+    fn cancellation_token_flips_and_is_shared_across_clones() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        assert!(!token.is_cancelled());
+        assert!(!clone.is_cancelled());
+        clone.cancel();
+        // Both handles observe the flip — they share one atomic flag.
+        assert!(token.is_cancelled());
+        assert!(clone.is_cancelled());
     }
 }

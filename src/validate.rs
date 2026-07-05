@@ -42,6 +42,29 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
         }
     }
 
+    // Per-kind config checks. A `sub_workflow` node must reference its child
+    // exactly one way: an inline `workflow` graph OR a `workflow_id` reference,
+    // never both and never neither (the reference form is resolved at run time
+    // via the host `WorkflowResolver`).
+    for node in &graph.nodes {
+        if node.kind == NodeKind::SubWorkflow {
+            let has_inline = node.config.get("workflow").is_some();
+            let has_ref = node
+                .config
+                .get("workflow_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            if has_inline == has_ref {
+                return Err(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: "sub_workflow requires exactly one of `workflow` (inline) or \
+                             `workflow_id` (reference)"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -186,6 +209,60 @@ mod tests {
             }
             other => panic!("expected MultipleTriggers, got {other:?}"),
         }
+    }
+
+    fn sub_workflow_node(config: serde_json::Value) -> Node {
+        let mut n = node("sw", NodeKind::SubWorkflow);
+        n.config = config;
+        n
+    }
+
+    fn graph_with_sub_workflow(config: serde_json::Value) -> WorkflowGraph {
+        WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), sub_workflow_node(config)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sub_workflow_accepts_inline_workflow() {
+        let graph = graph_with_sub_workflow(serde_json::json!({
+            "workflow": { "nodes": [], "edges": [] }
+        }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn sub_workflow_accepts_workflow_id() {
+        let graph = graph_with_sub_workflow(serde_json::json!({ "workflow_id": "child-1" }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn sub_workflow_rejects_both_inline_and_id() {
+        let graph = graph_with_sub_workflow(serde_json::json!({
+            "workflow": { "nodes": [], "edges": [] },
+            "workflow_id": "child-1"
+        }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn sub_workflow_rejects_neither_inline_nor_id() {
+        // A blank `workflow_id` counts as absent.
+        let graph = graph_with_sub_workflow(serde_json::json!({ "workflow_id": "" }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+        let graph = graph_with_sub_workflow(serde_json::Value::Null);
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
     }
 
     #[test]
