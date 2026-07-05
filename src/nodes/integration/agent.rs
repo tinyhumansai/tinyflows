@@ -196,6 +196,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
@@ -217,6 +218,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
@@ -233,6 +235,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
@@ -255,6 +258,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
@@ -281,6 +285,7 @@ mod tests {
             node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps,
         };
         AgentNode
@@ -438,6 +443,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let err = AgentNode

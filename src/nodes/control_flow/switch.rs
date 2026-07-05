@@ -82,6 +82,7 @@ mod tests {
             node: &sw,
             input: &input,
             run: &run,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = SwitchNode.execute(ctx).await.expect("execute");

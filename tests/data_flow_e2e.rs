@@ -312,3 +312,98 @@ async fn binary_field_absent_when_no_node_emits_it() {
         }
     }
 }
+
+/// Test — the `nodes` scope addresses a **non-adjacent** upstream node by id.
+///
+/// Chain `t → a → b → c`: node `a` computes a value from the trigger, node `b`
+/// produces something unrelated, and node `c` binds `=nodes.a.item.args.x` — its
+/// *grandparent's* output, which never flows through `c`'s direct input. Both
+/// the dotted-path shorthand and the jq form must resolve it.
+#[tokio::test]
+async fn nodes_scope_addresses_grandparent_output_by_id() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            trigger("t"),
+            node(
+                "a",
+                NodeKind::ToolCall,
+                json!({ "slug": "a.echo", "args": { "x": "=item.x" } }),
+            ),
+            node("b", NodeKind::ToolCall, json!({ "slug": "b.noop" })),
+            node(
+                "c",
+                NodeKind::ToolCall,
+                json!({ "slug": "c.send", "args": {
+                    // Dotted-path shorthand and jq form, both keyed by node id.
+                    "x": "=nodes.a.item.args.x",
+                    "x_jq": r#"=.nodes["a"].items[0].args.x"#,
+                    // The direct predecessor's output stays reachable as `item`.
+                    "pred_tool": "=item.tool",
+                } }),
+            ),
+        ],
+        edges: vec![
+            edge("t", "main", "a"),
+            edge("a", "main", "b"),
+            edge("b", "main", "c"),
+        ],
+        ..Default::default()
+    };
+    let compiled = compile(&graph).expect("compile");
+    let out = run(&compiled, json!({ "x": 42 }), &mock_capabilities())
+        .await
+        .expect("run");
+    let c = &items(&out.output, "c")[0]["json"]["args"];
+    assert_eq!(c["x"], 42, "grandparent output must resolve via nodes.a");
+    assert_eq!(c["x_jq"], 42, "jq form must resolve via .nodes[\"a\"]");
+    assert_eq!(
+        c["pred_tool"], "b.noop",
+        "item still binds the direct predecessor"
+    );
+}
+
+/// Test — a fan-in node addresses **each** predecessor by id, with provenance.
+///
+/// `t` fans out to `p` and `q`; both feed `m`. `collect_input` flattens `m`'s
+/// input in edge order (provenance lost in `items`), but the `nodes` scope keeps
+/// per-predecessor addressing: `=nodes.p…` and `=nodes.q…` bind independently.
+#[tokio::test]
+async fn nodes_scope_disambiguates_fan_in_predecessors() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            trigger("t"),
+            node(
+                "p",
+                NodeKind::ToolCall,
+                json!({ "slug": "p.echo", "args": { "v": "from-p" } }),
+            ),
+            node(
+                "q",
+                NodeKind::ToolCall,
+                json!({ "slug": "q.echo", "args": { "v": "from-q" } }),
+            ),
+            node(
+                "m",
+                NodeKind::ToolCall,
+                json!({ "slug": "m.merge", "args": {
+                    "from_p": "=nodes.p.item.args.v",
+                    "from_q": "=nodes.q.item.args.v",
+                } }),
+            ),
+        ],
+        edges: vec![
+            edge("t", "main", "p"),
+            edge("t", "main", "q"),
+            edge("p", "main", "m"),
+            edge("q", "main", "m"),
+        ],
+        ..Default::default()
+    };
+    let compiled = compile(&graph).expect("compile");
+    let out = run(&compiled, Value::Null, &mock_capabilities())
+        .await
+        .expect("run");
+    let m = &items(&out.output, "m")[0]["json"]["args"];
+    assert_eq!(m["from_p"], "from-p", "nodes.p must bind p's output");
+    assert_eq!(m["from_q"], "from-q", "nodes.q must bind q's output");
+}

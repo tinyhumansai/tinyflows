@@ -623,6 +623,11 @@ fn build_graph(
 
                 let input = collect_input(&state, &predecessors);
                 let run_meta = state.get("run").cloned().unwrap_or(Value::Null);
+                // Every completed node's output slot, keyed by id. Handed to the
+                // executor so `=`-expressions can address any upstream node
+                // (`nodes.<id>.item.<field>`), not just the direct predecessors
+                // flattened into `input` — see `crate::nodes::expr_scope`.
+                let nodes_state = state.get("nodes").cloned().unwrap_or(Value::Null);
 
                 // Per-node error policy, read from free-form `node.config` (no model
                 // struct change). `on_error` selects what happens once retries are
@@ -668,6 +673,7 @@ fn build_graph(
                         node: &node,
                         input: &input,
                         run: &run_meta,
+                        nodes: &nodes_state,
                         caps: &caps,
                     };
                     match executor_for(&node.kind).execute(ctx).await {

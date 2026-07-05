@@ -51,6 +51,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &Value::Null,
+            nodes: &Value::Null,
             caps: &caps,
         };
 
@@ -68,6 +69,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &Value::Null,
+            nodes: &Value::Null,
             caps: &caps,
         };
         MergeNode.execute(ctx).await.expect("execute").items

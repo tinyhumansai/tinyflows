@@ -101,6 +101,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = HttpRequestNode.execute(ctx).await.expect("execute");
@@ -132,6 +133,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = HttpRequestNode.execute(ctx).await.expect("execute");
@@ -157,6 +159,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = HttpRequestNode.execute(ctx).await.expect("execute");

@@ -132,6 +132,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let err = ToolCallNode
@@ -156,6 +157,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
@@ -173,6 +175,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");

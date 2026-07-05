@@ -29,6 +29,12 @@ pub struct NodeContext<'a> {
     pub input: &'a [Item],
     /// Run metadata and the trigger payload (the `run` slice of the run state).
     pub run: &'a Value,
+    /// The `nodes` slice of the run state: every node that has completed so far,
+    /// keyed by node id, each slot shaped `{ "items": [<serialized Item>…] }`.
+    /// This is what lets an expression address **any** upstream node's output by
+    /// id (not just the direct predecessors delivered in `input`). Pass
+    /// [`Value::Null`] when no run state exists (e.g. direct executor tests).
+    pub nodes: &'a Value,
     /// Host-provided capabilities.
     pub caps: &'a Capabilities,
 }
@@ -42,7 +48,15 @@ pub struct NodeContext<'a> {
 /// - `item` — the first input item's `json`, or [`Value::Null`] when there is
 ///   no input;
 /// - `items` — the `json` of every input item, in order;
-/// - `run` — the run metadata / trigger payload (`ctx.run`).
+/// - `run` — the run metadata / trigger payload (`ctx.run`);
+/// - `nodes` — every **completed** node's output, keyed by node id, each entry
+///   shaped `{ "item": <first json>, "items": [<json>…] }`. This lets an
+///   expression reference any upstream node by id — e.g.
+///   `=nodes.fetch_recipient.item.email` or jq
+///   `=.nodes["fetch_recipient"].items[0].email` — including non-adjacent
+///   (grandparent) nodes and specific predecessors of a fan-in node. Node
+///   **id** is the addressing key (stable across renames); names are not
+///   indexed.
 #[must_use]
 pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
     let item = ctx
@@ -51,7 +65,40 @@ pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
         .map(|i| i.json.clone())
         .unwrap_or(Value::Null);
     let items: Vec<Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
-    serde_json::json!({ "item": item, "items": items, "run": ctx.run })
+    serde_json::json!({
+        "item": item,
+        "items": items,
+        "run": ctx.run,
+        "nodes": nodes_scope(ctx.nodes),
+    })
+}
+
+/// Projects the run state's `nodes` map into the expression-scope shape:
+/// `{ "<id>": { "item": <first item json>, "items": [<item json>…] } }`.
+///
+/// Each state slot stores serialized [`Item`]s (`{ "json": …, … }`); the scope
+/// exposes just the `json` payloads, mirroring how `item`/`items` are projected
+/// from the node's own input. Slots without an `items` array (or a non-object
+/// `nodes` value) are skipped, so an absent run state yields `{}`.
+fn nodes_scope(nodes: &Value) -> Value {
+    let mut scope = serde_json::Map::new();
+    if let Value::Object(map) = nodes {
+        for (id, slot) in map {
+            let Some(items) = slot.get("items").and_then(Value::as_array) else {
+                continue;
+            };
+            let jsons: Vec<Value> = items
+                .iter()
+                .map(|item| item.get("json").cloned().unwrap_or(Value::Null))
+                .collect();
+            let first = jsons.first().cloned().unwrap_or(Value::Null);
+            scope.insert(
+                id.clone(),
+                serde_json::json!({ "item": first, "items": jsons }),
+            );
+        }
+    }
+    Value::Object(scope)
 }
 
 /// The outcome of executing a single node: the items it emits and (for branching
@@ -197,6 +244,7 @@ mod tests {
                     node: &node,
                     input: &input,
                     run: &run,
+                    nodes: &Value::Null,
                     caps: &caps,
                 })
                 .await;
@@ -219,12 +267,68 @@ mod tests {
                 node: &node,
                 input: &input,
                 run: &run,
+                nodes: &Value::Null,
                 caps: &caps,
             })
             .await
             .expect("execute");
         assert_eq!(out.items, input);
         assert_eq!(out.port, None);
+    }
+
+    #[test]
+    fn expr_scope_exposes_completed_nodes_keyed_by_id() {
+        let caps = mock_capabilities();
+        let run = Value::Null;
+        let n = node(NodeKind::Transform, Value::Null);
+        let input = vec![Item::new(json!({ "in": 1 }))];
+        // Run-state shape: serialized `Item`s under each completed node's slot.
+        let nodes_state = json!({
+            "a": { "items": [
+                { "json": { "x": 42 } },
+                { "json": { "x": 43 }, "paired_item": 0 },
+            ] },
+            "b": { "items": [], "port": "true" },
+            "broken": { "no_items": true },
+        });
+        let ctx = NodeContext {
+            node: &n,
+            input: &input,
+            run: &run,
+            nodes: &nodes_state,
+            caps: &caps,
+        };
+        let scope = expr_scope(&ctx);
+        // Existing keys unchanged (back-compat).
+        assert_eq!(scope["item"], json!({ "in": 1 }));
+        assert_eq!(scope["items"], json!([{ "in": 1 }]));
+        // `nodes.<id>` projects each slot's item `json` payloads.
+        assert_eq!(scope["nodes"]["a"]["item"], json!({ "x": 42 }));
+        assert_eq!(
+            scope["nodes"]["a"]["items"],
+            json!([{ "x": 42 }, { "x": 43 }])
+        );
+        // An empty slot yields a null `item` and empty `items`.
+        assert_eq!(scope["nodes"]["b"]["item"], Value::Null);
+        assert_eq!(scope["nodes"]["b"]["items"], json!([]));
+        // A slot without an `items` array is skipped, not panicked on.
+        assert!(scope["nodes"].get("broken").is_none());
+    }
+
+    #[test]
+    fn expr_scope_with_null_nodes_state_is_empty_map() {
+        let caps = mock_capabilities();
+        let run = Value::Null;
+        let n = node(NodeKind::Transform, Value::Null);
+        let ctx = NodeContext {
+            node: &n,
+            input: &[],
+            run: &run,
+            nodes: &Value::Null,
+            caps: &caps,
+        };
+        let scope = expr_scope(&ctx);
+        assert_eq!(scope["nodes"], json!({}));
     }
 
     #[test]

@@ -107,6 +107,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         CodeNode.execute(ctx).await.expect("execute").items

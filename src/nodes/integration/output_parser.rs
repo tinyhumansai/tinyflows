@@ -80,6 +80,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &Value::Null,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = OutputParserNode.execute(ctx).await.expect("execute");
@@ -106,6 +107,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &Value::Null,
+            nodes: &Value::Null,
             caps: &caps,
         };
         OutputParserNode.execute(ctx).await.expect("execute").items
@@ -167,6 +169,7 @@ mod tests {
             node,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps,
         };
         OutputParserNode.execute(ctx).await.map(|o| o.items)

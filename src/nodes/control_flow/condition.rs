@@ -73,6 +73,7 @@ mod tests {
             node: &node,
             input: &input,
             run: &run,
+            nodes: &Value::Null,
             caps: &caps,
         };
         let out = ConditionNode.execute(ctx).await.expect("execute");

@@ -170,6 +170,7 @@ mod tests {
             node: &sw,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps: &caps,
         };
         SubWorkflowNode
@@ -260,6 +261,7 @@ mod tests {
             node: &sw,
             input: &input,
             run: &run_meta,
+            nodes: &Value::Null,
             caps,
         };
         SubWorkflowNode.execute(ctx).await

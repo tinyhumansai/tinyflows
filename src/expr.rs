@@ -16,6 +16,22 @@
 //! jq programs never panic: a compile/run error, non-JSON output, or empty
 //! output all yield [`Value::Null`].
 //!
+//! # The evaluation scope
+//!
+//! For node config resolution the scope is built by `crate::nodes::expr_scope`
+//! and exposes:
+//!
+//! - `item` — the first input item's `json` (the direct predecessors' output);
+//! - `items` — every input item's `json`, in edge order;
+//! - `run` — run metadata and the trigger payload;
+//! - `nodes` — **every completed node's output, keyed by node id**:
+//!   `{ "<id>": { "item": <first json>, "items": [<json>…] } }`. Use this to
+//!   reference a node that is not the direct predecessor
+//!   (`"=nodes.fetch_recipient.item.email"`) or to disambiguate the inputs of a
+//!   fan-in node (`"=nodes.p.item.v"` vs `"=nodes.q.item.v"`). The jq form is
+//!   `"=.nodes[\"fetch_recipient\"].items[0].email"`. Ids are the addressing
+//!   key; node names are not indexed.
+//!
 //! [jq]: https://jqlang.org/
 //! [`jaq`]: https://crates.io/crates/jaq
 
