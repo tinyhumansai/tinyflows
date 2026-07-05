@@ -967,6 +967,7 @@ pub async fn resume_with_checkpointer(
     thread_id: &str,
     newly_approved: Vec<String>,
 ) -> Result<RunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
     let (outcome, _run_ids) = resume_with_checkpointer_inner(
         workflow,
         capabilities,
@@ -974,6 +975,7 @@ pub async fn resume_with_checkpointer(
         thread_id,
         newly_approved,
         None,
+        &observer,
     )
     .await?;
     Ok(outcome)
@@ -1001,11 +1003,46 @@ pub async fn run_with_checkpointer_journaled(
     journal: Arc<dyn GraphEventJournal>,
 ) -> Result<JournaledRunOutcome> {
     let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    run_with_checkpointer_journaled_observed(
+        workflow,
+        input,
+        capabilities,
+        checkpointer,
+        thread_id,
+        journal,
+        &observer,
+    )
+    .await
+}
+
+/// Like [`run_with_checkpointer_journaled`], but additionally reports live
+/// run/step records to the host-supplied `observer` as the run executes
+/// ([`RunObserver::on_run_start`] once, [`RunObserver::on_step_finish`] per
+/// non-trigger node as it finishes, [`RunObserver::on_run_finish`] once at
+/// settle). This is the durable + journaled + observed entry point a host uses
+/// when it wants **both** post-run journal export **and** live per-step
+/// observation (e.g. incremental run-history persistence and a progress feed).
+///
+/// The observer is held as `Arc<dyn RunObserver>` and cloned into each node
+/// handler, which run across threads, so it must be cheap and non-blocking; see
+/// [`RunObserver`]'s contract.
+///
+/// # Errors
+/// Same as [`run_with_checkpointer_journaled`].
+pub async fn run_with_checkpointer_journaled_observed(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+    journal: Arc<dyn GraphEventJournal>,
+    observer: &Arc<dyn RunObserver>,
+) -> Result<JournaledRunOutcome> {
     let (_graph, _thread_id, outcome, graph_run_ids) = build_and_run(
         workflow,
         input,
         capabilities,
-        &observer,
+        observer,
         checkpointer,
         thread_id.to_string(),
         Some(journal),
@@ -1039,6 +1076,36 @@ pub async fn resume_with_checkpointer_journaled(
     newly_approved: Vec<String>,
     journal: Arc<dyn GraphEventJournal>,
 ) -> Result<JournaledRunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    resume_with_checkpointer_journaled_observed(
+        workflow,
+        capabilities,
+        checkpointer,
+        thread_id,
+        newly_approved,
+        journal,
+        &observer,
+    )
+    .await
+}
+
+/// Like [`resume_with_checkpointer_journaled`], but additionally reports live
+/// step records to the host-supplied `observer` as the resumed run executes
+/// (each node that runs after the interrupt boundary fires
+/// [`RunObserver::on_step_finish`]). The durable + journaled + observed resume
+/// counterpart to [`run_with_checkpointer_journaled_observed`].
+///
+/// # Errors
+/// Same as [`resume_with_checkpointer_journaled`].
+pub async fn resume_with_checkpointer_journaled_observed(
+    workflow: &CompiledWorkflow,
+    capabilities: &Capabilities,
+    checkpointer: Arc<dyn Checkpointer<Value>>,
+    thread_id: &str,
+    newly_approved: Vec<String>,
+    journal: Arc<dyn GraphEventJournal>,
+    observer: &Arc<dyn RunObserver>,
+) -> Result<JournaledRunOutcome> {
     let (outcome, graph_run_ids) = resume_with_checkpointer_inner(
         workflow,
         capabilities,
@@ -1046,6 +1113,7 @@ pub async fn resume_with_checkpointer_journaled(
         thread_id,
         newly_approved,
         Some(journal),
+        observer,
     )
     .await?;
     tracing::debug!(
@@ -1070,16 +1138,18 @@ async fn resume_with_checkpointer_inner(
     thread_id: &str,
     newly_approved: Vec<String>,
     journal: Option<Arc<dyn GraphEventJournal>>,
+    observer: &Arc<dyn RunObserver>,
 ) -> Result<(RunOutcome, GraphRunIds)> {
-    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
     let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Rebuild the identical graph and re-attach the SAME checkpointer, so
-    // `resume` loads the state persisted under `thread_id`.
+    // `resume` loads the state persisted under `thread_id`. Node handlers fire
+    // `observer.on_step_finish` for every node that runs after the interrupt
+    // boundary, so a host observer sees the resumed steps live.
     let (compiled, _trigger_id) = build_graph(
         workflow,
         capabilities,
-        &observer,
+        observer,
         &steps,
         checkpointer,
         journal,
