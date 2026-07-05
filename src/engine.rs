@@ -2855,6 +2855,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn resume_replaces_non_object_input_with_approvals_object() {
+        // The public rerun-based resume path accepts any JSON input. A scalar input
+        // cannot preserve fields, so the engine replaces it with the approvals
+        // object and the gate proceeds immediately.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate("gate"),
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "gate"), edge("gate", "downstream")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let outcome = resume(
+            &compiled,
+            json!("raw-input"),
+            vec!["gate".to_string()],
+            &caps,
+        )
+        .await
+        .expect("resume");
+
+        assert!(outcome.pending_approvals.is_empty());
+        assert_eq!(
+            outcome.output["run"]["trigger"],
+            json!({ "approvals": ["gate"] })
+        );
+        assert!(
+            !outcome.output["nodes"]["downstream"]["items"].is_null(),
+            "downstream should run after the scalar input is replaced with approvals"
+        );
+    }
+
     /// A [`RunObserver`] that counts run-start / run-finish and records step ids,
     /// so a test can assert every hook fired the right number of times.
     #[derive(Default)]
@@ -3134,6 +3171,76 @@ mod tests {
         assert!(
             result.is_err(),
             "denying a gate with no error port must fail the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_resume_with_journal_surfaces_resume_observations() {
+        // Same durable resume path as above, but with a graph event journal attached
+        // to both halves. The resumed run returns its own tinyagents run id and the
+        // journal stores observations under that id.
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut approval_gate = node("gate", NodeKind::OutputParser);
+        approval_gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                approval_gate,
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "gate"), edge("gate", "downstream")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+        let journal = Arc::new(InMemoryGraphEventJournal::new());
+
+        let paused = run_with_checkpointer_journaled(
+            &compiled,
+            json!({ "request": 42 }),
+            &caps,
+            cp.clone(),
+            "thread-journal-resume",
+            journal.clone(),
+        )
+        .await
+        .expect("journaled run");
+        assert_eq!(paused.outcome.pending_approvals, vec!["gate".to_string()]);
+
+        let resumed = resume_with_checkpointer_journaled(
+            &compiled,
+            &caps,
+            cp.clone(),
+            "thread-journal-resume",
+            vec!["gate".to_string()],
+            journal.clone(),
+        )
+        .await
+        .expect("journaled resume");
+
+        assert!(resumed.outcome.pending_approvals.is_empty());
+        assert!(
+            !resumed.outcome.output["nodes"]["downstream"]["items"].is_null(),
+            "downstream should run during the checkpointed resume"
+        );
+        assert!(
+            !resumed.graph_run_ids.run_id.is_empty(),
+            "resume must surface the tinyagents run id"
+        );
+
+        let observations = journal
+            .read_from(&resumed.graph_run_ids.run_id, 0)
+            .await
+            .expect("read resume observations");
+        assert!(
+            !observations.is_empty(),
+            "resume observations should be journaled under the resumed run id"
+        );
+        assert!(
+            observations
+                .iter()
+                .any(|observation| observation.event.kind() == "run.completed"),
+            "resume journal should include run completion: {observations:?}"
         );
     }
 
