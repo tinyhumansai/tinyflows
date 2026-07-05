@@ -335,6 +335,13 @@ fn build_graph(
         let is_trigger = node.kind == NodeKind::Trigger;
         // Successors to fan out to concurrently, or `None` for a non-fan-out node.
         let fan_out = fan_out_targets(&node.id);
+        // Whether the node has an outgoing edge on the `error` port. A denied
+        // approval gate (see the resume-deny path below) routes its error item
+        // there when present, and fails the run when absent.
+        let has_error_edge = graph
+            .edges
+            .iter()
+            .any(|e| e.from_node == node.id && e.from_port == "error");
 
         builder = builder.add_node(node.id.clone(), move |state: Value, ctx| {
             let node = node.clone();
@@ -343,6 +350,10 @@ fn build_graph(
             let observer = observer.clone();
             let steps = steps.clone();
             let fan_out = fan_out.clone();
+            // The resume value delivered to this node on a checkpointed resume, if
+            // any. A bare `true` means "approve the interrupted gate"; a structured
+            // `{ "rejected": [<gate id>, …] }` denies the named gate(s).
+            let resume_value = ctx.resume.clone();
             // A checkpointed resume (see `ResumableRun::resume`) delivers a resume
             // value to the interrupted node via `NodeContext::resume`; its presence
             // approves this gate so the run proceeds forward from the checkpoint.
@@ -376,6 +387,50 @@ fn build_graph(
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 if requires_approval {
+                    // Human-in-the-loop **denial**. A resume delivered with a
+                    // structured value `{ "rejected": [<gate id>, …] }` (see
+                    // `resume_with_checkpointer_journaled_observed`) denies the
+                    // named gate rather than approving it: the gate emits an
+                    // error item on its `error` port when one is wired (so a
+                    // recovery branch can handle the rejection), or fails the run
+                    // when it has no `error` port. Checked before the approval
+                    // branch so a denial always wins over the bare-resume approval.
+                    let denied = resume_value
+                        .as_ref()
+                        .and_then(|v| v.get("rejected"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|rejected| {
+                            rejected
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .any(|id| id == node.id)
+                        });
+                    if denied {
+                        tracing::info!(node = %node.id, has_error_edge, "approval gate denied");
+                        let item = Item::new(json!({
+                            "error": {
+                                "message": "approval denied",
+                                "node": node.id,
+                                "denied": true,
+                            }
+                        }));
+                        if has_error_edge {
+                            // Route the denial to the `error` port so a recovery
+                            // sub-graph runs. A plain update (not `emit`) so the
+                            // conditional-edge router keys on the recorded port.
+                            return Ok(NodeResult::Update(items_update(
+                                &node.id,
+                                &[item],
+                                Some("error"),
+                            )?));
+                        }
+                        // No error branch to route to — fail the run so the denial
+                        // is not silently swallowed.
+                        return Err(TinyAgentsError::Graph(format!(
+                            "approval gate '{}' was denied and has no `error` port to route to",
+                            node.id
+                        )));
+                    }
                     let approved = state
                         .get("run")
                         .and_then(|run| run.get("trigger"))
@@ -974,6 +1029,7 @@ pub async fn resume_with_checkpointer(
         checkpointer,
         thread_id,
         newly_approved,
+        Vec::new(),
         None,
         &observer,
     )
@@ -1083,6 +1139,7 @@ pub async fn resume_with_checkpointer_journaled(
         checkpointer,
         thread_id,
         newly_approved,
+        Vec::new(),
         journal,
         &observer,
     )
@@ -1095,6 +1152,12 @@ pub async fn resume_with_checkpointer_journaled(
 /// [`RunObserver::on_step_finish`]). The durable + journaled + observed resume
 /// counterpart to [`run_with_checkpointer_journaled_observed`].
 ///
+/// `newly_approved` gate ids proceed on resume; `rejected` gate ids are **denied**
+/// — each denied gate routes an error item to its `error` port (when one is
+/// wired) or fails the run (when it has none). Pass an empty `rejected` for the
+/// approve-only path; the two sets should be disjoint (a gate is approved or
+/// denied, not both).
+///
 /// # Errors
 /// Same as [`resume_with_checkpointer_journaled`].
 pub async fn resume_with_checkpointer_journaled_observed(
@@ -1103,6 +1166,7 @@ pub async fn resume_with_checkpointer_journaled_observed(
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
     newly_approved: Vec<String>,
+    rejected: Vec<String>,
     journal: Arc<dyn GraphEventJournal>,
     observer: &Arc<dyn RunObserver>,
 ) -> Result<JournaledRunOutcome> {
@@ -1112,6 +1176,7 @@ pub async fn resume_with_checkpointer_journaled_observed(
         checkpointer,
         thread_id,
         newly_approved,
+        rejected,
         Some(journal),
         observer,
     )
@@ -1137,6 +1202,7 @@ async fn resume_with_checkpointer_inner(
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
     newly_approved: Vec<String>,
+    rejected: Vec<String>,
     journal: Option<Arc<dyn GraphEventJournal>>,
     observer: &Arc<dyn RunObserver>,
 ) -> Result<(RunOutcome, GraphRunIds)> {
@@ -1161,12 +1227,22 @@ async fn resume_with_checkpointer_inner(
     // (tinyagents ignores it on resume, so the resume value is the real
     // approval channel).
     let approvals_update = json!({
-        "run": { "trigger": { "approvals": newly_approved } }
+        "run": { "trigger": { "approvals": newly_approved.clone() } }
     });
+    // The resume value delivered to the interrupted gate(s): a bare `true`
+    // (backward-compatible bare approval) when nothing was denied, otherwise a
+    // structured value carrying the denied gate ids so the gate handlers can
+    // route/fail them (see the `denied` branch in `build_graph`).
+    let resume_value = if rejected.is_empty() {
+        json!(true)
+    } else {
+        tracing::info!(?rejected, "resuming with denied approval gate(s)");
+        json!({ "approved": newly_approved, "rejected": rejected })
+    };
     let execution = compiled
         .resume(
             thread_id,
-            Command::resume(json!(true)).with_update(approvals_update),
+            Command::resume(resume_value).with_update(approvals_update),
         )
         .await
         .map_err(|e| EngineError::Capability(e.to_string()))?;
@@ -2744,6 +2820,111 @@ mod tests {
         assert!(
             !done.output["nodes"]["downstream"]["items"].is_null(),
             "downstream should run once the run resumes from the durable checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_denying_a_gate_routes_to_its_error_port() {
+        // trigger -> gate{requires_approval}; gate has BOTH a `main` edge (to
+        // `downstream`) and an `error` edge (to `recover`). Denying the gate on
+        // resume must route the error item to `recover` and leave `downstream`
+        // untouched.
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+                node("recover", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "gate"),
+                port_edge("gate", "main", "downstream"),
+                port_edge("gate", "error", "recover"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+
+        let caps = mock_capabilities();
+        let paused = run_with_checkpointer(&compiled, json!({}), &caps, cp.clone(), "thread-deny")
+            .await
+            .expect("run_with_checkpointer");
+        assert_eq!(paused.pending_approvals, vec!["gate".to_string()]);
+
+        let caps = mock_capabilities();
+        let journal = Arc::new(InMemoryGraphEventJournal::new());
+        let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+        let denied = resume_with_checkpointer_journaled_observed(
+            &compiled,
+            &caps,
+            cp.clone(),
+            "thread-deny",
+            Vec::new(),               // nothing approved
+            vec!["gate".to_string()], // the gate is denied
+            journal,
+            &observer,
+        )
+        .await
+        .expect("resume with rejection");
+
+        assert!(
+            denied.outcome.pending_approvals.is_empty(),
+            "a denied gate is settled, not left pending"
+        );
+        assert_eq!(
+            denied.outcome.output["nodes"]["recover"]["items"][0]["json"]["error"]["node"],
+            json!("gate"),
+            "the denied gate must route its error item to the `error`-port recovery node"
+        );
+        assert!(
+            denied.outcome.output["nodes"]["downstream"].is_null(),
+            "the main branch must not run when the gate is denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_denying_a_gate_with_no_error_port_fails_the_run() {
+        // trigger -> gate{requires_approval} -> downstream, with NO `error` edge.
+        // Denying the gate must fail the run rather than silently swallow it.
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                node("downstream", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "gate"), edge("gate", "downstream")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+
+        let caps = mock_capabilities();
+        run_with_checkpointer(&compiled, json!({}), &caps, cp.clone(), "thread-deny-fail")
+            .await
+            .expect("run_with_checkpointer");
+
+        let caps = mock_capabilities();
+        let journal = Arc::new(InMemoryGraphEventJournal::new());
+        let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+        let result = resume_with_checkpointer_journaled_observed(
+            &compiled,
+            &caps,
+            cp.clone(),
+            "thread-deny-fail",
+            Vec::new(),
+            vec!["gate".to_string()],
+            journal,
+            &observer,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "denying a gate with no error port must fail the run"
         );
     }
 
