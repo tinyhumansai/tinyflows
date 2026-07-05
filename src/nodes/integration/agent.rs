@@ -56,18 +56,25 @@ impl NodeExecutor for AgentNode {
         let mut value = response;
         if let Some(tool_call) = value.get("tool_call").cloned() {
             if let Some(slug) = tool_call.get("slug").and_then(Value::as_str) {
-                let offered = cfg
+                // Only a tool actually offered in `config.tools` may be invoked;
+                // keep the matched descriptor so its trusted `connection_ref` wins.
+                let offered_tool = cfg
                     .get("tools")
                     .and_then(Value::as_array)
-                    .is_some_and(|tools| {
+                    .and_then(|tools| {
                         tools
                             .iter()
-                            .any(|t| t.get("slug").and_then(Value::as_str) == Some(slug))
+                            .find(|t| t.get("slug").and_then(Value::as_str) == Some(slug))
                     });
-                if offered {
+                if let Some(offered_tool) = offered_tool {
                     tracing::debug!(slug, "agent tool sub-port: invoking model-elected tool");
                     let args = tool_call.get("args").cloned().unwrap_or(Value::Null);
-                    let tool_conn = tool_call
+                    // Credentials come from trusted config only: the offered tool
+                    // descriptor's `connection_ref`, else the node's. The model's
+                    // `tool_call.connection_ref` is deliberately NOT trusted — a
+                    // prompt-injection could otherwise elect an arbitrary host
+                    // credential id for the call.
+                    let tool_conn = offered_tool
                         .get("connection_ref")
                         .and_then(Value::as_str)
                         .or(conn);
@@ -329,6 +336,50 @@ mod tests {
         })));
         let value = run_agent(&node, &caps_with_llm(llm)).await;
         assert!(value.get("tool_result").is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_sub_port_ignores_model_supplied_connection_ref() {
+        // Security: a model-supplied `tool_call.connection_ref` must NOT be
+        // trusted (prompt-injection could otherwise select an arbitrary host
+        // credential). The credential comes from the offered tool descriptor's
+        // `connection_ref` when present, else the node's `connection_ref`.
+        let node = agent_node(json!({
+            "prompt": "do it",
+            "connection_ref": "node_acct",
+            "tools": [{ "slug": "slack.post", "connection_ref": "trusted_acct" }]
+        }));
+        let llm = Arc::new(ToolCallingLlm(json!({
+            "tool_call": {
+                "slug": "slack.post",
+                "args": { "text": "hi" },
+                "connection_ref": "attacker_acct"
+            }
+        })));
+        let value = run_agent(&node, &caps_with_llm(llm)).await;
+        // The mock ToolInvoker echoes the `conn` it was invoked with: it must be
+        // the offered descriptor's trusted id, never the model-supplied one.
+        assert_eq!(value["tool_result"]["connection"], "trusted_acct");
+    }
+
+    #[tokio::test]
+    async fn tool_sub_port_falls_back_to_node_connection_ref() {
+        // When the offered tool descriptor carries no `connection_ref`, the node's
+        // `connection_ref` is used — still never the model-supplied one.
+        let node = agent_node(json!({
+            "prompt": "do it",
+            "connection_ref": "node_acct",
+            "tools": [{ "slug": "slack.post" }]
+        }));
+        let llm = Arc::new(ToolCallingLlm(json!({
+            "tool_call": {
+                "slug": "slack.post",
+                "args": { "text": "hi" },
+                "connection_ref": "attacker_acct"
+            }
+        })));
+        let value = run_agent(&node, &caps_with_llm(llm)).await;
+        assert_eq!(value["tool_result"]["connection"], "node_acct");
     }
 
     /// An LLM that returns an invalid completion, but a schema-valid value when

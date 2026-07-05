@@ -1,4 +1,8 @@
-# tinyflows
+<h1 align="center">TinyFlows</h1>
+
+<p align="center">
+ <img src="https://github.com/tinyhumansai/tinyjuice/raw/main/docs/juice.png" />
+</p>
 
 **A Rust-native, host-agnostic workflow automation engine, shipped as a library
 crate.**
@@ -151,15 +155,15 @@ gated on the `mock` cargo feature, so run them with:
 cargo run --example <name> --features mock
 ```
 
-| Example | What it shows |
-|---------|---------------|
-| `hello_workflow` | Build → compile → run a `trigger → transform` workflow against the mock capabilities. |
-| `conditional_branch` | IF routing: a `condition` node takes exactly one of its `true` / `false` branches. |
-| `parallel_and_merge` | Parallel fan-out (a node's same-port successors run concurrently) joined by a `merge` fan-in barrier. |
-| `capability_pipeline` | A linear `http_request → code → agent → tool_call` pipeline through the host capability traits (mocked). |
-| `error_handling` | Per-node `retry` plus `on_error: "route"` recovering a failing node via its `error` port. |
-| `hitl_approval` | A `requires_approval` gate pauses the run (`pending_approvals`), then `run_resumable(...).resume(...)` continues from the checkpoint. |
-| `jq_expressions` | The jaq-backed jq engine in a `transform` node (e.g. `=.item.prices | add`). |
+| Example               | What it shows                                                                                                                         |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `hello_workflow`      | Build → compile → run a `trigger → transform` workflow against the mock capabilities.                                                 |
+| `conditional_branch`  | IF routing: a `condition` node takes exactly one of its `true` / `false` branches.                                                    |
+| `parallel_and_merge`  | Parallel fan-out (a node's same-port successors run concurrently) joined by a `merge` fan-in barrier.                                 |
+| `capability_pipeline` | A linear `http_request → code → agent → tool_call` pipeline through the host capability traits (mocked).                              |
+| `error_handling`      | Per-node `retry` plus `on_error: "route"` recovering a failing node via its `error` port.                                             |
+| `hitl_approval`       | A `requires_approval` gate pauses the run (`pending_approvals`), then `run_resumable(...).resume(...)` continues from the checkpoint. |
+| `jq_expressions`      | The jaq-backed jq engine in a `transform` node (e.g. `=.item.prices                                                                   | add`). |
 
 Omitting `--features mock` is harmless: the demo body is
 `#[cfg(feature = "mock")]`-gated, so a default build stays green and the example
@@ -176,20 +180,20 @@ done
 
 ## Node catalog
 
-| Kind | What it does |
-|------|--------------|
-| `trigger` | Entry node that starts the workflow (exactly one per graph); its firing mode is host-driven. |
-| `agent` | Runs an LLM agent turn, with optional chat-model / memory / tool / output-parser sub-ports. |
-| `tool_call` | Invokes one specific integration action deterministically (no LLM). |
-| `http_request` | Performs an outbound HTTP request. |
-| `code` | Runs sandboxed user code (JavaScript or Python). |
-| `output_parser` | Parses / validates an upstream agent's output into a structured shape. |
-| `sub_workflow` | Runs another workflow as a nested sub-graph and returns its output. |
-| `condition` | Two-way IF; emits on the `true` or `false` port. |
-| `switch` | Multi-way branch keyed by an expression result. |
-| `merge` | Fan-in barrier that combines multiple inputs; waits for all wired predecessors. |
-| `split_out` | Fan-out that emits one item per element of a list. |
-| `transform` | Pure, expression-based data transform / field mapping over the run state. |
+| Kind            | What it does                                                                                 |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| `trigger`       | Entry node that starts the workflow (exactly one per graph); its firing mode is host-driven. |
+| `agent`         | Runs an LLM agent turn, with optional chat-model / memory / tool / output-parser sub-ports.  |
+| `tool_call`     | Invokes one specific integration action deterministically (no LLM).                          |
+| `http_request`  | Performs an outbound HTTP request.                                                           |
+| `code`          | Runs sandboxed user code (JavaScript or Python).                                             |
+| `output_parser` | Parses / validates an upstream agent's output into a structured shape.                       |
+| `sub_workflow`  | Runs another workflow as a nested sub-graph and returns its output.                          |
+| `condition`     | Two-way IF; emits on the `true` or `false` port.                                             |
+| `switch`        | Multi-way branch keyed by an expression result.                                              |
+| `merge`         | Fan-in barrier that combines multiple inputs; waits for all wired predecessors.              |
+| `split_out`     | Fan-out that emits one item per element of a list.                                           |
+| `transform`     | Pure, expression-based data transform / field mapping over the run state.                    |
 
 See the [Node Catalog](../../wiki/Node-Catalog) wiki page for config keys and
 ports.
