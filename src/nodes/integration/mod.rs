@@ -8,6 +8,7 @@ pub mod agent;
 pub mod code;
 pub mod http_request;
 pub mod output_parser;
+pub(crate) mod schema;
 pub mod sub_workflow;
 pub mod tool_call;
 

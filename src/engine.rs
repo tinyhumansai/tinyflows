@@ -14,7 +14,7 @@
 //! predecessor is wired with waiting edges so it runs only once all of them
 //! finish).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -61,6 +61,43 @@ use crate::observability::{ExecutionStep, Run, RunObserver, RunStatus, StepStatu
 /// time- or random-based so ids stay deterministic within a process.
 static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(0);
 
+/// A cooperative cancellation signal for a workflow run.
+///
+/// Cheap to clone (an [`Arc`] around an atomic flag) and runtime-agnostic — the
+/// crate deliberately avoids depending on any executor's cancellation type. Hand
+/// a clone to a cancellable entry point ([`run_cancellable`] /
+/// [`resume_cancellable`]) and keep another; calling [`cancel`](Self::cancel)
+/// from anywhere flips the flag, and the run stops scheduling real node work at
+/// the next node boundary, returning a [`RunOutcome`] with
+/// [`cancelled`](RunOutcome::cancelled) set.
+///
+/// Cancellation is **cooperative and boundary-level**: a node already executing
+/// runs to completion; the token is checked before each node runs, so no *new*
+/// node work starts after cancellation. This complements (does not replace) a
+/// host's hard task-abort — it lets a run wind down cleanly rather than being
+/// dropped mid-await.
+#[derive(Debug, Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    /// Creates a fresh, un-cancelled token.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signals cancellation. Idempotent; safe to call from any thread.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether cancellation has been signalled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// The result of a completed workflow run.
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
@@ -71,6 +108,11 @@ pub struct RunOutcome {
     /// whose id was not present in the run input's `approvals` array; its
     /// downstream did not run. Empty for a fully completed run.
     pub pending_approvals: Vec<String>,
+    /// Whether the run observed a cancelled [`CancellationToken`] and wound down
+    /// early. When `true`, some downstream nodes were skipped (their slots in
+    /// `output` were not produced), so treat `output` as partial. Always `false`
+    /// for runs started without a token or that completed before any cancel.
+    pub cancelled: bool,
 }
 
 /// The `tinyagents`-minted identifiers of the underlying graph run.
@@ -222,6 +264,44 @@ pub async fn run_with_observer(
         thread_id,
         None,
         None,
+        CancellationToken::new(),
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Like [`run`], but observes `token`: cancelling it stops the run from
+/// scheduling further node work at the next node boundary, and the returned
+/// [`RunOutcome`] has [`cancelled`](RunOutcome::cancelled) set. A node already
+/// executing when the token flips finishes; no *new* node work starts after
+/// cancellation. All other behavior is identical to [`run`].
+///
+/// This is the clean, engine-level cooperative-cancellation path, complementing a
+/// host's hard task-abort: the run winds down and returns a partial outcome rather
+/// than being dropped mid-await.
+///
+/// # Errors
+/// Same as [`run`].
+pub async fn run_cancellable(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    token: CancellationToken,
+) -> Result<RunOutcome> {
+    let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    let checkpointer: Arc<dyn Checkpointer<Value>> =
+        Arc::new(InMemoryCheckpointer::<Value>::default());
+    let thread_id = default_thread_id(workflow)?;
+    let (_graph, _thread_id, outcome, _run_ids) = build_and_run(
+        workflow,
+        input,
+        capabilities,
+        &observer,
+        checkpointer,
+        thread_id,
+        None,
+        None,
+        token,
     )
     .await?;
     Ok(outcome)
@@ -267,6 +347,7 @@ pub(crate) async fn run_sub_workflow(
         thread_id,
         None,
         Some(json!({ "sub_workflow_depth": depth })),
+        CancellationToken::new(),
     )
     .await?;
     Ok(outcome)
@@ -298,6 +379,7 @@ fn build_graph(
     steps: &Arc<Mutex<Vec<ExecutionStep>>>,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     journal: Option<Arc<dyn GraphEventJournal>>,
+    token: CancellationToken,
 ) -> Result<(CompiledGraph<Value, Value>, String)> {
     let graph = &workflow.graph;
 
@@ -378,6 +460,7 @@ fn build_graph(
         let caps = capabilities.clone();
         let observer = observer.clone();
         let steps = steps.clone();
+        let token = token.clone();
         let is_trigger = node.kind == NodeKind::Trigger;
         // Successors to fan out to concurrently, or `None` for a non-fan-out node.
         let fan_out = fan_out_targets(&node.id);
@@ -395,6 +478,7 @@ fn build_graph(
             let caps = caps.clone();
             let observer = observer.clone();
             let steps = steps.clone();
+            let token = token.clone();
             let fan_out = fan_out.clone();
             // The resume value delivered to this node on a checkpointed resume, if
             // any. A bare `true` means "approve the interrupted gate"; a structured
@@ -414,6 +498,19 @@ fn build_graph(
                     }
                     None => NodeResult::Update(update),
                 };
+
+                // Cooperative cancellation, checked at the node boundary before
+                // any real work. When the run's token is cancelled this node
+                // becomes a no-op: it emits an empty update on the default port
+                // and — crucially — does **not** fan out (a plain `Update`, not
+                // `emit`), so a fan-out node's parallel successors are not
+                // scheduled. Downstream nodes reached by static edges will hit
+                // this same check and no-op in turn, so the run winds down without
+                // starting further node work. The engine reports it as cancelled.
+                if token.is_cancelled() {
+                    tracing::info!(node = %node.id, "run cancelled; skipping node work");
+                    return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                }
 
                 if is_trigger {
                     // The trigger payload is pre-seeded into the state; no-op update
@@ -761,6 +858,7 @@ async fn build_and_run(
     thread_id: String,
     journal: Option<Arc<dyn GraphEventJournal>>,
     run_meta_overlay: Option<Value>,
+    token: CancellationToken,
 ) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome, GraphRunIds)> {
     // Process-local, monotonic run id — no time/random source.
     let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
@@ -781,6 +879,7 @@ async fn build_and_run(
         &steps,
         checkpointer,
         journal,
+        token.clone(),
     )?;
 
     let seed_items = items_update(&trigger_id, &[Item::new(input.clone())], None)
@@ -841,6 +940,9 @@ async fn build_and_run(
         RunOutcome {
             output: execution.state,
             pending_approvals,
+            // A cancelled token means at least one node boundary short-circuited,
+            // so surface the run as cancelled (its `output` is partial).
+            cancelled: token.is_cancelled(),
         },
         graph_run_ids,
     ))
@@ -895,6 +997,47 @@ pub async fn resume(
     }
 
     run(workflow, merged_input, capabilities).await
+}
+
+/// Like [`resume`], but observes `token`: cancelling it winds the resumed run
+/// down at the next node boundary and sets [`RunOutcome::cancelled`]. This is the
+/// re-run-based resume (the same deterministic replay [`resume`] performs), made
+/// cooperatively cancellable.
+///
+/// # Errors
+/// Same as [`resume`].
+pub async fn resume_cancellable(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    newly_approved: Vec<String>,
+    capabilities: &Capabilities,
+    token: CancellationToken,
+) -> Result<RunOutcome> {
+    let mut approvals: Vec<String> = input
+        .get("approvals")
+        .and_then(Value::as_array)
+        .map(|existing| {
+            existing
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in newly_approved {
+        if !approvals.contains(&id) {
+            approvals.push(id);
+        }
+    }
+
+    let mut merged_input = input;
+    if let Value::Object(map) = &mut merged_input {
+        map.insert("approvals".to_string(), json!(approvals));
+    } else {
+        merged_input = json!({ "approvals": approvals });
+    }
+
+    run_cancellable(workflow, merged_input, capabilities, token).await
 }
 
 /// A live, resumable workflow run.
@@ -957,6 +1100,7 @@ impl ResumableRun {
         Ok(RunOutcome {
             output: execution.state,
             pending_approvals,
+            cancelled: false,
         })
     }
 }
@@ -990,6 +1134,7 @@ pub async fn run_resumable(
         thread_id,
         None,
         None,
+        CancellationToken::new(),
     )
     .await?;
     Ok(ResumableRun {
@@ -1039,6 +1184,7 @@ pub async fn run_with_checkpointer(
         thread_id.to_string(),
         None,
         None,
+        CancellationToken::new(),
     )
     .await?;
     Ok(outcome)
@@ -1160,6 +1306,7 @@ pub async fn run_with_checkpointer_journaled_observed(
         thread_id.to_string(),
         Some(journal),
         None,
+        CancellationToken::new(),
     )
     .await?;
     tracing::debug!(
@@ -1277,6 +1424,7 @@ async fn resume_with_checkpointer_inner(
         &steps,
         checkpointer,
         journal,
+        CancellationToken::new(),
     )?;
 
     // Approvals recorded for downstream visibility. On resume the interrupted
@@ -1320,6 +1468,9 @@ async fn resume_with_checkpointer_inner(
         RunOutcome {
             output: execution.state,
             pending_approvals,
+            // Checkpointed resume does not (yet) thread a caller token; a
+            // cancellable resume goes through `resume_cancellable`.
+            cancelled: false,
         },
         graph_run_ids,
     ))
@@ -3030,5 +3181,68 @@ mod tests {
         let done = rr.resume(vec!["gate".to_string()]).await.expect("resume");
         assert!(done.pending_approvals.is_empty());
         assert!(!done.output["nodes"]["downstream"]["items"].is_null());
+    }
+
+    #[tokio::test]
+    async fn uncancelled_token_runs_to_completion() {
+        // A fresh (never-cancelled) token behaves exactly like `run`.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("p", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "p")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let token = CancellationToken::new();
+        let outcome = run_cancellable(&compiled, json!({ "n": 1 }), &mock_capabilities(), token)
+            .await
+            .expect("run");
+        assert!(!outcome.cancelled);
+        assert_eq!(outcome.output["nodes"]["p"]["items"][0]["json"]["n"], 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_token_stops_run_and_reports_cancelled() {
+        // trigger -> bad (a tool_call with no `slug`, on_error defaulting to
+        // `stop`). If `bad` ever executed it would fail the whole run. Cancelling
+        // the token before the run means `bad` short-circuits at its node
+        // boundary instead of executing, so the run completes cleanly and reports
+        // cancelled — proving new node work is not scheduled after cancellation.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("bad", NodeKind::ToolCall),
+            ],
+            edges: vec![edge("t", "bad")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let token = CancellationToken::new();
+        token.cancel();
+        let outcome = run_cancellable(&compiled, json!({ "n": 1 }), &mock_capabilities(), token)
+            .await
+            .expect("cancelled run still returns Ok");
+        assert!(outcome.cancelled, "outcome should report cancelled");
+        // `bad` short-circuited: it emitted an empty item list, not a tool result
+        // and not a run-ending error.
+        let items = &outcome.output["nodes"]["bad"]["items"];
+        assert!(
+            items.as_array().is_some_and(|a| a.is_empty()),
+            "cancelled node should emit no items, got: {items:?}"
+        );
+    }
+
+    #[test]
+    fn cancellation_token_flips_and_is_shared_across_clones() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        assert!(!token.is_cancelled());
+        assert!(!clone.is_cancelled());
+        clone.cancel();
+        // Both handles observe the flip — they share one atomic flag.
+        assert!(token.is_cancelled());
+        assert!(clone.is_cancelled());
     }
 }
