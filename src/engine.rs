@@ -1365,6 +1365,7 @@ pub async fn resume_with_checkpointer_journaled(
 ///
 /// # Errors
 /// Same as [`resume_with_checkpointer_journaled`].
+#[allow(clippy::too_many_arguments)]
 pub async fn resume_with_checkpointer_journaled_observed(
     workflow: &CompiledWorkflow,
     capabilities: &Capabilities,
@@ -1401,6 +1402,7 @@ pub async fn resume_with_checkpointer_journaled_observed(
 /// (optionally journaled), re-attaches the same `checkpointer`, and resumes
 /// `thread_id`. Returns the outcome plus the resumed execution's
 /// `tinyagents`-minted run ids.
+#[allow(clippy::too_many_arguments)]
 async fn resume_with_checkpointer_inner(
     workflow: &CompiledWorkflow,
     capabilities: &Capabilities,
