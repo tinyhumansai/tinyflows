@@ -42,8 +42,7 @@ impl NodeExecutor for AgentNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
         // Data-binding: resolve any `=`-expressions in the config against the
         // node's input before treating the config as the completion request.
-        let scope = crate::nodes::expr_scope(&ctx);
-        let cfg = crate::expr::resolve(&ctx.node.config, &scope);
+        let (cfg, diagnostics) = crate::nodes::resolve_config_traced(&ctx);
         let conn = cfg.get("connection_ref").and_then(Value::as_str);
 
         // The node config *is* the completion request; when a `tools` sub-port is
@@ -113,7 +112,7 @@ impl NodeExecutor for AgentNode {
             }
         }
 
-        Ok(NodeOutput::main(vec![Item::new(value)]))
+        Ok(NodeOutput::main(vec![Item::new(value)]).with_diagnostics(diagnostics))
     }
 }
 

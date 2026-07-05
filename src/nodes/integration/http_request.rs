@@ -15,14 +15,13 @@ impl NodeExecutor for HttpRequestNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
         // Data-binding: resolve any `=`-expressions in the config against the
         // node's input before treating the config as the request descriptor.
-        let scope = crate::nodes::expr_scope(&ctx);
-        let cfg = crate::expr::resolve(&ctx.node.config, &scope);
+        let (cfg, diagnostics) = crate::nodes::resolve_config_traced(&ctx);
         // The node's config is the request descriptor; the host's HttpClient interprets it.
         let conn = cfg
             .get("connection_ref")
             .and_then(serde_json::Value::as_str);
         let response = ctx.caps.http.request(cfg.clone(), conn).await?;
-        Ok(NodeOutput::main(vec![Item::new(response)]))
+        Ok(NodeOutput::main(vec![Item::new(response)]).with_diagnostics(diagnostics))
     }
 }
 

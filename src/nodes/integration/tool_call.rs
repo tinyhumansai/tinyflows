@@ -14,9 +14,9 @@ pub struct ToolCallNode;
 impl NodeExecutor for ToolCallNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
         // Data-binding: resolve any `=`-expressions in the config against the
-        // node's input before reading the tool call's fields.
-        let scope = crate::nodes::expr_scope(&ctx);
-        let cfg = crate::expr::resolve(&ctx.node.config, &scope);
+        // node's input, tracing (and logging) expressions that resolved to
+        // null — the classic symptom of a mis-wired required tool arg.
+        let (cfg, diagnostics) = crate::nodes::resolve_config_traced(&ctx);
         let slug = cfg
             .get("slug")
             .and_then(serde_json::Value::as_str)
@@ -28,7 +28,7 @@ impl NodeExecutor for ToolCallNode {
             .get("connection_ref")
             .and_then(serde_json::Value::as_str);
         let result = ctx.caps.tools.invoke(slug, args, conn).await?;
-        Ok(NodeOutput::main(vec![Item::new(result)]))
+        Ok(NodeOutput::main(vec![Item::new(result)]).with_diagnostics(diagnostics))
     }
 }
 
@@ -163,6 +163,30 @@ mod tests {
         let out = ToolCallNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items[0].json["tool"], "x.y");
         assert_eq!(out.items[0].json["args"]["text"], "X");
+    }
+
+    #[tokio::test]
+    async fn null_resolved_expression_is_reported_in_diagnostics() {
+        // `args.to` misses (the input has no `email`); the node still runs but
+        // its output carries a diagnostic naming the location and expression.
+        let node = tool_node(json!({ "slug": "gmail.send", "args": {
+            "text": "=item.name", "to": "=item.email"
+        } }));
+        let input = vec![Item::new(json!({ "name": "X" }))];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run_meta,
+            nodes: &Value::Null,
+            caps: &caps,
+        };
+        let out = ToolCallNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.items[0].json["args"]["to"], Value::Null);
+        assert_eq!(out.diagnostics.len(), 1);
+        assert_eq!(out.diagnostics[0].location, "args.to");
+        assert_eq!(out.diagnostics[0].expression, "=item.email");
     }
 
     #[tokio::test]

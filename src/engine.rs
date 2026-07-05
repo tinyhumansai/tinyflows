@@ -710,6 +710,7 @@ fn build_graph(
                             status: StepStatus::Success,
                             output: serde_json::to_value(&output.items).unwrap_or(Value::Null),
                             duration_ms,
+                            diagnostics: output.diagnostics.clone(),
                         };
                         steps.lock().expect("steps mutex poisoned").push(step.clone());
                         observer.on_step_finish(&step);
@@ -726,6 +727,7 @@ fn build_graph(
                             status: StepStatus::Error,
                             output: Value::Null,
                             duration_ms,
+                            diagnostics: Vec::new(),
                         };
                         steps.lock().expect("steps mutex poisoned").push(step.clone());
                         observer.on_step_finish(&step);

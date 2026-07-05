@@ -101,6 +101,31 @@ fn nodes_scope(nodes: &Value) -> Value {
     Value::Object(scope)
 }
 
+/// Resolves a node's config against its expression scope, tracing and logging
+/// every `=`-expression that resolved to `null`.
+///
+/// The shared data-binding entry point for capability-backed nodes: the
+/// resolved config is identical to `expr::resolve`'s, and each null-resolved
+/// expression is `tracing::warn!`ed with the node id, config location, and the
+/// original expression, then returned so the node can attach it to its
+/// [`NodeOutput::diagnostics`]. Diagnostics are non-fatal by design — a null
+/// may be intended, and failure policy belongs to routing/`on_error`.
+pub(crate) fn resolve_config_traced(
+    ctx: &NodeContext,
+) -> (Value, Vec<crate::expr::NullResolution>) {
+    let scope = expr_scope(ctx);
+    let (cfg, misses) = crate::expr::resolve_traced(&ctx.node.config, &scope);
+    for miss in &misses {
+        tracing::warn!(
+            node = %ctx.node.id,
+            location = %miss.location,
+            expression = %miss.expression,
+            "config expression resolved to null; check the wiring (`nodes.<id>.item.<field>`)"
+        );
+    }
+    (cfg, misses)
+}
+
 /// The outcome of executing a single node: the items it emits and (for branching
 /// nodes) which output port to follow.
 #[derive(Debug, Clone, Default)]
@@ -111,13 +136,23 @@ pub struct NodeOutput {
     /// For branching nodes, the output port to follow (e.g. `"true"`); `None`
     /// means the default `"main"` port.
     pub port: Option<String>,
+    /// Non-fatal data-binding diagnostics: every config `=`-expression that
+    /// resolved to `null` during this execution (see
+    /// [`crate::expr::resolve_traced`]). Surfaced on the run's
+    /// [`ExecutionStep`](crate::observability::ExecutionStep) so a host can
+    /// point at the exact unresolved wiring; failure policy stays with
+    /// routing/`on_error`.
+    pub diagnostics: Vec<crate::expr::NullResolution>,
 }
 
 impl NodeOutput {
     /// Builds an output on the default `"main"` port.
     #[must_use]
     pub fn main(items: Vec<Item>) -> Self {
-        Self { items, port: None }
+        Self {
+            items,
+            ..Self::default()
+        }
     }
 
     /// Builds an output that routes to the named `port`.
@@ -126,6 +161,7 @@ impl NodeOutput {
         Self {
             items,
             port: Some(port.into()),
+            ..Self::default()
         }
     }
 
@@ -133,6 +169,14 @@ impl NodeOutput {
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Attaches data-binding diagnostics (null-resolved expressions) to this
+    /// output.
+    #[must_use]
+    pub fn with_diagnostics(mut self, diagnostics: Vec<crate::expr::NullResolution>) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 }
 

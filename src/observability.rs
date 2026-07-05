@@ -34,6 +34,7 @@
 //!     status: StepStatus::Success,
 //!     output: serde_json::json!([]),
 //!     duration_ms: 0,
+//!     diagnostics: vec![],
 //! });
 //! assert_eq!(recorder.nodes.lock().unwrap().as_slice(), ["parse"]);
 //! ```
@@ -75,6 +76,12 @@ pub struct ExecutionStep {
     pub output: Value,
     /// Wall-clock duration of the node's executor, in milliseconds.
     pub duration_ms: u128,
+    /// Non-fatal data-binding diagnostics from the node's execution: every
+    /// config `=`-expression that resolved to `null` (see
+    /// [`crate::expr::resolve_traced`]). Lets a host's run view point at the
+    /// exact unresolved wiring behind a bad tool call. Empty on error steps and
+    /// for nodes without expression config.
+    pub diagnostics: Vec<crate::expr::NullResolution>,
 }
 
 /// One execution of a workflow, captured as an ordered list of [`ExecutionStep`]s.
@@ -136,6 +143,7 @@ mod tests {
             status: StepStatus::Success,
             output: Value::Null,
             duration_ms: 0,
+            diagnostics: Vec::new(),
         });
         observer.on_run_finish(&Run {
             id: "run-0".to_string(),
@@ -165,6 +173,7 @@ mod tests {
             status: StepStatus::Success,
             output: serde_json::json!([{ "json": { "x": 1 } }]),
             duration_ms: 12,
+            diagnostics: Vec::new(),
         };
         assert_eq!(ok.node_id, "parse");
         assert_eq!(ok.duration_ms, 12);
@@ -176,6 +185,7 @@ mod tests {
             status: StepStatus::Error,
             output: Value::Null,
             duration_ms: 0,
+            diagnostics: Vec::new(),
         };
         assert!(matches!(err.status, StepStatus::Error));
         assert_eq!(err.output, Value::Null);
@@ -191,6 +201,7 @@ mod tests {
                 status: StepStatus::Success,
                 output: serde_json::json!([]),
                 duration_ms: 3,
+                diagnostics: Vec::new(),
             }],
         };
         assert_eq!(run.id, "run-7");
@@ -247,12 +258,14 @@ mod tests {
             status: StepStatus::Success,
             output: serde_json::json!([]),
             duration_ms: 1,
+            diagnostics: Vec::new(),
         });
         observer.on_step_finish(&ExecutionStep {
             node_id: "second".to_string(),
             status: StepStatus::Error,
             output: Value::Null,
             duration_ms: 2,
+            diagnostics: Vec::new(),
         });
         observer.on_run_finish(&Run {
             id: "run-9".to_string(),
@@ -282,6 +295,7 @@ mod tests {
             status: StepStatus::Success,
             output: serde_json::json!([]),
             duration_ms: 0,
+            diagnostics: Vec::new(),
         });
     }
 }

@@ -38,7 +38,24 @@
 use jaq_core::load::{Arena, File, Loader};
 use jaq_core::{Compiler, Ctx, Vars, data, unwrap_valr};
 use jaq_json::Val;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// A `=`-expression in a node's config that resolved to [`Value::Null`].
+///
+/// Emitted by [`resolve_traced`] so callers can surface *where* a binding came
+/// up empty — a missing upstream field, a typo'd path, or a malformed jq
+/// program all silently yield `null`, and without this record the failure only
+/// shows up much later (e.g. deep inside an external tool call). Non-fatal:
+/// resolution still produces the same config [`resolve`] would.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NullResolution {
+    /// Dotted location of the config leaf that held the expression, with array
+    /// elements as numeric segments — e.g. `args.to` or `args.cc.0`.
+    pub location: String,
+    /// The original expression string, including its `=` prefix.
+    pub expression: String,
+}
 
 /// Returns true if `s` is an expression (begins with `=`).
 #[must_use]
@@ -142,6 +159,99 @@ pub fn resolve(value: &Value, scope: &Value) -> Value {
         ),
         Value::Array(items) => Value::Array(items.iter().map(|v| resolve(v, scope)).collect()),
         Value::String(s) if is_expression(s) => evaluate(value, scope),
+        _ => value.clone(),
+    }
+}
+
+/// Like [`resolve`], but also reports every `=`-expression that resolved to
+/// [`Value::Null`].
+///
+/// The resolved config is byte-identical to what [`resolve`] returns; the
+/// second element lists a [`NullResolution`] per expression leaf whose value
+/// came back `null` — whether from a missing path, a jq program with no
+/// output, or a malformed program. Callers use this to warn ("arg `to`
+/// resolved to null (expression `=item.to`)") **before** the null flows into
+/// an external effect. An expression that legitimately produces `null` is
+/// indistinguishable from a miss, which is why this traces rather than fails.
+///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+/// use tinyflows::expr::resolve_traced;
+///
+/// let scope = json!({ "item": { "name": "Ada" } });
+/// let cfg = json!({ "args": { "text": "=item.name", "to": "=item.email" } });
+/// let (resolved, misses) = resolve_traced(&cfg, &scope);
+/// assert_eq!(resolved, json!({ "args": { "text": "Ada", "to": null } }));
+/// assert_eq!(misses.len(), 1);
+/// assert_eq!(misses[0].location, "args.to");
+/// assert_eq!(misses[0].expression, "=item.email");
+/// ```
+#[must_use]
+pub fn resolve_traced(value: &Value, scope: &Value) -> (Value, Vec<NullResolution>) {
+    let mut misses = Vec::new();
+    let resolved = resolve_traced_inner(value, scope, &mut String::new(), &mut misses);
+    (resolved, misses)
+}
+
+/// Recursive worker for [`resolve_traced`]: mirrors [`resolve`]'s traversal
+/// while threading the dotted `location` of the current leaf and collecting
+/// null-resolved expressions into `misses`.
+fn resolve_traced_inner(
+    value: &Value,
+    scope: &Value,
+    location: &mut String,
+    misses: &mut Vec<NullResolution>,
+) -> Value {
+    /// Runs `f` with `segment` appended to `location`, restoring it after.
+    fn with_segment<T>(
+        location: &mut String,
+        segment: &str,
+        f: impl FnOnce(&mut String) -> T,
+    ) -> T {
+        let base = location.len();
+        if !location.is_empty() {
+            location.push('.');
+        }
+        location.push_str(segment);
+        let out = f(location);
+        location.truncate(base);
+        out
+    }
+
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    let resolved = with_segment(location, k, |loc| {
+                        resolve_traced_inner(v, scope, loc, misses)
+                    });
+                    (k.clone(), resolved)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    with_segment(location, &i.to_string(), |loc| {
+                        resolve_traced_inner(v, scope, loc, misses)
+                    })
+                })
+                .collect(),
+        ),
+        Value::String(s) if is_expression(s) => {
+            let resolved = evaluate(value, scope);
+            if resolved.is_null() {
+                misses.push(NullResolution {
+                    location: location.clone(),
+                    expression: s.clone(),
+                });
+            }
+            resolved
+        }
         _ => value.clone(),
     }
 }
@@ -517,6 +627,49 @@ mod tests {
         let scope = json!({ "item": { "name": "Ada" } });
         let cfg = json!({ "a": 1, "b": ["x", 2, true], "c": { "d": "plain" } });
         assert_eq!(resolve(&cfg, &scope), cfg);
+    }
+
+    // --- resolve_traced (null-resolution diagnostics) ----------------------
+
+    #[test]
+    fn resolve_traced_matches_resolve_and_reports_misses() {
+        let scope = json!({ "item": { "name": "Ada" } });
+        let cfg = json!({
+            "slug": "gmail.send",
+            "args": { "text": "=item.name", "to": "=item.email", "cc": ["=item.cc"] },
+            "literal": null,
+        });
+        let (resolved, misses) = resolve_traced(&cfg, &scope);
+        // The resolved config is identical to `resolve`'s.
+        assert_eq!(resolved, resolve(&cfg, &scope));
+        // Only the `=`-expressions that came back null are reported — the
+        // literal null and the successful binding are not.
+        let mut locations: Vec<&str> = misses.iter().map(|m| m.location.as_str()).collect();
+        locations.sort_unstable();
+        assert_eq!(locations, vec!["args.cc.0", "args.to"]);
+        let to = misses
+            .iter()
+            .find(|m| m.location == "args.to")
+            .expect("to miss");
+        assert_eq!(to.expression, "=item.email");
+    }
+
+    #[test]
+    fn resolve_traced_reports_malformed_jq_program() {
+        let scope = json!({});
+        let (resolved, misses) = resolve_traced(&json!({ "n": "=((bad jq" }), &scope);
+        assert_eq!(resolved, json!({ "n": null }));
+        assert_eq!(misses.len(), 1);
+        assert_eq!(misses[0].location, "n");
+    }
+
+    #[test]
+    fn resolve_traced_clean_config_has_no_misses() {
+        let scope = json!({ "item": { "x": 1 } });
+        let cfg = json!({ "a": "=item.x", "b": "plain", "c": 7 });
+        let (resolved, misses) = resolve_traced(&cfg, &scope);
+        assert_eq!(resolved, json!({ "a": 1, "b": "plain", "c": 7 }));
+        assert!(misses.is_empty());
     }
 
     // --- property-based tests ---------------------------------------------
