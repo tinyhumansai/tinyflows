@@ -70,11 +70,20 @@ fn reject_self_reference(child: &WorkflowGraph, workflow_id: &str) -> Result<()>
 #[async_trait]
 impl NodeExecutor for SubWorkflowNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
+        // The inline `workflow` graph carries its *own* `=`-expressions, scoped
+        // to the CHILD run — it must pass through untouched. Only the fields the
+        // sub_workflow node itself reads (here `workflow_id`) are resolved
+        // against this node's input scope, mirroring every other integration
+        // node (see `tool_call`).
         let inline = ctx.node.config.get("workflow");
-        let workflow_id = ctx
+        let scope = crate::nodes::expr_scope(&ctx);
+        let resolved_workflow_id = ctx
             .node
             .config
             .get("workflow_id")
+            .map(|v| crate::expr::resolve(v, &scope));
+        let workflow_id = resolved_workflow_id
+            .as_ref()
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty());
 

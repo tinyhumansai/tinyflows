@@ -42,7 +42,6 @@ fn edge(from_node: &str, to_node: &str) -> Edge {
 /// resolves the child and runs it; treating `"=item.wid"` as a literal id makes
 /// the resolver miss and fails the run.
 #[tokio::test]
-#[ignore = "BUG-9: sub_workflow reads `workflow_id` raw and skips `=`-resolution, so `=item.wid` is passed to the resolver as a literal id, misses, and errors the run (other integration nodes resolve `=`)"]
 async fn bug9_sub_workflow_resolves_expression_in_workflow_id() {
     let child = WorkflowGraph {
         name: "child".to_string(),
@@ -86,7 +85,6 @@ async fn bug9_sub_workflow_resolves_expression_in_workflow_id() {
 /// `=nodes.<id>...` expression. `=nodes.my-node.item.val` should resolve to the
 /// upstream value; the hyphen must not be parsed as jq subtraction (-> null).
 #[tokio::test]
-#[ignore = "BUG-13: `=nodes.my-node.item.val` fails the identifier-only dotted fast-path (hyphen) and falls to jq, which parses `my-node` as subtraction -> null instead of the upstream value"]
 async fn bug13_hyphenated_node_id_is_addressable() {
     let graph = WorkflowGraph {
         name: "bug13".to_string(),

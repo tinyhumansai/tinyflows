@@ -7,10 +7,12 @@
 //! that array. Only the **first** output value of the program is returned.
 //!
 //! As a backward-compatible shorthand, a remainder that is a *simple dotted
-//! path* — segments matching `[A-Za-z_][A-Za-z0-9_]*` joined by `.`, e.g.
-//! `"=item.name"` — is resolved by a direct segment-walk over the scope
-//! ([`Value::Null`] for a missing segment) instead of the jq engine, so legacy
-//! expressions keep their exact behavior.
+//! path* — segments matching `[A-Za-z_][A-Za-z0-9_-]*` joined by `.`, e.g.
+//! `"=item.name"` or `"=nodes.my-node.item.x"` — is resolved by a direct
+//! segment-walk over the scope ([`Value::Null`] for a missing segment) instead
+//! of the jq engine, so legacy expressions keep their exact behavior and
+//! hyphenated node ids stay addressable (the hyphen is a literal key char, not
+//! jq subtraction).
 //!
 //! Anything that is not a `=`-prefixed string is returned as a literal clone.
 //! jq programs never panic: a compile/run error, non-JSON output, or empty
@@ -270,20 +272,25 @@ fn resolve_path(path: &str, scope: &Value) -> Value {
 }
 
 /// Returns true if `s` is a simple dotted path:
-/// `^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`.
+/// `^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*$`.
 fn is_simple_dotted_path(s: &str) -> bool {
     !s.is_empty() && s.split('.').all(is_ident)
 }
 
-/// Returns true if `seg` is a non-empty identifier: an ASCII letter or `_`
-/// followed by ASCII alphanumerics or `_`.
+/// Returns true if `seg` is a non-empty path segment: an ASCII letter or `_`
+/// followed by ASCII alphanumerics, `_`, or `-`. The hyphen is permitted so
+/// that hyphenated node ids (e.g. `nodes.my-node.item.x`) resolve via the
+/// literal segment-walk instead of falling through to jq, which would parse
+/// `my-node` as subtraction. A real jq program still routes to jq: its spaces,
+/// pipes, operators, or leading dot make at least one segment fail this check
+/// (and a leading-digit segment like `1 - 2` is rejected outright).
 fn is_ident(seg: &str) -> bool {
     let mut chars = seg.chars();
     match chars.next() {
         Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
         _ => return false,
     }
-    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+    chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric())
 }
 
 /// jaq standard-library builtins that must not be exposed to workflow
