@@ -29,6 +29,16 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 ///   (validate → one LLM auto-fix → re-validate), honoring
 ///   `config.output_parser.auto_fix` (default `true`).
 ///
+/// **Agent-kind selection** (`config.agent_ref`): when set to a host-registered
+/// agent id and the host wired the optional [`AgentRunner`](crate::caps::AgentRunner)
+/// capability, the node runs that named agent — with its own curated tools,
+/// model, and sandbox — to completion, instead of a bare completion. The inline
+/// tool sub-port is then skipped (the registered agent owns its tool loop); the
+/// output-parser sub-port still applies. `agent_ref` is read from trusted node
+/// config, never from model output. With no `agent_ref` (or no `AgentRunner`),
+/// the node falls back to [`LlmProvider`](crate::caps::LlmProvider). Either way
+/// the output is the same `{ json, text, raw }` envelope.
+///
 /// Sub-ports **not** yet wired (documented follow-ups): a `chat_model` sub-port
 /// (attached model selection beyond what the request already carries) and a
 /// `memory` sub-port (conversation memory injected into the request / persisted
@@ -45,10 +55,29 @@ impl NodeExecutor for AgentNode {
         let (cfg, diagnostics) = crate::nodes::resolve_config_traced(&ctx);
         let conn = cfg.get("connection_ref").and_then(Value::as_str);
 
-        // The node config *is* the completion request; when a `tools` sub-port is
-        // configured its descriptors ride along in the request so the model can
-        // elect to call one.
-        let response = ctx.caps.llm.complete(cfg.clone(), conn).await?;
+        // Agent-kind selection: a trusted `agent_ref` in config routes this node
+        // to a host-registered agent (its own tools/model/sandbox) via the
+        // optional `AgentRunner` capability, instead of a bare completion. The ref
+        // comes from resolved node config — never from model output — so it can't
+        // be steered by prompt injection. Falls back to `LlmProvider` when no
+        // `agent_ref` is set or the host wired no agent registry.
+        let agent_ref = cfg
+            .get("agent_ref")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let via_agent_kind = agent_ref.is_some() && ctx.caps.agent.is_some();
+        let response = match (agent_ref, ctx.caps.agent.as_ref()) {
+            (Some(agent_ref), Some(runner)) => {
+                tracing::debug!(agent_ref, "agent node: running registered agent kind");
+                runner.run_agent(agent_ref, cfg.clone(), conn).await?
+            }
+            _ => {
+                // The node config *is* the completion request; when a `tools`
+                // sub-port is configured its descriptors ride along so the model
+                // can elect to call one.
+                ctx.caps.llm.complete(cfg.clone(), conn).await?
+            }
+        };
 
         // `text`/`raw` are derived from the untouched completion; `value` is the
         // structured payload we thread the sub-ports (tool hop, output parser)
@@ -62,9 +91,15 @@ impl NodeExecutor for AgentNode {
         let raw = response.clone();
 
         // Tool sub-port (single hop): honor a `tool_call` the model returned, but
-        // only for a tool that was actually offered in `config.tools`.
+        // only for a tool that was actually offered in `config.tools`. Skipped
+        // when a registered agent kind ran — that agent drives its own tool loop.
         let mut value = response;
-        if let Some(tool_call) = value.get("tool_call").cloned() {
+        let model_tool_call = if via_agent_kind {
+            None
+        } else {
+            value.get("tool_call").cloned()
+        };
+        if let Some(tool_call) = model_tool_call {
             if let Some(slug) = tool_call.get("slug").and_then(Value::as_str) {
                 // Only a tool actually offered in `config.tools` may be invoked;
                 // keep the matched descriptor so its trusted `connection_ref` wins.
@@ -475,6 +510,56 @@ mod tests {
             .await
             .expect_err("unfixable output must error");
         assert!(matches!(err, crate::error::EngineError::Capability(_)));
+    }
+
+    // --- agent-kind selection (`agent_ref` -> AgentRunner) ---
+
+    use crate::caps::mock::{MockAgentRunner, mock_capabilities_with_agent};
+
+    #[tokio::test]
+    async fn agent_ref_routes_to_the_registered_agent_kind() {
+        // With an `agent_ref` and an AgentRunner wired, the node runs that named
+        // agent (the mock echoes the ref/request) rather than a bare completion.
+        let node = agent_node(json!({ "agent_ref": "code_executor", "prompt": "fix the bug" }));
+        let caps = mock_capabilities_with_agent(MockAgentRunner);
+        let value = run_agent(&node, &caps).await;
+        assert_eq!(value["json"]["agent"], "code_executor");
+        assert_eq!(value["json"]["request"]["prompt"], "fix the bug");
+    }
+
+    #[tokio::test]
+    async fn agent_ref_is_ignored_without_a_runner() {
+        // No AgentRunner in the bundle → fall back to the LlmProvider completion
+        // even though `agent_ref` is present (host without an agent registry).
+        let node = agent_node(json!({ "agent_ref": "researcher", "prompt": "hi" }));
+        let value = run_agent(&node, &mock_capabilities()).await;
+        // MockLlm echo shape, not the MockAgentRunner shape.
+        assert_eq!(value["json"]["completion"]["prompt"], "hi");
+        assert!(value["json"].get("agent").is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_agent_ref_falls_back_to_completion() {
+        let node = agent_node(json!({ "agent_ref": "", "prompt": "hi" }));
+        let caps = mock_capabilities_with_agent(MockAgentRunner);
+        let value = run_agent(&node, &caps).await;
+        assert_eq!(value["json"]["completion"]["prompt"], "hi");
+    }
+
+    #[tokio::test]
+    async fn agent_kind_skips_inline_tool_subport() {
+        // A registered agent owns its own tool loop, so a `tool_call` directive in
+        // its response is NOT re-invoked by the inline sub-port. MockAgentRunner
+        // echoes the request; even with `tools` offered, no `tool_result` appears.
+        let node = agent_node(json!({
+            "agent_ref": "researcher",
+            "prompt": "do it",
+            "tools": [{ "slug": "web.search" }]
+        }));
+        let caps = mock_capabilities_with_agent(MockAgentRunner);
+        let value = run_agent(&node, &caps).await;
+        assert_eq!(value["json"]["agent"], "researcher");
+        assert!(value["json"].get("tool_result").is_none());
     }
 
     #[tokio::test]

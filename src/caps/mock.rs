@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::caps::{
-    Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, StateStore, ToolInvoker,
-    WorkflowResolver,
+    AgentRunner, Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, StateStore,
+    ToolInvoker, WorkflowResolver,
 };
 use crate::error::{EngineError, Result};
 use crate::model::WorkflowGraph;
@@ -24,6 +24,23 @@ pub struct MockLlm;
 impl LlmProvider for MockLlm {
     async fn complete(&self, request: Value, conn: Option<&str>) -> Result<Value> {
         Ok(json!({ "completion": request, "connection": conn }))
+    }
+}
+
+/// An [`AgentRunner`] that echoes the `agent_ref`, request, and connection it was
+/// invoked with — enough to assert an `agent` node routed to a named agent kind.
+#[derive(Debug, Default, Clone)]
+pub struct MockAgentRunner;
+
+#[async_trait]
+impl AgentRunner for MockAgentRunner {
+    async fn run_agent(
+        &self,
+        agent_ref: &str,
+        request: Value,
+        conn: Option<&str>,
+    ) -> Result<Value> {
+        Ok(json!({ "agent": agent_ref, "request": request, "connection": conn }))
     }
 }
 
@@ -129,6 +146,19 @@ pub fn mock_capabilities_with_resolver(resolver: impl WorkflowResolver + 'static
         code: Arc::new(MockCode),
         state: Arc::new(MockStateStore::default()),
         resolver: Arc::new(resolver),
+        // No agent registry by default: `agent` nodes use `MockLlm`. Use
+        // [`mock_capabilities_with_agent`] to exercise the `agent_ref` path.
+        agent: None,
+    }
+}
+
+/// Like [`mock_capabilities`], but wires an [`AgentRunner`] so tests can exercise
+/// an `agent` node that selects a named agent kind via `agent_ref`.
+#[must_use]
+pub fn mock_capabilities_with_agent(agent: impl AgentRunner + 'static) -> Capabilities {
+    Capabilities {
+        agent: Some(Arc::new(agent)),
+        ..mock_capabilities()
     }
 }
 
