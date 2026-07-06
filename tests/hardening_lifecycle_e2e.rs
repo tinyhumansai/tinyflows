@@ -69,7 +69,6 @@ impl RunObserver for LifecycleObserver {
 /// correct behavior surfaces a finished (Failed) run to the observer so a host
 /// does not strand a "running forever" record.
 #[tokio::test]
-#[ignore = "BUG-6: on_run_finish never fires for a stop-policy failure; the error bubbles via `?` before the Run record is built, so only on_run_start (+ on_step_finish) fire"]
 async fn bug6_failed_run_fires_on_run_finish() {
     let graph = WorkflowGraph {
         name: "bug6".to_string(),
@@ -175,7 +174,6 @@ async fn bug5_sub_workflow_surfaces_child_pending_approval() {
 /// erroring). Full budget ~= 4 * 400ms = 1600ms. We cancel ~200ms in; the
 /// correct behavior is that the run winds down in well under a second.
 #[tokio::test]
-#[ignore = "BUG-7: cancellation is only checked at the node boundary, not inside the retry loop; a node mid-backoff keeps sleeping the full ~1600ms budget (observed 1.62s) after cancel()"]
 async fn bug7_cancel_during_retry_backoff_stops_promptly() {
     let graph = WorkflowGraph {
         name: "bug7".to_string(),

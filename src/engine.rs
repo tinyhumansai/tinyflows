@@ -665,10 +665,24 @@ fn build_graph(
                 // Attempt the executor up to `max_attempts` times: use the first
                 // `Ok`, otherwise keep the last `Err`. Between failed attempts (never
                 // after the final one), wait for the configured backoff delay.
+                // How finely the backoff sleep is chopped so a cancel mid-backoff
+                // is observed promptly instead of after the whole delay elapses.
+                const BACKOFF_POLL_MS: u64 = 25;
+
                 let mut output = None;
                 let mut last_err: Option<EngineError> = None;
                 let started = Instant::now();
                 for attempt in 0..max_attempts {
+                    // Cooperative cancellation inside the retry loop. Without this a
+                    // node with a large `max_attempts`/`backoff_ms` keeps retrying
+                    // and sleeping through its whole budget after `cancel()`; check
+                    // before starting each attempt and bail the same way the
+                    // node-boundary check does — an empty no-op update, so the run
+                    // winds down fast and reports cancelled.
+                    if token.is_cancelled() {
+                        tracing::info!(node = %node.id, "run cancelled during retry; skipping remaining attempts");
+                        return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                    }
                     let ctx = NodeContext {
                         node: &node,
                         input: &input,
@@ -697,7 +711,20 @@ fn build_graph(
                             backoff_ms
                         }
                         .min(60_000);
-                        futures_timer::Delay::new(std::time::Duration::from_millis(delay)).await;
+                        // Cancellable backoff: sleep in small increments, checking
+                        // the cancellation token between them, so a cancel during
+                        // the wait stops the run promptly. The total delay for a
+                        // non-cancelled run is unchanged.
+                        let mut remaining = delay;
+                        while remaining > 0 {
+                            if token.is_cancelled() {
+                                tracing::info!(node = %node.id, "run cancelled during backoff; skipping remaining attempts");
+                                return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                            }
+                            let step = remaining.min(BACKOFF_POLL_MS);
+                            futures_timer::Delay::new(std::time::Duration::from_millis(step)).await;
+                            remaining -= step;
+                        }
                     }
                 }
                 let duration_ms = started.elapsed().as_millis();
@@ -924,10 +951,24 @@ async fn build_and_run(
     // The run is keyed under the caller-supplied `thread_id` (the default paths
     // pass the trigger id, preserving prior behavior); this is where the
     // checkpointer persists the interrupt boundary.
-    let execution = compiled
-        .run_with_thread(thread_id.clone(), initial)
-        .await
-        .map_err(|e| EngineError::Capability(e.to_string()))?;
+    let execution = match compiled.run_with_thread(thread_id.clone(), initial).await {
+        Ok(execution) => execution,
+        Err(e) => {
+            // A `stop`-policy node failure (or any driver error) surfaces here as
+            // `Err`. Before propagating it, build a terminal `Failed` run record
+            // (with whatever steps were collected) and fire `on_run_finish`, so an
+            // observer that saw `on_run_start` is not left with a run that appears
+            // to be running forever. This is the single choke point shared by every
+            // observed entry point, so the failure lifecycle fires for all of them.
+            let run_record = Run {
+                id: run_id,
+                status: RunStatus::Failed,
+                steps: steps.lock().expect("steps mutex poisoned").clone(),
+            };
+            observer.on_run_finish(&run_record);
+            return Err(EngineError::Capability(e.to_string()));
+        }
+    };
 
     // Nodes that paused the run awaiting approval, surfaced from the interrupts
     // tinyagents returned at the boundary.
