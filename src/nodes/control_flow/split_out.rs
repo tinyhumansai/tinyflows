@@ -10,6 +10,27 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 #[derive(Debug, Default, Clone)]
 pub struct SplitOutNode;
 
+/// Resolve a dotted `path` (e.g. `"json.data.messages"`) against a JSON value,
+/// traversing one object key per `.`-separated segment. A single-segment path
+/// (no dots) is a plain key lookup — so existing `path: "items"` configs keep
+/// working unchanged. A missing intermediate/leaf key yields `Null`.
+///
+/// This is what lets `split_out` reach an array nested inside a `tool_call`'s
+/// `{json,text,raw}` envelope: `path: "json.data.messages"` walks
+/// envelope → tool result → the array (Composio actions like
+/// `GMAIL_FETCH_EMAILS` return their list at `data.messages`, not a top-level
+/// key).
+fn resolve_dotted_path(value: &serde_json::Value, path: &str) -> serde_json::Value {
+    let mut current = value;
+    for segment in path.split('.') {
+        match current.get(segment) {
+            Some(v) => current = v,
+            None => return serde_json::Value::Null,
+        }
+    }
+    current.clone()
+}
+
 #[async_trait]
 impl NodeExecutor for SplitOutNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
@@ -21,9 +42,7 @@ impl NodeExecutor for SplitOutNode {
         let mut out = Vec::new();
         for (index, item) in ctx.input.iter().enumerate() {
             let value = match path {
-                Some(p) if !p.is_empty() => {
-                    item.json.get(p).cloned().unwrap_or(serde_json::Value::Null)
-                }
+                Some(p) if !p.is_empty() => resolve_dotted_path(&item.json, p),
                 _ => item.json.clone(),
             };
             match value {
@@ -185,6 +204,38 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn dotted_path_reaches_array_nested_in_tool_envelope() {
+        // A `tool_call` wraps its result in a {json,text,raw} envelope, and
+        // Composio actions nest their list deeper (e.g. GMAIL_FETCH_EMAILS →
+        // data.messages). `path: "json.data.messages"` must walk all the way in.
+        let out = run_split(
+            json!({ "path": "json.data.messages" }),
+            vec![Item::new(json!({
+                "json": { "data": { "messages": [{ "id": "a" }, { "id": "b" }] } },
+                "text": null,
+                "raw": {},
+            }))],
+        )
+        .await;
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].json, json!({ "id": "a" }));
+        assert_eq!(out[1].json, json!({ "id": "b" }));
+        assert_eq!(out[1].paired_item, Some(0));
+    }
+
+    #[tokio::test]
+    async fn dotted_path_missing_intermediate_key_yields_null() {
+        let out = run_split(
+            json!({ "path": "json.data.messages" }),
+            vec![Item::new(json!({ "json": { "other": 1 } }))],
+        )
+        .await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].json, Value::Null);
+        assert_eq!(out[0].paired_item, Some(0));
     }
 
     #[tokio::test]
