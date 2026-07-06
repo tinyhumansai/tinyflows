@@ -8,22 +8,20 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 /// Multi-way branch keyed by a computed case value.
 ///
 /// The case key comes from config: an `expression` (an `=`-expression evaluated
-/// against `{ item, run }`) takes precedence, otherwise a `field` names a key on
-/// the first input item. The resulting value selects the output port to emit on,
-/// routing to the matching case; a `null` result routes to the `default` port.
+/// against the `{ item, items, run, nodes }` node scope) takes precedence,
+/// otherwise a `field` names a key on the first input item. The resulting value
+/// selects the output port to emit on, routing to the matching case; a `null`
+/// result routes to the `default` port.
 #[derive(Debug, Default, Clone)]
 pub struct SwitchNode;
 
 #[async_trait]
 impl NodeExecutor for SwitchNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
-        let item = ctx
-            .input
-            .first()
-            .map(|i| i.json.clone())
-            .unwrap_or(serde_json::Value::Null);
-        let items: Vec<serde_json::Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
-        let scope = serde_json::json!({ "item": item, "items": items, "run": ctx.run });
+        // Use the shared node scope so `expression` can address upstream nodes by
+        // id (`=nodes.<id>.item.<field>`) — same `{ item, items, run, nodes }`
+        // scope the integration nodes get. `item` is the first input item.
+        let scope = crate::nodes::expr_scope(&ctx);
         let value = if let Some(expr) = ctx.node.config.get("expression") {
             crate::expr::evaluate(expr, &scope)
         } else if let Some(field) = ctx
@@ -87,6 +85,27 @@ mod tests {
         };
         let out = SwitchNode.execute(ctx).await.expect("execute");
         (out.port.expect("switch always routes to a port"), out.items)
+    }
+
+    #[tokio::test]
+    async fn expression_can_reference_upstream_node_by_id() {
+        // Regression (audit BUG-2): the switch `expression` scope must expose the
+        // `nodes` map so it can branch on a completed upstream node's output.
+        let mut sw = node("sw", NodeKind::Switch);
+        sw.config = json!({ "expression": "=nodes.classify.item.label" });
+        let caps = mock_capabilities();
+        let run = Value::Null;
+        let nodes = json!({ "classify": { "items": [{ "json": { "label": "urgent" } }] } });
+        let input = vec![Item::new(json!({}))];
+        let ctx = NodeContext {
+            node: &sw,
+            input: &input,
+            run: &run,
+            nodes: &nodes,
+            caps: &caps,
+        };
+        let out = SwitchNode.execute(ctx).await.expect("execute");
+        assert_eq!(out.port.as_deref(), Some("urgent"));
     }
 
     #[tokio::test]

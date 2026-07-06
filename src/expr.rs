@@ -286,6 +286,11 @@ fn is_ident(seg: &str) -> bool {
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+/// jaq standard-library builtins that must not be exposed to workflow
+/// expressions. `env` (aka `$ENV`) reads the embedding process's environment
+/// and would leak host secrets into node output; it is stripped before compile.
+const EXPR_DENIED_BUILTINS: &[&str] = &["env"];
+
 /// Compiles `program` as a jq filter and runs it once against `scope` (the jq
 /// input `.`), returning the first output value. Any compile/run failure,
 /// non-JSON output, or empty output yields [`Value::Null`]; this never panics.
@@ -298,8 +303,14 @@ fn run_jq(program: &str, scope: &Value) -> Value {
     let defs = jaq_core::defs()
         .chain(jaq_std::defs())
         .chain(jaq_json::defs());
+    // Security: workflow expressions are host/agent-authored data, so the jq
+    // standard library's process-facing builtins must not be reachable. In
+    // particular jaq-std's `env`/`$ENV` dumps the embedding process's entire
+    // environment (API keys, tokens) into node output — a secret-exfiltration
+    // vector. A `Fun` is a `(name, …, …)` tuple, so we filter jaq-std's set by
+    // name before compiling. jaq-core/jaq-json builtins are pure and kept whole.
     let funs = jaq_core::funs()
-        .chain(jaq_std::funs())
+        .chain(jaq_std::funs().filter(|fun| !EXPR_DENIED_BUILTINS.contains(&fun.0)))
         .chain(jaq_json::funs());
 
     let loader = Loader::new(defs);
@@ -344,6 +355,23 @@ mod tests {
     fn resolves_a_reference() {
         let scope = json!({ "user": { "email": "a@b.com" } });
         assert_eq!(evaluate(&json!("=user.email"), &scope), json!("a@b.com"));
+    }
+
+    #[test]
+    fn env_builtin_is_not_reachable() {
+        // Security: the jaq-std `env` builtin dumps the host process environment
+        // (API keys, tokens). It must be stripped, so an expression calling it
+        // yields Null instead of leaking secrets. The test process always has a
+        // populated environment (PATH etc.), so a reachable `env` would return a
+        // non-null object; asserting Null proves it was removed. `$ENV` (the jq
+        // env variable, if present) must be equally unreachable.
+        let scope = json!({});
+        assert_eq!(evaluate(&json!("=env"), &scope), Value::Null);
+        assert_eq!(evaluate(&json!("=env.PATH"), &scope), Value::Null);
+        assert_eq!(evaluate(&json!("=$ENV.PATH"), &scope), Value::Null);
+        // A pure jq builtin (from jaq-core/jaq-json) still works — we only
+        // stripped the process-facing one.
+        assert_eq!(evaluate(&json!("=[1,2,3]|length"), &scope), json!(3));
     }
 
     #[test]

@@ -20,11 +20,20 @@ impl NodeExecutor for TransformNode {
             .and_then(serde_json::Value::as_object)
             .cloned();
         let items: Vec<serde_json::Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
+        // Project the run-state `nodes` map once; each per-item scope reuses it so
+        // a `set` expression can address upstream nodes by id
+        // (`=nodes.<id>.item.<field>`), consistent with the integration nodes.
+        let nodes = crate::nodes::nodes_scope(ctx.nodes);
         let mut out = Vec::with_capacity(ctx.input.len());
         for (index, item) in ctx.input.iter().enumerate() {
             // `item` is this loop's current item; `items` exposes the full input
-            // batch for consistency with the integration-node data-binding scope.
-            let scope = serde_json::json!({ "item": item.json.clone(), "items": items.clone(), "run": ctx.run });
+            // batch; `nodes` addresses any completed upstream node by id.
+            let scope = serde_json::json!({
+                "item": item.json.clone(),
+                "items": items.clone(),
+                "run": ctx.run,
+                "nodes": nodes.clone(),
+            });
             let mut json = item.json.clone();
             if let Some(set) = &set {
                 if !json.is_object() {
@@ -77,6 +86,31 @@ mod tests {
             caps: &caps,
         };
         TransformNode.execute(ctx).await.expect("execute").items
+    }
+
+    #[tokio::test]
+    async fn set_can_reference_upstream_node_by_id() {
+        // Regression (audit BUG-2): the transform per-item scope must expose the
+        // `nodes` map so a `set` expression can address a completed upstream node
+        // by id, not just the direct input `item`.
+        let node = node(
+            "n",
+            NodeKind::Transform,
+            json!({ "set": { "who": "=nodes.fetch.item.email" } }),
+        );
+        let caps = mock_capabilities();
+        let run = Value::Null;
+        let nodes = json!({ "fetch": { "items": [{ "json": { "email": "a@b.com" } }] } });
+        let input = vec![Item::new(json!({}))];
+        let ctx = NodeContext {
+            node: &node,
+            input: &input,
+            run: &run,
+            nodes: &nodes,
+            caps: &caps,
+        };
+        let out = TransformNode.execute(ctx).await.expect("execute").items;
+        assert_eq!(out[0].json["who"], json!("a@b.com"));
     }
 
     #[tokio::test]

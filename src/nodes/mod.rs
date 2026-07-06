@@ -80,7 +80,7 @@ pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
 /// exposes just the `json` payloads, mirroring how `item`/`items` are projected
 /// from the node's own input. Slots without an `items` array (or a non-object
 /// `nodes` value) are skipped, so an absent run state yields `{}`.
-fn nodes_scope(nodes: &Value) -> Value {
+pub(crate) fn nodes_scope(nodes: &Value) -> Value {
     let mut scope = serde_json::Map::new();
     if let Value::Object(map) = nodes {
         for (id, slot) in map {
