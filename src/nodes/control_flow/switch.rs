@@ -37,10 +37,19 @@ impl NodeExecutor for SwitchNode {
         } else {
             serde_json::Value::Null
         };
+        // Map the discriminant to a port name. Only scalar values name a port
+        // sensibly: a string is used verbatim, and a number/bool uses its natural
+        // rendering (`42`, `true`) so switching on a numeric/boolean field works
+        // predictably. A `null` or a non-scalar (object/array) has no meaningful
+        // port name — dumping its JSON as a port would never match a real port and
+        // is a confusing footgun — so those route to the `default` fallback port.
         let port = match value {
             serde_json::Value::String(s) => s,
-            serde_json::Value::Null => "default".to_string(),
-            other => other.to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null
+            | serde_json::Value::Object(_)
+            | serde_json::Value::Array(_) => "default".to_string(),
         };
         Ok(NodeOutput::routed(ctx.input.to_vec(), port))
     }
@@ -166,6 +175,40 @@ mod tests {
         )
         .await;
         assert_eq!(port, "true");
+    }
+
+    #[tokio::test]
+    async fn object_discriminant_routes_default() {
+        // A non-scalar discriminant has no sensible port name, so it must route to
+        // `default` rather than JSON-dumping the object as a (never-matching) port.
+        let (port, _) = route(
+            json!({ "field": "obj" }),
+            vec![Item::new(json!({ "obj": { "k": "v" } }))],
+        )
+        .await;
+        assert_eq!(port, "default");
+    }
+
+    #[tokio::test]
+    async fn array_discriminant_routes_default() {
+        // Same rule for arrays: no JSON dump as a port name.
+        let (port, _) = route(
+            json!({ "field": "arr" }),
+            vec![Item::new(json!({ "arr": [1, 2, 3] }))],
+        )
+        .await;
+        assert_eq!(port, "default");
+    }
+
+    #[tokio::test]
+    async fn explicit_null_discriminant_routes_default() {
+        // An explicit JSON `null` discriminant routes to `default`.
+        let (port, _) = route(
+            json!({ "field": "n" }),
+            vec![Item::new(json!({ "n": null }))],
+        )
+        .await;
+        assert_eq!(port, "default");
     }
 
     #[tokio::test]
