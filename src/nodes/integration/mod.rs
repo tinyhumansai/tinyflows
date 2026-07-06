@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod code;
+pub(crate) mod envelope;
 pub mod http_request;
 pub mod output_parser;
 pub(crate) mod schema;

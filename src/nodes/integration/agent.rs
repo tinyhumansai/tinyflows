@@ -50,6 +50,17 @@ impl NodeExecutor for AgentNode {
         // elect to call one.
         let response = ctx.caps.llm.complete(cfg.clone(), conn).await?;
 
+        // `text`/`raw` are derived from the untouched completion; `value` is the
+        // structured payload we thread the sub-ports (tool hop, output parser)
+        // through before it becomes the envelope's `json`.
+        let text = response.as_str().map(str::to_string).or_else(|| {
+            response
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        let raw = response.clone();
+
         // Tool sub-port (single hop): honor a `tool_call` the model returned, but
         // only for a tool that was actually offered in `config.tools`.
         let mut value = response;
@@ -112,7 +123,16 @@ impl NodeExecutor for AgentNode {
             }
         }
 
-        Ok(NodeOutput::main(vec![Item::new(value)]).with_diagnostics(diagnostics))
+        // Emit the stable envelope: `json` is the structured (tool/parser-threaded)
+        // value, `text` the model's prose, `raw` the original completion — so a
+        // downstream node reads `=item.text` / `=item.json.<field>` regardless of
+        // which sub-ports fired. See [`super::envelope`].
+        let json = match value {
+            Value::Object(_) | Value::Array(_) => value,
+            _ => Value::Null,
+        };
+        let item = Item::new(super::envelope::from_parts(json, text, raw));
+        Ok(NodeOutput::main(vec![item]).with_diagnostics(diagnostics))
     }
 }
 
@@ -164,7 +184,7 @@ mod tests {
             .await
             .expect("run");
         assert_eq!(
-            out.output["nodes"]["n"]["items"][0]["json"]["completion"]["prompt"],
+            out.output["nodes"]["n"]["items"][0]["json"]["json"]["completion"]["prompt"],
             "hi"
         );
     }
@@ -200,9 +220,12 @@ mod tests {
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items.len(), 1);
-        // The mock LLM echoes the whole config under `completion` and the conn ref.
-        assert_eq!(out.items[0].json["completion"]["prompt"], "hi");
-        assert_eq!(out.items[0].json["connection"], "acct_9");
+        // The mock LLM echoes the whole config under `completion` and the conn
+        // ref; under the envelope that structured payload is at `json.*`.
+        assert_eq!(out.items[0].json["json"]["completion"]["prompt"], "hi");
+        assert_eq!(out.items[0].json["json"]["connection"], "acct_9");
+        // The raw completion is preserved verbatim under `raw`.
+        assert_eq!(out.items[0].json["raw"]["completion"]["prompt"], "hi");
     }
 
     #[tokio::test]
@@ -221,7 +244,7 @@ mod tests {
             caps: &caps,
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
-        assert_eq!(out.items[0].json["completion"]["prompt"], "X");
+        assert_eq!(out.items[0].json["json"]["completion"]["prompt"], "X");
     }
 
     #[tokio::test]
@@ -238,7 +261,7 @@ mod tests {
             caps: &caps,
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
-        assert_eq!(out.items[0].json["connection"], Value::Null);
+        assert_eq!(out.items[0].json["json"]["connection"], Value::Null);
     }
 
     #[tokio::test]
@@ -322,9 +345,10 @@ mod tests {
             "tool_call": { "slug": "slack.post", "args": { "text": "hi" } }
         })));
         let value = run_agent(&node, &caps_with_llm(llm)).await;
-        // Mock ToolInvoker echoes the slug/args it was called with.
-        assert_eq!(value["tool_result"]["tool"], "slack.post");
-        assert_eq!(value["tool_result"]["args"]["text"], "hi");
+        // Mock ToolInvoker echoes the slug/args it was called with; the tool
+        // result lives at the stable `json.tool_result` accessor.
+        assert_eq!(value["json"]["tool_result"]["tool"], "slack.post");
+        assert_eq!(value["json"]["tool_result"]["args"]["text"], "hi");
     }
 
     #[tokio::test]
@@ -339,7 +363,7 @@ mod tests {
             "tool_call": { "slug": "danger.delete_all" }
         })));
         let value = run_agent(&node, &caps_with_llm(llm)).await;
-        assert!(value.get("tool_result").is_none());
+        assert!(value["json"].get("tool_result").is_none());
     }
 
     #[tokio::test]
@@ -363,7 +387,7 @@ mod tests {
         let value = run_agent(&node, &caps_with_llm(llm)).await;
         // The mock ToolInvoker echoes the `conn` it was invoked with: it must be
         // the offered descriptor's trusted id, never the model-supplied one.
-        assert_eq!(value["tool_result"]["connection"], "trusted_acct");
+        assert_eq!(value["json"]["tool_result"]["connection"], "trusted_acct");
     }
 
     #[tokio::test]
@@ -383,7 +407,7 @@ mod tests {
             }
         })));
         let value = run_agent(&node, &caps_with_llm(llm)).await;
-        assert_eq!(value["tool_result"]["connection"], "node_acct");
+        assert_eq!(value["json"]["tool_result"]["connection"], "node_acct");
     }
 
     /// An LLM that returns an invalid completion, but a schema-valid value when
@@ -421,7 +445,8 @@ mod tests {
             fixed: json!({ "name": "fixed" }),
         });
         let value = run_agent(&node, &caps_with_llm(llm)).await;
-        assert_eq!(value, json!({ "name": "fixed" }));
+        // The schema-coerced value is the envelope's structured `json`.
+        assert_eq!(value["json"], json!({ "name": "fixed" }));
     }
 
     #[tokio::test]
@@ -453,12 +478,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prose_completion_populates_text_accessor() {
+        // A model that answers in prose: the envelope exposes it at `text` so a
+        // downstream node can bind `=item.text` reliably regardless of provider.
+        let node = agent_node(json!({ "prompt": "hi" }));
+        let llm = Arc::new(ToolCallingLlm(json!({ "text": "the answer is 42" })));
+        let value = run_agent(&node, &caps_with_llm(llm)).await;
+        assert_eq!(value["text"], "the answer is 42");
+        assert_eq!(value["json"]["text"], "the answer is 42");
+        assert_eq!(value["raw"]["text"], "the answer is 42");
+    }
+
+    #[tokio::test]
     async fn plain_agent_without_sub_ports_is_unchanged() {
         // Back-compat: no tools / output_parser configured ⇒ the completion is
         // emitted verbatim (the mock echoes the request under `completion`).
         let node = agent_node(json!({ "prompt": "hi" }));
         let value = run_agent(&node, &mock_capabilities()).await;
-        assert_eq!(value["completion"]["prompt"], "hi");
-        assert!(value.get("tool_result").is_none());
+        assert_eq!(value["json"]["completion"]["prompt"], "hi");
+        assert!(value["json"].get("tool_result").is_none());
     }
 }

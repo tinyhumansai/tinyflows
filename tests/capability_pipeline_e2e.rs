@@ -106,8 +106,8 @@ async fn linear_pipeline_threads_data_through_every_capability() {
         "code node should wrap its input under `result`"
     );
     assert_eq!(
-        out["nodes"]["reason"]["items"][0]["json"]["completion"]["prompt"],
-        "summarise"
+        out["nodes"]["reason"]["items"][0]["json"]["json"]["completion"]["prompt"], "summarise",
+        "agent output is enveloped: the completion is under json.completion"
     );
 
     // The terminal output_parser echoes the upstream tool_call's item unchanged.

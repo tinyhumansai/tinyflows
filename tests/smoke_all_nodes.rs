@@ -279,9 +279,9 @@ async fn big_chained_workflow_runs_end_to_end() {
         "the merge should have run"
     );
     assert_eq!(
-        out["nodes"]["summarize"]["items"][0]["json"]["completion"]["prompt"],
+        out["nodes"]["summarize"]["items"][0]["json"]["json"]["completion"]["prompt"],
         json!("Summarize the run"),
-        "the terminal agent should have completed its config request"
+        "the terminal agent should have completed its config request (enveloped under json.completion)"
     );
     assert!(outcome.pending_approvals.is_empty());
 }
