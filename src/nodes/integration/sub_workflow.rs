@@ -136,6 +136,47 @@ impl NodeExecutor for SubWorkflowNode {
             child_depth,
         ))
         .await?;
+
+        // Enforce the child's lifecycle across the sub-workflow boundary (BUG-5).
+        //
+        // The child run is a *separate* engine invocation whose non-completion is
+        // reported on its [`RunOutcome`], not on the [`NodeOutput`] this node
+        // returns. A node executor has no channel to inject a tinyagents interrupt
+        // into the *parent* run (the parent's `pending_approvals` are collected
+        // solely from its own boundary interrupts), so we cannot yet transparently
+        // pause the parent and resume the child at its gate. What we MUST NOT do is
+        // keep only `outcome.output` and report success — that silently treats a
+        // child that paused at a `requires_approval` gate (or was cancelled) as if
+        // it had run to completion, making approval gating unenforceable across the
+        // boundary.
+        //
+        // Until full cross-boundary resume exists, fail loudly: a child that did
+        // not fully complete halts the parent with an error rather than letting it
+        // falsely complete. With the default `on_error: stop` policy this stops the
+        // parent run; with `continue`/`route` it becomes a routable error item —
+        // either way the gated child is never silently treated as completed.
+        //
+        // Follow-up for full cross-boundary resume: surface the child's
+        // `pending_approvals` (namespaced by this node's id) into the parent's
+        // pending set via a real interrupt at this node's boundary, and teach
+        // `engine::resume` to re-enter the child at its paused gate. That needs
+        // engine-level interrupt plumbing this node cannot express today.
+        if !outcome.pending_approvals.is_empty() {
+            return Err(EngineError::Capability(format!(
+                "sub_workflow node {:?}: child run paused awaiting approval at {:?}; \
+                 cross-boundary approval resume is not yet supported, so the parent run is \
+                 halted rather than falsely completed",
+                ctx.node.id, outcome.pending_approvals
+            )));
+        }
+        if outcome.cancelled {
+            return Err(EngineError::Capability(format!(
+                "sub_workflow node {:?}: child run was cancelled before completing; the parent \
+                 run is halted rather than falsely completed",
+                ctx.node.id
+            )));
+        }
+
         Ok(NodeOutput::main(vec![crate::data::Item::new(
             outcome.output,
         )]))

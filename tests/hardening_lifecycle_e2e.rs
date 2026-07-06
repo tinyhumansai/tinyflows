@@ -113,11 +113,18 @@ async fn bug6_failed_run_fires_on_run_finish() {
     );
 }
 
-/// BUG-5 — a HITL approval gate inside a `sub_workflow` must be surfaced to the
-/// parent, not silently swallowed. The parent must report the pending approval
-/// (and must NOT complete as if the gated node had run).
+/// BUG-5 — a HITL approval gate inside a `sub_workflow` must not be silently
+/// swallowed. A child that pauses at a `requires_approval` gate must NOT let the
+/// parent complete as if the gated node had run.
+///
+/// Fixed via fail-loud enforcement: full cross-boundary resume (surfacing the
+/// child's `pending_approvals` into the parent and resuming the child at its
+/// gate) needs engine-level interrupt plumbing a node executor cannot express,
+/// so the `sub_workflow` node instead halts the parent with an error when the
+/// child did not fully complete. This test asserts the SAFE behavior — the
+/// parent either surfaces the pending approval or halts — never a silent
+/// complete-as-if-approved.
 #[tokio::test]
-#[ignore = "BUG-5: sub_workflow keeps only outcome.output and discards the child's pending_approvals; the parent completes with empty pending_approvals, so a child HITL gate is unenforceable across the boundary"]
 async fn bug5_sub_workflow_surfaces_child_pending_approval() {
     let child = WorkflowGraph {
         name: "child".to_string(),
@@ -150,20 +157,34 @@ async fn bug5_sub_workflow_surfaces_child_pending_approval() {
     };
 
     let compiled = compile(&parent).expect("compile parent");
-    let outcome = run_cancellable(
+    let result = run_cancellable(
         &compiled,
         json!({ "amount": 100 }),
         &mock_capabilities(),
         CancellationToken::new(),
     )
-    .await
-    .expect("run parent");
+    .await;
 
-    assert!(
-        !outcome.pending_approvals.is_empty(),
-        "BUG-5: parent must surface the child's pending approval gate (observed: parent completes \
-         with empty pending_approvals, dropping the child gate)"
-    );
+    // SAFE behavior: the parent must never silently complete as if the gated
+    // child had run. Either it surfaces the child's pending approval (full
+    // cross-boundary resume, not yet implemented) or it halts with an error
+    // (fail-loud). What it must NOT do is return `Ok` with empty
+    // `pending_approvals`.
+    match result {
+        Ok(outcome) => assert!(
+            !outcome.pending_approvals.is_empty(),
+            "BUG-5: parent completed silently with empty pending_approvals, dropping the child's \
+             approval gate"
+        ),
+        Err(err) => {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("approval") && msg.contains("sub_workflow"),
+                "BUG-5: expected the sub_workflow node to halt the parent with an approval error, \
+                 got: {err}"
+            );
+        }
+    }
 }
 
 /// BUG-7 — cancelling during a retry backoff must stop the run promptly, well
