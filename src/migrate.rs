@@ -13,7 +13,7 @@
 //!
 //! [`WorkflowGraph`]: crate::model::WorkflowGraph
 
-use crate::error::Result;
+use crate::error::{Result, ValidationError};
 use crate::model::CURRENT_SCHEMA_VERSION;
 use serde_json::Value;
 
@@ -51,8 +51,13 @@ use serde_json::Value;
 ///
 /// # Errors
 ///
-/// Returns an error if a future migration step fails. The current no-op steps
+/// Returns [`ValidationError::SchemaVersionTooNew`] if the document declares a
+/// `schema_version` greater than [`CURRENT_SCHEMA_VERSION`] — such a graph
+/// cannot be safely migrated and must never be silently downgraded. Also
+/// returns an error if a future migration step fails; the current no-op steps
 /// never fail.
+///
+/// [`ValidationError::SchemaVersionTooNew`]: crate::error::ValidationError::SchemaVersionTooNew
 ///
 /// [`WorkflowGraph`]: crate::model::WorkflowGraph
 pub fn migrate(mut value: Value) -> Result<Value> {
@@ -61,6 +66,18 @@ pub fn migrate(mut value: Value) -> Result<Value> {
         .get("schema_version")
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
+
+    // A document newer than this crate understands must NOT be silently
+    // downgraded (rewriting its `schema_version` down would corrupt it). Refuse
+    // to migrate it and leave the value untouched — the caller should upgrade
+    // the crate to load such a graph.
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(ValidationError::SchemaVersionTooNew {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }
+        .into());
+    }
 
     // Apply schema migrations in order, one version step at a time, until the
     // value reaches the current schema.
@@ -210,6 +227,30 @@ mod tests {
 
         let upgraded = migrate(raw).expect("migrate");
         assert_eq!(upgraded["schema_version"], json!(CURRENT_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn future_schema_version_is_rejected_not_downgraded() {
+        // A document from a newer crate must error rather than be silently
+        // rewritten down to the current version.
+        let raw = json!({
+            "schema_version": CURRENT_SCHEMA_VERSION + 1,
+            "name": "from_the_future",
+            "nodes": [],
+            "edges": []
+        });
+
+        let err = migrate(raw.clone()).expect_err("future schema_version must error");
+        assert!(
+            matches!(
+                err,
+                crate::error::EngineError::Validation(ValidationError::SchemaVersionTooNew {
+                    found,
+                    supported,
+                }) if found == CURRENT_SCHEMA_VERSION + 1 && supported == CURRENT_SCHEMA_VERSION
+            ),
+            "expected SchemaVersionTooNew, got {err:?}"
+        );
     }
 
     #[test]

@@ -2,14 +2,18 @@
 
 use std::collections::HashSet;
 
+use serde_json::Value;
+
 use crate::error::ValidationError;
 use crate::model::{NodeKind, WorkflowGraph};
 
 /// Validates a workflow graph's structure.
 ///
-/// Currently checks: unique node ids, exactly one trigger node, and that every
-/// edge references existing nodes. Cycle-legality and per-kind configuration
-/// checks are completed in stages A1–A2.
+/// Currently checks: unique node ids, exactly one trigger node, that every edge
+/// references existing nodes, no duplicate edges, and per-node `on_error` policy
+/// sanity (a known value, and an `error` edge when the policy is `route`).
+/// Cycle-legality and per-kind configuration checks are completed in stages
+/// A1–A2.
 ///
 /// # Errors
 /// Returns the first [`ValidationError`] encountered.
@@ -33,12 +37,56 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
         _ => return Err(ValidationError::MultipleTriggers(triggers)),
     }
 
+    let mut seen_edges = HashSet::new();
     for edge in &graph.edges {
         if graph.node(&edge.from_node).is_none() {
             return Err(ValidationError::UnknownNode(edge.from_node.clone()));
         }
         if graph.node(&edge.to_node).is_none() {
             return Err(ValidationError::UnknownNode(edge.to_node.clone()));
+        }
+        // Reject two identical edges (same source node/port and destination
+        // node/port); a redundant duplicate is almost always an authoring slip.
+        if !seen_edges.insert((
+            edge.from_node.as_str(),
+            edge.from_port.as_str(),
+            edge.to_node.as_str(),
+            edge.to_port.as_str(),
+        )) {
+            return Err(ValidationError::DuplicateEdge {
+                from_node: edge.from_node.clone(),
+                from_port: edge.from_port.clone(),
+                to_node: edge.to_node.clone(),
+                to_port: edge.to_port.clone(),
+            });
+        }
+    }
+
+    // Per-node `on_error` policy checks. The policy is free-form config read at
+    // run time; catch mistakes at author time: an unknown value (which would
+    // silently fall through to `stop`) and a `route` policy with no `error`
+    // edge to carry the routed item (which would be silently dropped).
+    for node in &graph.nodes {
+        let Some(on_error) = node.config.get("on_error").and_then(Value::as_str) else {
+            continue;
+        };
+        match on_error {
+            "stop" | "continue" => {}
+            "route" => {
+                let has_error_edge = graph
+                    .edges
+                    .iter()
+                    .any(|e| e.from_node == node.id && e.from_port == "error");
+                if !has_error_edge {
+                    return Err(ValidationError::MissingErrorRoute(node.id.clone()));
+                }
+            }
+            other => {
+                return Err(ValidationError::InvalidOnError {
+                    node: node.id.clone(),
+                    value: other.to_string(),
+                });
+            }
         }
     }
 
@@ -263,6 +311,150 @@ mod tests {
             validate(&graph),
             Err(ValidationError::InvalidNodeConfig { .. })
         ));
+    }
+
+    fn tool_node(id: &str, config: serde_json::Value) -> Node {
+        let mut n = node(id, NodeKind::ToolCall);
+        n.config = config;
+        n
+    }
+
+    #[test]
+    fn rejects_on_error_route_without_error_edge() {
+        // A `route` policy with no outgoing `error` edge would drop the routed
+        // error item silently — reject it.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                tool_node("x", serde_json::json!({ "on_error": "route" })),
+            ],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "x".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::MissingErrorRoute("x".to_string()))
+        );
+    }
+
+    #[test]
+    fn accepts_on_error_route_with_error_edge() {
+        // The same graph is valid once an edge leaves the node's `error` port.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                tool_node("x", serde_json::json!({ "on_error": "route" })),
+                node("recover", NodeKind::Agent),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "x".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "x".to_string(),
+                    from_port: "error".to_string(),
+                    to_node: "recover".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn accepts_on_error_stop_and_continue_without_error_edge() {
+        for policy in ["stop", "continue"] {
+            let graph = WorkflowGraph {
+                nodes: vec![
+                    node("t", NodeKind::Trigger),
+                    tool_node("x", serde_json::json!({ "on_error": policy })),
+                ],
+                edges: vec![Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "x".to_string(),
+                    to_port: "main".to_string(),
+                }],
+                ..Default::default()
+            };
+            assert_eq!(validate(&graph), Ok(()), "policy {policy} should be valid");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_on_error_value() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                tool_node("x", serde_json::json!({ "on_error": "explode" })),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::InvalidOnError {
+                node: "x".to_string(),
+                value: "explode".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_edges() {
+        let dup = || Edge {
+            from_node: "t".to_string(),
+            from_port: "main".to_string(),
+            to_node: "a".to_string(),
+            to_port: "main".to_string(),
+        };
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), node("a", NodeKind::Agent)],
+            edges: vec![dup(), dup()],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::DuplicateEdge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "a".to_string(),
+                to_port: "main".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_parallel_edges_on_distinct_ports() {
+        // Two edges between the same node pair are fine as long as they differ
+        // in port — only fully identical edges are rejected.
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), node("a", NodeKind::Agent)],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "a".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "a".to_string(),
+                    to_port: "other".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(validate(&graph), Ok(()));
     }
 
     #[test]

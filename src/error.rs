@@ -33,6 +33,47 @@ pub enum ValidationError {
         /// Why the configuration is invalid.
         reason: String,
     },
+
+    /// A node sets `on_error: "route"` but has no outgoing edge on its `error`
+    /// port, so the routed error item would have nowhere to go.
+    #[error("node {0} has on_error=\"route\" but no outgoing edge on its `error` port")]
+    MissingErrorRoute(String),
+
+    /// Two edges are identical (same source node/port and destination
+    /// node/port), which is redundant and almost always an authoring mistake.
+    #[error("duplicate edge: {from_node}.{from_port} -> {to_node}.{to_port}")]
+    DuplicateEdge {
+        /// Source node id.
+        from_node: String,
+        /// Source port name.
+        from_port: String,
+        /// Destination node id.
+        to_node: String,
+        /// Destination port name.
+        to_port: String,
+    },
+
+    /// A node's `on_error` policy is not one of `stop`, `continue`, or `route`.
+    #[error("node {node} has unknown on_error value: {value:?}")]
+    InvalidOnError {
+        /// The offending node id.
+        node: String,
+        /// The unrecognized `on_error` value.
+        value: String,
+    },
+
+    /// A persisted graph declares a `schema_version` newer than this crate
+    /// understands; it cannot be safely migrated (and must not be downgraded).
+    #[error(
+        "schema_version {found} is newer than this crate supports (max {supported}); \
+         upgrade tinyflows to load this graph"
+    )]
+    SchemaVersionTooNew {
+        /// The version found in the persisted document.
+        found: u32,
+        /// The highest schema version this crate understands.
+        supported: u32,
+    },
 }
 
 /// Errors produced while compiling or running a workflow.
@@ -87,6 +128,37 @@ mod tests {
             }
             .to_string(),
             "invalid config for node n1: missing url"
+        );
+        assert_eq!(
+            ValidationError::MissingErrorRoute("n1".to_string()).to_string(),
+            "node n1 has on_error=\"route\" but no outgoing edge on its `error` port"
+        );
+        assert_eq!(
+            ValidationError::DuplicateEdge {
+                from_node: "a".to_string(),
+                from_port: "main".to_string(),
+                to_node: "b".to_string(),
+                to_port: "main".to_string(),
+            }
+            .to_string(),
+            "duplicate edge: a.main -> b.main"
+        );
+        assert_eq!(
+            ValidationError::InvalidOnError {
+                node: "n1".to_string(),
+                value: "explode".to_string(),
+            }
+            .to_string(),
+            "node n1 has unknown on_error value: \"explode\""
+        );
+        assert_eq!(
+            ValidationError::SchemaVersionTooNew {
+                found: 5,
+                supported: 1,
+            }
+            .to_string(),
+            "schema_version 5 is newer than this crate supports (max 1); \
+             upgrade tinyflows to load this graph"
         );
     }
 
