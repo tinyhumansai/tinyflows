@@ -555,19 +555,28 @@ fn build_graph(
 
     // Run-level knobs are read from the trigger node's config — the natural
     // run-level config holder, since `WorkflowGraph` has no top-level config.
-    // `recursion_limit` bounds loops (tinyagents' default is 50) and
-    // `node_timeout_secs` sets a per-node timeout for the whole run; both are
-    // applied to the builder below.
+    // `recursion_limit` bounds loops (tinyagents' default is 50) and is applied
+    // to the builder below; `node_timeout_secs` bounds each individual node
+    // *attempt* and is applied per attempt inside the handler's retry loop.
     let recursion_limit = trigger
         .config
         .get("recursion_limit")
         .and_then(Value::as_u64)
         .filter(|n| *n > 0);
-    let node_timeout_secs = trigger
+    // BUG-8: `node_timeout_secs` bounds EACH executor attempt, not the whole
+    // retry loop. It is deliberately NOT lowered to a graph-level
+    // `with_node_timeout` (which wraps a node handler's *entire* execution — all
+    // attempts plus their backoff sleeps — so a 1s timeout on a node with 2
+    // retries would kill it at 1s instead of giving each attempt its own 1s).
+    // Instead the value is captured into every node handler and raced against
+    // each attempt inside the retry loop below. `None` (unset) => no per-attempt
+    // timeout, behavior identical to before this fix.
+    let node_timeout = trigger
         .config
         .get("node_timeout_secs")
         .and_then(Value::as_u64)
-        .filter(|n| *n > 0);
+        .filter(|n| *n > 0)
+        .map(std::time::Duration::from_secs);
 
     tracing::info!(node_count = graph.nodes.len(), trigger = %trigger_id, "workflow run starting");
 
@@ -594,9 +603,12 @@ fn build_graph(
     if let Some(limit) = recursion_limit {
         builder = builder.with_recursion_limit(limit as usize);
     }
-    if let Some(secs) = node_timeout_secs {
-        builder = builder.with_node_timeout(std::time::Duration::from_secs(secs));
-    }
+    // NOTE: `node_timeout` is intentionally NOT wired via
+    // `builder.with_node_timeout(..)`. That tinyagents knob wraps a node
+    // handler's *entire* execution — the whole retry loop, including backoff
+    // sleeps — which is exactly the BUG-8 conflation of the timeout and retry
+    // budgets. The per-attempt bound is applied inside the handler's retry loop
+    // instead (raced against each attempt), so it is the sole timeout in effect.
 
     for node in &graph.nodes {
         let node = node.clone();
@@ -856,12 +868,52 @@ fn build_graph(
                         nodes: &nodes_state,
                         caps: &caps,
                     };
-                    match executor_for(&node.kind).execute(ctx).await {
-                        Ok(ok) => {
+                    // BUG-8: bound THIS attempt (not the whole retry loop) to
+                    // `node_timeout`. Race the attempt future against a
+                    // runtime-agnostic `futures_timer::Delay`; whichever resolves
+                    // first wins (`None` = the timer won, i.e. the attempt timed
+                    // out). When `node_timeout` is unset the attempt is awaited
+                    // directly, identical to before this fix.
+                    let attempt_result = match node_timeout {
+                        Some(timeout) => {
+                            let executor = executor_for(&node.kind);
+                            let attempt_fut = executor.execute(ctx);
+                            let mut attempt_fut = std::pin::pin!(attempt_fut);
+                            let mut timer = futures_timer::Delay::new(timeout);
+                            std::future::poll_fn(|cx| {
+                                use std::future::Future as _;
+                                if let std::task::Poll::Ready(out) = attempt_fut.as_mut().poll(cx) {
+                                    return std::task::Poll::Ready(Some(out));
+                                }
+                                if std::pin::Pin::new(&mut timer).poll(cx).is_ready() {
+                                    return std::task::Poll::Ready(None);
+                                }
+                                std::task::Poll::Pending
+                            })
+                            .await
+                        }
+                        None => Some(executor_for(&node.kind).execute(ctx).await),
+                    };
+                    match attempt_result {
+                        Some(Ok(ok)) => {
                             output = Some(ok);
                             break;
                         }
-                        Err(err) => last_err = Some(err),
+                        Some(Err(err)) => last_err = Some(err),
+                        // A timed-out attempt counts as a failed attempt: record
+                        // it as an error so the retry/`on_error` logic treats it
+                        // like any other failure (retry if attempts remain, else
+                        // apply `on_error`).
+                        None => {
+                            let secs = node_timeout.map(|d| d.as_secs()).unwrap_or_default();
+                            tracing::warn!(node = %node.id, attempt = attempt + 1, timeout_secs = secs, "node attempt timed out");
+                            last_err = Some(EngineError::Capability(format!(
+                                "node '{}' attempt {} timed out after {}s",
+                                node.id,
+                                attempt + 1,
+                                secs
+                            )));
+                        }
                     }
                     // Sleep before the next attempt, but not after the last one.
                     if backoff_ms > 0 && attempt + 1 < max_attempts {
