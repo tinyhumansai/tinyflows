@@ -106,14 +106,15 @@ async fn retry_recovers_after_transient_failures() {
         .await
         .expect("run should recover once the tool succeeds on attempt 3");
 
+    // tool_call output is enveloped; the recovered success payload is under `json`.
     let item = &outcome.output["nodes"]["call"]["items"][0]["json"];
     assert_eq!(
-        item,
-        &json!({ "ok": true }),
+        item["json"],
+        json!({ "ok": true }),
         "the recovered success payload should be the node's output item"
     );
     assert!(
-        item.get("error").is_none(),
+        item["json"].get("error").is_none(),
         "a recovered node must not emit an error item, got: {item}"
     );
     assert_eq!(

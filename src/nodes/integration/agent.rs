@@ -50,125 +50,153 @@ pub struct AgentNode;
 #[async_trait]
 impl NodeExecutor for AgentNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
-        // Data-binding: resolve any `=`-expressions in the config against the
-        // node's input before treating the config as the completion request.
-        let (cfg, diagnostics) = crate::nodes::resolve_config_traced(&ctx);
-        let conn = cfg.get("connection_ref").and_then(Value::as_str);
+        // Execution mode (default `once`): an agent turn is usually batch-level,
+        // but `per_item` maps it over the input (one turn per item, config
+        // re-resolved against each) for row-wise agent processing.
+        let per_item =
+            crate::nodes::execution_mode(&ctx.node.config, crate::nodes::ExecutionMode::Once)
+                == crate::nodes::ExecutionMode::PerItem
+                && !ctx.input.is_empty();
 
-        // Agent-kind selection: a trusted `agent_ref` in config routes this node
-        // to a host-registered agent (its own tools/model/sandbox) via the
-        // optional `AgentRunner` capability, instead of a bare completion. The ref
-        // comes from resolved node config — never from model output — so it can't
-        // be steered by prompt injection. Falls back to `LlmProvider` when no
-        // `agent_ref` is set or the host wired no agent registry.
-        let agent_ref = cfg
-            .get("agent_ref")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
-        let via_agent_kind = agent_ref.is_some() && ctx.caps.agent.is_some();
-        let response = match (agent_ref, ctx.caps.agent.as_ref()) {
-            (Some(agent_ref), Some(runner)) => {
-                tracing::debug!(agent_ref, "agent node: running registered agent kind");
-                runner.run_agent(agent_ref, cfg.clone(), conn).await?
+        if per_item {
+            let mut items = Vec::with_capacity(ctx.input.len());
+            let mut diagnostics = Vec::new();
+            for (index, input_item) in ctx.input.iter().enumerate() {
+                let (cfg, diags) =
+                    crate::nodes::resolve_config_traced_for_item(&ctx, input_item.json.clone());
+                let item = run_turn(&ctx, &cfg).await?;
+                items.push(item.paired_with(index));
+                diagnostics.extend(diags);
             }
-            _ => {
-                // The node config *is* the completion request; when a `tools`
-                // sub-port is configured its descriptors ride along so the model
-                // can elect to call one.
-                ctx.caps.llm.complete(cfg.clone(), conn).await?
-            }
-        };
-
-        // `text`/`raw` are derived from the untouched completion; `value` is the
-        // structured payload we thread the sub-ports (tool hop, output parser)
-        // through before it becomes the envelope's `json`.
-        let text = response.as_str().map(str::to_string).or_else(|| {
-            response
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-        let raw = response.clone();
-
-        // Tool sub-port (single hop): honor a `tool_call` the model returned, but
-        // only for a tool that was actually offered in `config.tools`. Skipped
-        // when a registered agent kind ran — that agent drives its own tool loop.
-        let mut value = response;
-        let model_tool_call = if via_agent_kind {
-            None
-        } else {
-            value.get("tool_call").cloned()
-        };
-        if let Some(tool_call) = model_tool_call {
-            if let Some(slug) = tool_call.get("slug").and_then(Value::as_str) {
-                // Only a tool actually offered in `config.tools` may be invoked;
-                // keep the matched descriptor so its trusted `connection_ref` wins.
-                let offered_tool = cfg
-                    .get("tools")
-                    .and_then(Value::as_array)
-                    .and_then(|tools| {
-                        tools
-                            .iter()
-                            .find(|t| t.get("slug").and_then(Value::as_str) == Some(slug))
-                    });
-                if let Some(offered_tool) = offered_tool {
-                    tracing::debug!(slug, "agent tool sub-port: invoking model-elected tool");
-                    let args = tool_call.get("args").cloned().unwrap_or(Value::Null);
-                    // Credentials come from trusted config only: the offered tool
-                    // descriptor's `connection_ref`, else the node's. The model's
-                    // `tool_call.connection_ref` is deliberately NOT trusted — a
-                    // prompt-injection could otherwise elect an arbitrary host
-                    // credential id for the call.
-                    let tool_conn = offered_tool
-                        .get("connection_ref")
-                        .and_then(Value::as_str)
-                        .or(conn);
-                    let result = ctx.caps.tools.invoke(slug, args, tool_conn).await?;
-                    if let Value::Object(map) = &mut value {
-                        map.insert("tool_result".to_string(), result);
-                    }
-                } else {
-                    tracing::warn!(
-                        slug,
-                        "agent tool sub-port: model elected an un-offered tool; ignoring"
-                    );
-                }
-            }
+            return Ok(NodeOutput::main(items).with_diagnostics(diagnostics));
         }
 
-        // Output-parser sub-port: validate/repair the agent output against a schema.
-        if let Some(parser) = cfg.get("output_parser").filter(|p| !p.is_null()) {
-            if let Some(parser_schema) = parser.get("schema").filter(|s| !s.is_null()) {
-                let auto_fix = parser
-                    .get("auto_fix")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-                let parser_conn = parser
+        // Single turn against the first-item scope (or empty input).
+        let (cfg, diagnostics) = crate::nodes::resolve_config_traced(&ctx);
+        let item = run_turn(&ctx, &cfg).await?;
+        Ok(NodeOutput::main(vec![item]).with_diagnostics(diagnostics))
+    }
+}
+
+/// Runs one agent turn against an already-resolved `cfg`: the completion (or
+/// registered agent kind), the optional tool sub-port, the optional
+/// output-parser sub-port, and finally the stable `{ json, text, raw }`
+/// envelope. Returns the emitted [`Item`] (without pairing — the caller sets it).
+async fn run_turn(ctx: &NodeContext<'_>, cfg: &Value) -> Result<Item> {
+    let conn = cfg.get("connection_ref").and_then(Value::as_str);
+
+    // Agent-kind selection: a trusted `agent_ref` in config routes this node
+    // to a host-registered agent (its own tools/model/sandbox) via the
+    // optional `AgentRunner` capability, instead of a bare completion. The ref
+    // comes from resolved node config — never from model output — so it can't
+    // be steered by prompt injection. Falls back to `LlmProvider` when no
+    // `agent_ref` is set or the host wired no agent registry.
+    let agent_ref = cfg
+        .get("agent_ref")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let via_agent_kind = agent_ref.is_some() && ctx.caps.agent.is_some();
+    let response = match (agent_ref, ctx.caps.agent.as_ref()) {
+        (Some(agent_ref), Some(runner)) => {
+            tracing::debug!(agent_ref, "agent node: running registered agent kind");
+            runner.run_agent(agent_ref, cfg.clone(), conn).await?
+        }
+        _ => {
+            // The node config *is* the completion request; when a `tools`
+            // sub-port is configured its descriptors ride along so the model
+            // can elect to call one.
+            ctx.caps.llm.complete(cfg.clone(), conn).await?
+        }
+    };
+
+    // `text`/`raw` are derived from the untouched completion; `value` is the
+    // structured payload we thread the sub-ports (tool hop, output parser)
+    // through before it becomes the envelope's `json`.
+    let text = response.as_str().map(str::to_string).or_else(|| {
+        response
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let raw = response.clone();
+
+    // Tool sub-port (single hop): honor a `tool_call` the model returned, but
+    // only for a tool that was actually offered in `config.tools`. Skipped
+    // when a registered agent kind ran — that agent drives its own tool loop.
+    let mut value = response;
+    let model_tool_call = if via_agent_kind {
+        None
+    } else {
+        value.get("tool_call").cloned()
+    };
+    if let Some(tool_call) = model_tool_call {
+        if let Some(slug) = tool_call.get("slug").and_then(Value::as_str) {
+            // Only a tool actually offered in `config.tools` may be invoked;
+            // keep the matched descriptor so its trusted `connection_ref` wins.
+            let offered_tool = cfg
+                .get("tools")
+                .and_then(Value::as_array)
+                .and_then(|tools| {
+                    tools
+                        .iter()
+                        .find(|t| t.get("slug").and_then(Value::as_str) == Some(slug))
+                });
+            if let Some(offered_tool) = offered_tool {
+                tracing::debug!(slug, "agent tool sub-port: invoking model-elected tool");
+                let args = tool_call.get("args").cloned().unwrap_or(Value::Null);
+                // Credentials come from trusted config only: the offered tool
+                // descriptor's `connection_ref`, else the node's. The model's
+                // `tool_call.connection_ref` is deliberately NOT trusted — a
+                // prompt-injection could otherwise elect an arbitrary host
+                // credential id for the call.
+                let tool_conn = offered_tool
                     .get("connection_ref")
                     .and_then(Value::as_str)
                     .or(conn);
-                value = schema::parse_and_validate(
-                    value,
-                    parser_schema,
-                    auto_fix,
-                    &ctx.caps.llm,
-                    parser_conn,
-                )
-                .await?;
+                let result = ctx.caps.tools.invoke(slug, args, tool_conn).await?;
+                if let Value::Object(map) = &mut value {
+                    map.insert("tool_result".to_string(), result);
+                }
+            } else {
+                tracing::warn!(
+                    slug,
+                    "agent tool sub-port: model elected an un-offered tool; ignoring"
+                );
             }
         }
-
-        // Emit the stable envelope: `json` is the structured (tool/parser-threaded)
-        // value, `text` the model's prose, `raw` the original completion — so a
-        // downstream node reads `=item.text` / `=item.json.<field>` regardless of
-        // which sub-ports fired. See [`super::envelope`].
-        let json = match value {
-            Value::Object(_) | Value::Array(_) => value,
-            _ => Value::Null,
-        };
-        let item = Item::new(super::envelope::from_parts(json, text, raw));
-        Ok(NodeOutput::main(vec![item]).with_diagnostics(diagnostics))
     }
+
+    // Output-parser sub-port: validate/repair the agent output against a schema.
+    if let Some(parser) = cfg.get("output_parser").filter(|p| !p.is_null()) {
+        if let Some(parser_schema) = parser.get("schema").filter(|s| !s.is_null()) {
+            let auto_fix = parser
+                .get("auto_fix")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let parser_conn = parser
+                .get("connection_ref")
+                .and_then(Value::as_str)
+                .or(conn);
+            value = schema::parse_and_validate(
+                value,
+                parser_schema,
+                auto_fix,
+                &ctx.caps.llm,
+                parser_conn,
+            )
+            .await?;
+        }
+    }
+
+    // Emit the stable envelope: `json` is the structured (tool/parser-threaded)
+    // value, `text` the model's prose, `raw` the original completion — so a
+    // downstream node reads `=item.text` / `=item.json.<field>` regardless of
+    // which sub-ports fired. See [`super::envelope`].
+    let json = match value {
+        Value::Object(_) | Value::Array(_) => value,
+        _ => Value::Null,
+    };
+    Ok(Item::new(super::envelope::from_parts(json, text, raw)))
 }
 
 #[cfg(test)]
@@ -238,6 +266,47 @@ mod tests {
             ports: vec![],
             position: None,
         }
+    }
+
+    #[tokio::test]
+    async fn defaults_to_once_but_per_item_maps_over_input() {
+        // Agent defaults to `once` (a single turn regardless of input count)...
+        let once = agent_node(json!({ "prompt": "=item.name" }));
+        let input = vec![
+            Item::new(json!({ "name": "A" })),
+            Item::new(json!({ "name": "B" })),
+        ];
+        let caps = mock_capabilities();
+        let run_meta = Value::Null;
+        let out = AgentNode
+            .execute(NodeContext {
+                node: &once,
+                input: &input,
+                run: &run_meta,
+                nodes: &Value::Null,
+                caps: &caps,
+            })
+            .await
+            .expect("execute");
+        assert_eq!(out.items.len(), 1, "once mode emits a single item");
+        assert_eq!(out.items[0].json["json"]["completion"]["prompt"], "A");
+
+        // ...but `execution: per_item` runs one turn per input item.
+        let per_item = agent_node(json!({ "prompt": "=item.name", "execution": "per_item" }));
+        let out = AgentNode
+            .execute(NodeContext {
+                node: &per_item,
+                input: &input,
+                run: &run_meta,
+                nodes: &Value::Null,
+                caps: &caps,
+            })
+            .await
+            .expect("execute");
+        assert_eq!(out.items.len(), 2, "per_item emits one turn per input");
+        assert_eq!(out.items[0].json["json"]["completion"]["prompt"], "A");
+        assert_eq!(out.items[1].json["json"]["completion"]["prompt"], "B");
+        assert_eq!(out.items[1].paired_item, Some(1));
     }
 
     #[tokio::test]

@@ -98,7 +98,7 @@ async fn fan_out_to_three_successors_joins_at_merge() {
     // All three concurrent successors ran.
     for id in ["a", "b", "c"] {
         assert_eq!(
-            out["nodes"][id]["items"][0]["json"]["status"], 200,
+            out["nodes"][id]["items"][0]["json"]["json"]["status"], 200,
             "fan-out branch {id} should have executed"
         );
     }
@@ -116,7 +116,12 @@ async fn fan_out_to_three_successors_joins_at_merge() {
     // The three merged items are the three distinct upstream URLs.
     let urls: HashSet<String> = merged
         .iter()
-        .map(|item| item["json"]["request"]["url"].as_str().unwrap().to_string())
+        .map(|item| {
+            item["json"]["json"]["request"]["url"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect();
     assert_eq!(
         urls,

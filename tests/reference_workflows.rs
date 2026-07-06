@@ -110,9 +110,12 @@ async fn customer_insights_linear() {
     assert_eq!(out["run"]["trigger"], json!({ "query": "recent reviews" }));
 
     // The HTTP node returned the canned 200 echo of its request descriptor.
-    assert_eq!(out["nodes"]["reviews"]["items"][0]["json"]["status"], 200);
     assert_eq!(
-        out["nodes"]["reviews"]["items"][0]["json"]["request"]["url"],
+        out["nodes"]["reviews"]["items"][0]["json"]["json"]["status"],
+        200
+    );
+    assert_eq!(
+        out["nodes"]["reviews"]["items"][0]["json"]["json"]["request"]["url"],
         "https://qdrant.example/reviews"
     );
 
@@ -127,11 +130,11 @@ async fn customer_insights_linear() {
 
     // The terminal tool_call ran and echoed the slug it was invoked with.
     assert_eq!(
-        out["nodes"]["sheet"]["items"][0]["json"]["tool"],
+        out["nodes"]["sheet"]["items"][0]["json"]["json"]["tool"],
         "googlesheets.append"
     );
     assert_eq!(
-        out["nodes"]["sheet"]["items"][0]["json"]["args"]["sheet"],
+        out["nodes"]["sheet"]["items"][0]["json"]["json"]["args"]["sheet"],
         "reviews"
     );
 }
@@ -194,9 +197,12 @@ async fn api_router_switch() {
         !out["nodes"]["http_get"]["items"].is_null(),
         "the `get` branch should have run"
     );
-    assert_eq!(out["nodes"]["http_get"]["items"][0]["json"]["status"], 200);
     assert_eq!(
-        out["nodes"]["http_get"]["items"][0]["json"]["request"]["url"],
+        out["nodes"]["http_get"]["items"][0]["json"]["json"]["status"],
+        200
+    );
+    assert_eq!(
+        out["nodes"]["http_get"]["items"][0]["json"]["json"]["request"]["url"],
         "https://api.example/props"
     );
     // The `post` branch node never executed, so it has no slot in the run state.
@@ -262,7 +268,7 @@ async fn onboarding_condition() {
         "the true branch should have run"
     );
     assert_eq!(
-        out["nodes"]["add_to_channel"]["items"][0]["json"]["tool"],
+        out["nodes"]["add_to_channel"]["items"][0]["json"]["json"]["tool"],
         "slack.add_to_channel"
     );
     // The false branch never executed.

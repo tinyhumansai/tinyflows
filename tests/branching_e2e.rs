@@ -92,7 +92,7 @@ async fn condition_routes_truthy_input_to_true_branch() {
 
     // Only the `true` branch ran and echoed its slug.
     assert_eq!(
-        out["nodes"]["yes"]["items"][0]["json"]["tool"],
+        out["nodes"]["yes"]["items"][0]["json"]["json"]["tool"],
         "slack.notify"
     );
     // The `false` branch never executed, so it has no slot in the run state.
@@ -111,7 +111,10 @@ async fn condition_routes_falsey_input_to_false_branch() {
     let out = &outcome.output;
 
     // Only the `false` branch ran.
-    assert_eq!(out["nodes"]["no"]["items"][0]["json"]["tool"], "slack.skip");
+    assert_eq!(
+        out["nodes"]["no"]["items"][0]["json"]["json"]["tool"],
+        "slack.skip"
+    );
     // The `true` branch never executed.
     assert!(
         out["nodes"]["yes"].is_null(),
@@ -162,7 +165,7 @@ async fn switch_routes_each_of_three_cases() {
         let out = &outcome.output;
 
         assert_eq!(
-            out["nodes"][ran]["items"][0]["json"]["tool"], slug,
+            out["nodes"][ran]["items"][0]["json"]["json"]["tool"], slug,
             "case {kind} should route to {ran}"
         );
         // Every other leaf, including default, must be untouched.
@@ -192,7 +195,7 @@ async fn switch_routes_no_match_to_default() {
     let out = &outcome.output;
 
     assert_eq!(
-        out["nodes"]["leaf_default"]["items"][0]["json"]["tool"],
+        out["nodes"]["leaf_default"]["items"][0]["json"]["json"]["tool"],
         "case.default"
     );
     for other in ["leaf_a", "leaf_b", "leaf_c"] {
@@ -243,7 +246,10 @@ async fn nested_branch_reaches_inner_true_leaf() {
     .expect("run");
     let out = &outcome.output;
 
-    assert_eq!(out["nodes"]["tt"]["items"][0]["json"]["tool"], "leaf.tt");
+    assert_eq!(
+        out["nodes"]["tt"]["items"][0]["json"]["json"]["tool"],
+        "leaf.tt"
+    );
     assert!(out["nodes"]["tf"].is_null(), "tf must not run");
     assert!(out["nodes"]["ff"].is_null(), "ff must not run");
 }
@@ -260,7 +266,10 @@ async fn nested_branch_reaches_inner_false_leaf() {
     .expect("run");
     let out = &outcome.output;
 
-    assert_eq!(out["nodes"]["tf"]["items"][0]["json"]["tool"], "leaf.tf");
+    assert_eq!(
+        out["nodes"]["tf"]["items"][0]["json"]["json"]["tool"],
+        "leaf.tf"
+    );
     assert!(out["nodes"]["tt"].is_null(), "tt must not run");
     assert!(out["nodes"]["ff"].is_null(), "ff must not run");
 }
@@ -273,7 +282,10 @@ async fn nested_branch_short_circuits_at_outer_false() {
         .expect("run");
     let out = &outcome.output;
 
-    assert_eq!(out["nodes"]["ff"]["items"][0]["json"]["tool"], "leaf.ff");
+    assert_eq!(
+        out["nodes"]["ff"]["items"][0]["json"]["json"]["tool"],
+        "leaf.ff"
+    );
     // The whole inner sub-branch never executed.
     assert!(out["nodes"]["inner"].is_null(), "inner must not run");
     assert!(out["nodes"]["tt"].is_null(), "tt must not run");

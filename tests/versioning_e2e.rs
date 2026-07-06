@@ -105,7 +105,7 @@ async fn legacy_graph_migrates_loads_and_runs() {
         "the transform node should have run and set its field"
     );
     assert_eq!(
-        outcome.output["nodes"]["call"]["items"][0]["json"]["tool"],
+        outcome.output["nodes"]["call"]["items"][0]["json"]["json"]["tool"],
         json!("slack.post"),
         "the tool_call node should have run and echoed its slug"
     );

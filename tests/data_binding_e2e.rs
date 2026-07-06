@@ -68,7 +68,7 @@ async fn tool_call_args_bind_to_upstream_trigger_data() {
     // The `=item.*` expressions resolved against the trigger payload before the
     // mock tool echoed the args back — proving inline data-binding end-to-end.
     assert_eq!(
-        outcome.output["nodes"]["post"]["items"][0]["json"]["args"],
+        outcome.output["nodes"]["post"]["items"][0]["json"]["json"]["args"],
         json!({ "channel": "#ops", "text": "Ada" })
     );
 }

@@ -26,10 +26,6 @@ use serde_json::{Value, json};
 /// Extracts a human-readable string from a capability value: the value itself
 /// when it is a string, else its `text` field when that is a string, else
 /// `None`.
-// `wrap`/`text_of`/`structured_of` back the pure capability nodes (tool_call,
-// http_request, code); the `agent` node uses `from_parts` directly. Until those
-// nodes adopt the envelope they are constructed-but-unused here.
-#[allow(dead_code)]
 fn text_of(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
@@ -40,7 +36,6 @@ fn text_of(value: &Value) -> Option<String> {
 
 /// The structured payload of a capability value: the value itself when it is an
 /// object or array, else [`Value::Null`] (scalars carry no structure).
-#[allow(dead_code)]
 fn structured_of(value: &Value) -> Value {
     match value {
         Value::Object(_) | Value::Array(_) => value.clone(),
@@ -60,7 +55,6 @@ pub(crate) fn from_parts(json: Value, text: Option<String>, raw: Value) -> Value
 /// Wraps a capability's return `value` in the stable envelope, deriving `json`
 /// and `text` from it. Used by the pure capability nodes (`tool_call`,
 /// `http_request`, `code`) whose structured payload *is* the raw return.
-#[allow(dead_code)]
 #[must_use]
 pub(crate) fn wrap(value: Value) -> Value {
     let text = text_of(&value);

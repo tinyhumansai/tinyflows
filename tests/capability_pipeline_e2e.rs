@@ -100,7 +100,10 @@ async fn linear_pipeline_threads_data_through_every_capability() {
     let out = &outcome.output;
 
     // Every capability node produced its deterministic echo.
-    assert_eq!(out["nodes"]["fetch"]["items"][0]["json"]["status"], 200);
+    assert_eq!(
+        out["nodes"]["fetch"]["items"][0]["json"]["json"]["status"],
+        200
+    );
     assert!(
         !out["nodes"]["transform_code"]["items"][0]["json"]["result"].is_null(),
         "code node should wrap its input under `result`"
@@ -112,11 +115,11 @@ async fn linear_pipeline_threads_data_through_every_capability() {
 
     // The terminal output_parser echoes the upstream tool_call's item unchanged.
     assert_eq!(
-        out["nodes"]["parse"]["items"][0]["json"]["tool"], "sheets.append",
+        out["nodes"]["parse"]["items"][0]["json"]["json"]["tool"], "sheets.append",
         "the final node should carry the tool_call's echoed slug"
     );
     assert_eq!(
-        out["nodes"]["parse"]["items"][0]["json"]["args"]["row"], 1,
+        out["nodes"]["parse"]["items"][0]["json"]["json"]["args"]["row"], 1,
         "the final node should carry the tool_call's echoed args"
     );
 }
@@ -138,12 +141,12 @@ async fn pipeline_threads_connection_ref_to_the_mock() {
 
     // The tool node saw the connection ...
     assert_eq!(
-        out["nodes"]["act"]["items"][0]["json"]["connection"],
+        out["nodes"]["act"]["items"][0]["json"]["json"]["connection"],
         "composio:sheets:acct_42"
     );
     // ... and it survives through the terminal output_parser.
     assert_eq!(
-        out["nodes"]["parse"]["items"][0]["json"]["connection"], "composio:sheets:acct_42",
+        out["nodes"]["parse"]["items"][0]["json"]["json"]["connection"], "composio:sheets:acct_42",
         "the threaded connection_ref should reach the end of the pipeline"
     );
 }

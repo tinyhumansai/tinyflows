@@ -64,6 +64,15 @@ pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
         .first()
         .map(|i| i.json.clone())
         .unwrap_or(Value::Null);
+    expr_scope_for(ctx, item)
+}
+
+/// Like [`expr_scope`], but binds `item` to an explicit value rather than the
+/// first input item. Used by per-item execution: each iteration resolves the
+/// node config against *its own* item, so `=item.<field>` means the current
+/// item, while `items`/`run`/`nodes` stay identical across the batch.
+#[must_use]
+pub(crate) fn expr_scope_for(ctx: &NodeContext, item: Value) -> Value {
     let items: Vec<Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
     serde_json::json!({
         "item": item,
@@ -71,6 +80,35 @@ pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
         "run": ctx.run,
         "nodes": nodes_scope(ctx.nodes),
     })
+}
+
+/// How a capability node maps over its input items.
+///
+/// - [`Once`](ExecutionMode::Once): run a single time, binding config against
+///   the first input item — one output item regardless of input count.
+/// - [`PerItem`](ExecutionMode::PerItem): map over the input, re-resolving
+///   config against each item and emitting one output item per input (carrying
+///   `paired_item`). This is the n8n-style default for `tool_call` /
+///   `http_request`, so a fan-out (`split_out` → node) actually runs per element
+///   instead of silently dropping all but the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionMode {
+    /// Single invocation against the first item.
+    Once,
+    /// One invocation per input item.
+    PerItem,
+}
+
+/// Reads the node's `execution` config (`"once"` | `"per_item"`), falling back
+/// to `default` when unset or unrecognized. Read from the raw config (not an
+/// `=`-expression) since it selects the resolution strategy itself.
+#[must_use]
+pub(crate) fn execution_mode(config: &Value, default: ExecutionMode) -> ExecutionMode {
+    match config.get("execution").and_then(Value::as_str) {
+        Some("per_item") => ExecutionMode::PerItem,
+        Some("once") => ExecutionMode::Once,
+        _ => default,
+    }
 }
 
 /// Projects the run state's `nodes` map into the expression-scope shape:
@@ -113,7 +151,24 @@ pub(crate) fn nodes_scope(nodes: &Value) -> Value {
 pub(crate) fn resolve_config_traced(
     ctx: &NodeContext,
 ) -> (Value, Vec<crate::expr::NullResolution>) {
-    let scope = expr_scope(ctx);
+    resolve_config_traced_with_scope(ctx, expr_scope(ctx))
+}
+
+/// Like [`resolve_config_traced`], but binds `item` to `item_json` (the current
+/// item in a per-item run) instead of the first input item.
+pub(crate) fn resolve_config_traced_for_item(
+    ctx: &NodeContext,
+    item_json: Value,
+) -> (Value, Vec<crate::expr::NullResolution>) {
+    resolve_config_traced_with_scope(ctx, expr_scope_for(ctx, item_json))
+}
+
+/// Shared body: resolve the node config against a pre-built `scope`, warning on
+/// each null-resolved `=`-expression.
+fn resolve_config_traced_with_scope(
+    ctx: &NodeContext,
+    scope: Value,
+) -> (Value, Vec<crate::expr::NullResolution>) {
     let (cfg, misses) = crate::expr::resolve_traced(&ctx.node.config, &scope);
     for miss in &misses {
         tracing::warn!(

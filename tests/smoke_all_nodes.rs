@@ -248,8 +248,11 @@ async fn big_chained_workflow_runs_end_to_end() {
     .expect("run");
     let out = &outcome.output;
 
-    // HTTP hop echoed the canned 200 response.
-    assert_eq!(out["nodes"]["fetch"]["items"][0]["json"]["status"], 200);
+    // HTTP hop echoed the canned 200 response (enveloped under json.json).
+    assert_eq!(
+        out["nodes"]["fetch"]["items"][0]["json"]["json"]["status"],
+        200
+    );
     // split_out fanned the code node's `result` array into >= 1 item.
     assert!(
         !out["nodes"]["fan"]["items"]
@@ -266,7 +269,7 @@ async fn big_chained_workflow_runs_end_to_end() {
     // The condition took the `true` branch, so the tool_call ran and the `false`
     // branch's output_parser did not.
     assert_eq!(
-        out["nodes"]["notify"]["items"][0]["json"]["tool"],
+        out["nodes"]["notify"]["items"][0]["json"]["json"]["tool"],
         json!("slack.post")
     );
     assert!(

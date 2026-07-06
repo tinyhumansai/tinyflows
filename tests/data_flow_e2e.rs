@@ -335,10 +335,11 @@ async fn nodes_scope_addresses_grandparent_output_by_id() {
                 NodeKind::ToolCall,
                 json!({ "slug": "c.send", "args": {
                     // Dotted-path shorthand and jq form, both keyed by node id.
-                    "x": "=nodes.a.item.args.x",
-                    "x_jq": r#"=.nodes["a"].items[0].args.x"#,
-                    // The direct predecessor's output stays reachable as `item`.
-                    "pred_tool": "=item.tool",
+                    "x": "=nodes.a.item.json.args.x",
+                    "x_jq": r#"=.nodes["a"].items[0].json.args.x"#,
+                    // The direct predecessor's output stays reachable as `item`
+                    // (its tool result lives under the envelope's `json`).
+                    "pred_tool": "=item.json.tool",
                 } }),
             ),
         ],
@@ -353,7 +354,7 @@ async fn nodes_scope_addresses_grandparent_output_by_id() {
     let out = run(&compiled, json!({ "x": 42 }), &mock_capabilities())
         .await
         .expect("run");
-    let c = &items(&out.output, "c")[0]["json"]["args"];
+    let c = &items(&out.output, "c")[0]["json"]["json"]["args"];
     assert_eq!(c["x"], 42, "grandparent output must resolve via nodes.a");
     assert_eq!(c["x_jq"], 42, "jq form must resolve via .nodes[\"a\"]");
     assert_eq!(
@@ -386,8 +387,8 @@ async fn nodes_scope_disambiguates_fan_in_predecessors() {
                 "m",
                 NodeKind::ToolCall,
                 json!({ "slug": "m.merge", "args": {
-                    "from_p": "=nodes.p.item.args.v",
-                    "from_q": "=nodes.q.item.args.v",
+                    "from_p": "=nodes.p.item.json.args.v",
+                    "from_q": "=nodes.q.item.json.args.v",
                 } }),
             ),
         ],
@@ -403,7 +404,7 @@ async fn nodes_scope_disambiguates_fan_in_predecessors() {
     let out = run(&compiled, Value::Null, &mock_capabilities())
         .await
         .expect("run");
-    let m = &items(&out.output, "m")[0]["json"]["args"];
+    let m = &items(&out.output, "m")[0]["json"]["json"]["args"];
     assert_eq!(m["from_p"], "from-p", "nodes.p must bind p's output");
     assert_eq!(m["from_q"], "from-q", "nodes.q must bind q's output");
 }
