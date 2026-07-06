@@ -208,7 +208,6 @@ async fn approval_gated_action_pauses_then_resumes() {
 /// merge. Asserts the merged item count and a computed tier field. Wrapped in a
 /// hard timeout so a merge-barrier deadlock can never hang CI.
 #[tokio::test]
-#[ignore = "BUG-4: a `merge` fed by both a condition's true and false branch nodes gets an incomplete waiting-edge barrier; the untaken `skip` predecessor never completes so `collect` never fires (no run slot), losing all merged items"]
 async fn etl_branch_merge_collects_tagged_items() {
     let graph = WorkflowGraph {
         name: "etl".to_string(),

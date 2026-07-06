@@ -4,11 +4,14 @@
 //! the audited bug still reproduces on the current engine and is marked
 //! `#[ignore]` with the observed-vs-expected note.
 
+use std::sync::{Arc, Mutex};
+
 use serde_json::{Value, json};
 use tinyflows::caps::mock::mock_capabilities;
 use tinyflows::compiler::compile;
-use tinyflows::engine::run;
+use tinyflows::engine::{run, run_with_observer};
 use tinyflows::model::{Edge, Node, NodeKind, WorkflowGraph};
+use tinyflows::observability::{ExecutionStep, RunObserver, StepStatus};
 
 fn node(id: &str, kind: NodeKind, config: Value) -> Node {
     Node {
@@ -45,7 +48,6 @@ fn edge(from_node: &str, from_port: &str, to_node: &str) -> Edge {
 /// only one of `a`/`b` actually runs. The **correct** behavior is that both
 /// `a` AND `b` run when `src` succeeds on `main`.
 #[tokio::test]
-#[ignore = "BUG-3: mixed-port fan-out (2x main + 1x error) is lowered to conditional edges; the duplicate `main` route is overwritten so `a` never runs (only one main branch survives)"]
 async fn bug3_mixed_port_fan_out_runs_all_main_branches() {
     let graph = WorkflowGraph {
         name: "bug3".to_string(),
@@ -132,6 +134,120 @@ async fn bug4_untaken_branch_does_not_leak_into_true_wired_sink() {
         .expect("sink emitted items");
     assert_eq!(items.len(), 1, "sink should receive exactly the true item");
     assert_eq!(items[0]["json"]["branch"], "true");
+}
+
+/// BUG-4a — `collect_input` must honor the port a predecessor emitted on.
+///
+/// `start` fans out to both `cond` and `feed`. `feed` always runs and stamps
+/// `source:feed`, feeding the fan-in `collect`. `cond` is wired to `collect` on
+/// its `true` port, but with `flag:false` it emits on `false` — so its (untaken)
+/// passthrough items must NOT leak into `collect`, which should see exactly
+/// `feed`'s one item. `collect`'s barrier is satisfied by `feed` (its only
+/// waiting predecessor), so the join still fires. Pre-fix, `collect_input`
+/// concatenated `cond`'s slot regardless of port, leaking a second item.
+#[tokio::test]
+async fn bug4a_untaken_port_data_does_not_leak_into_fan_in() {
+    let graph = WorkflowGraph {
+        name: "bug4a".to_string(),
+        nodes: vec![
+            trigger("start"),
+            node("cond", NodeKind::Condition, json!({ "field": "flag" })),
+            node(
+                "feed",
+                NodeKind::Transform,
+                json!({ "set": { "source": "feed" } }),
+            ),
+            node("other", NodeKind::OutputParser, Value::Null),
+            node("collect", NodeKind::Merge, Value::Null),
+        ],
+        edges: vec![
+            edge("start", "main", "cond"),
+            edge("start", "main", "feed"),
+            edge("cond", "true", "collect"),
+            edge("cond", "false", "other"),
+            edge("feed", "main", "collect"),
+        ],
+        ..Default::default()
+    };
+
+    let compiled = compile(&graph).expect("compile");
+    let outcome = run(&compiled, json!({ "flag": false }), &mock_capabilities())
+        .await
+        .expect("run");
+    let out = &outcome.output;
+
+    // `cond` took the `false` branch, so its items must not leak into the
+    // `true`-wired fan-in: `collect` sees exactly `feed`'s single item.
+    let items = out["nodes"]["collect"]["items"]
+        .as_array()
+        .expect("collect emitted items");
+    assert_eq!(
+        items.len(),
+        1,
+        "collect should receive only feed's item, not the untaken cond branch"
+    );
+    assert_eq!(items[0]["json"]["source"], "feed");
+}
+
+/// BUG-12 — the failed-attempt `ExecutionStep` must carry the null-resolution
+/// diagnostics, not an empty vec.
+///
+/// `tc`'s `slug` is `=item.missing`, which resolves to null (the trigger item has
+/// no `missing` field), so the tool_call fails with a missing-slug error under the
+/// default `stop` policy. The recorded error step must still surface the
+/// data-binding diagnostic naming `slug` / `=item.missing` — the exact info the
+/// feature targets.
+#[tokio::test]
+async fn bug12_error_step_captures_null_resolution_diagnostics() {
+    #[derive(Default)]
+    struct Capture {
+        steps: Mutex<Vec<ExecutionStep>>,
+    }
+    impl RunObserver for Capture {
+        fn on_step_finish(&self, step: &ExecutionStep) {
+            self.steps.lock().expect("poisoned").push(step.clone());
+        }
+    }
+
+    let graph = WorkflowGraph {
+        name: "bug12".to_string(),
+        nodes: vec![
+            trigger("start"),
+            node("tc", NodeKind::ToolCall, json!({ "slug": "=item.missing" })),
+        ],
+        edges: vec![edge("start", "main", "tc")],
+        ..Default::default()
+    };
+
+    let compiled = compile(&graph).expect("compile");
+    let capture = Arc::new(Capture::default());
+    let observer: Arc<dyn RunObserver> = capture.clone();
+    // The `stop`-policy failure surfaces as `Err`, but the error step (with its
+    // diagnostics) is emitted to the observer before the run unwinds.
+    let result = run_with_observer(
+        &compiled,
+        json!({ "x": 1 }),
+        &mock_capabilities(),
+        &observer,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a null slug must fail the tool_call under stop"
+    );
+
+    let steps = capture.steps.lock().expect("poisoned");
+    let error_step = steps
+        .iter()
+        .find(|s| s.node_id == "tc" && matches!(s.status, StepStatus::Error))
+        .expect("an error step for `tc` should have been recorded");
+    assert_eq!(
+        error_step.diagnostics.len(),
+        1,
+        "the failed step must carry the null-resolution diagnostic, not an empty vec"
+    );
+    assert_eq!(error_step.diagnostics[0].location, "slug");
+    assert_eq!(error_step.diagnostics[0].expression, "=item.missing");
 }
 
 /// M5 — a `merge` of an `agent` (1 item) and a `tool_call` (1 item) yields two

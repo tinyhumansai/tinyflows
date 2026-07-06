@@ -166,14 +166,31 @@ fn merge(base: &mut Value, update: Value) {
     }
 }
 
-/// Collects a node's input items by concatenating the `items` its predecessor
-/// nodes emitted into the run state.
-fn collect_input(state: &Value, predecessors: &[String]) -> Vec<Item> {
+/// Collects a node's input items from the `items` its predecessors emitted into
+/// the run state, **honoring the port each edge is wired to**.
+///
+/// `incoming` is the node's incoming edges as `(predecessor id, edge from_port)`
+/// pairs. For each edge, the predecessor's items are included only when the
+/// predecessor actually emitted on that edge's `from_port` — the port it recorded
+/// into its run-state slot (defaulting to `"main"` on both sides). This makes the
+/// common linear / parallel-fan-out / merge case (everything on `"main"`) a
+/// no-op, while preventing an untaken conditional branch (e.g. a `condition` that
+/// took `"true"`) from leaking its data into a fan-in wired to a different port.
+fn collect_input(state: &Value, incoming: &[(String, String)]) -> Vec<Item> {
     let mut items = Vec::new();
-    for pred in predecessors {
-        if let Some(array) = state
-            .get("nodes")
-            .and_then(|nodes| nodes.get(pred))
+    for (pred, from_port) in incoming {
+        let slot = state.get("nodes").and_then(|nodes| nodes.get(pred));
+        // The port this predecessor actually emitted on (defaulting to `"main"`),
+        // compared against the port the edge draws from (also `"main"` by
+        // default). A mismatch means this edge's branch was not taken.
+        let emitted = slot
+            .and_then(|slot| slot.get("port"))
+            .and_then(Value::as_str)
+            .unwrap_or("main");
+        if emitted != from_port.as_str() {
+            continue;
+        }
+        if let Some(array) = slot
             .and_then(|slot| slot.get("items"))
             .and_then(Value::as_array)
         {
@@ -185,6 +202,154 @@ fn collect_input(state: &Value, predecessors: &[String]) -> Vec<Item> {
         }
     }
     items
+}
+
+/// How a node's handler drives its successors once it has produced an update.
+///
+/// Most nodes follow their static/conditional edges (`Plain`). A node whose
+/// outgoing edges all share one port and number two or more is a parallel
+/// `FanOut` — it drives every successor with a single `Command::goto`. A node
+/// with **mixed** ports where at least one port has more than one target is a
+/// `PortCommand`: it drives only the successors of the port it actually emitted
+/// on (so `main->a, main->b, error->h` fans out over `a`+`b` on success and
+/// routes to `h` on error, instead of one `main` branch being dropped).
+#[derive(Clone)]
+enum HandlerRouting {
+    /// Follow static/conditional edges; emit a plain state update.
+    Plain,
+    /// Parallel fan-out: `goto` every listed successor regardless of port.
+    FanOut(Vec<String>),
+    /// Port-selective command routing: `goto` the successors of the emitted
+    /// port, looked up in this `(port, targets)` table.
+    PortCommand(Vec<(String, Vec<String>)>),
+}
+
+/// Groups a node's outgoing edges by `from_port`, preserving first-seen order of
+/// both ports and their targets.
+fn outgoing_by_port(
+    graph: &crate::model::WorkflowGraph,
+    node_id: &str,
+) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for edge in graph.edges.iter().filter(|e| e.from_node == node_id) {
+        if let Some((_, targets)) = groups.iter_mut().find(|(port, _)| *port == edge.from_port) {
+            targets.push(edge.to_node.clone());
+        } else {
+            groups.push((edge.from_port.clone(), vec![edge.to_node.clone()]));
+        }
+    }
+    groups
+}
+
+/// Classifies how a node drives its successors from its outgoing-edge shape:
+/// same-port multi-edge → parallel [`HandlerRouting::FanOut`]; mixed ports with a
+/// multi-target port → [`HandlerRouting::PortCommand`]; everything else (leaf,
+/// single edge, or one-target-per-port conditional) follows edges as `Plain`.
+fn handler_routing(graph: &crate::model::WorkflowGraph, node_id: &str) -> HandlerRouting {
+    let groups = outgoing_by_port(graph, node_id);
+    let total: usize = groups.iter().map(|(_, targets)| targets.len()).sum();
+    match groups.len() {
+        // Leaf or single successor: plain edge routing.
+        0 => HandlerRouting::Plain,
+        1 => {
+            let targets = &groups[0].1;
+            if targets.len() >= 2 {
+                HandlerRouting::FanOut(targets.clone())
+            } else {
+                HandlerRouting::Plain
+            }
+        }
+        // Multiple distinct ports. One target per port is a plain conditional
+        // branch (lowered to conditional edges). If any port has >=2 targets the
+        // conditional-edge route map would overwrite the duplicate label, so
+        // drive it by the emitted port instead.
+        _ if total == groups.len() => HandlerRouting::Plain,
+        _ => HandlerRouting::PortCommand(groups),
+    }
+}
+
+/// Whether the fan-in node `merge_id` is a **conditional join**: every one of its
+/// predecessors sits on a distinct port of a common upstream brancher, so at most
+/// one predecessor ever runs. Such a join must not hard-wait on all predecessors
+/// (a waiting-edge barrier would deadlock on the untaken branch) — it fires when
+/// the taken branch arrives.
+///
+/// Detected conservatively: there must be a brancher `B` (a node whose outgoing
+/// edges use >=2 distinct ports) such that each predecessor is reachable from
+/// **exactly one** of `B`'s ports, and the predecessor→port mapping is injective
+/// (no two predecessors share a port). When detection is unsure it returns
+/// `false`, preserving the safe waiting-edge barrier. Reachability is measured
+/// forward from each of `B`'s ports without passing through `merge_id`, so the
+/// join point itself never counts as a shared reconvergence.
+fn is_conditional_join(graph: &crate::model::WorkflowGraph, merge_id: &str) -> bool {
+    let preds: Vec<&str> = graph
+        .edges
+        .iter()
+        .filter(|e| e.to_node == merge_id)
+        .map(|e| e.from_node.as_str())
+        .collect();
+    if preds.len() < 2 {
+        return false;
+    }
+    for brancher in &graph.nodes {
+        let ports: Vec<String> = outgoing_by_port(graph, &brancher.id)
+            .into_iter()
+            .map(|(port, _)| port)
+            .collect();
+        if ports.len() < 2 {
+            continue;
+        }
+        let mut used_ports: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut ok = true;
+        for pred in &preds {
+            let reaching: Vec<&str> = ports
+                .iter()
+                .filter(|port| reaches_via_port(graph, &brancher.id, port, pred, merge_id))
+                .map(String::as_str)
+                .collect();
+            // A predecessor must be reachable from exactly one of the brancher's
+            // ports, and that port must be unique to it (injective mapping).
+            if reaching.len() != 1 || !used_ports.insert(reaching[0]) {
+                ok = false;
+                break;
+            }
+        }
+        if ok && used_ports.len() >= 2 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `target` is reachable from `brancher`'s `port` successors, walking
+/// forward along edges but never expanding `stop` (the join node), so paths that
+/// only reconverge at the join are not counted.
+fn reaches_via_port(
+    graph: &crate::model::WorkflowGraph,
+    brancher: &str,
+    port: &str,
+    target: &str,
+    stop: &str,
+) -> bool {
+    let mut stack: Vec<&str> = graph
+        .edges
+        .iter()
+        .filter(|e| e.from_node == brancher && e.from_port == port)
+        .map(|e| e.to_node.as_str())
+        .collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    while let Some(node) = stack.pop() {
+        if node == target {
+            return true;
+        }
+        if node == stop || !seen.insert(node) {
+            continue;
+        }
+        for edge in graph.edges.iter().filter(|e| e.from_node == node) {
+            stack.push(edge.to_node.as_str());
+        }
+    }
+    false
 }
 
 /// Builds the partial state update a node contributes:
@@ -415,26 +580,10 @@ fn build_graph(
         *incoming_counts.entry(edge.to_node.as_str()).or_default() += 1;
     }
 
-    // A node is a **parallel fan-out** point when all of its outgoing edges share
-    // a single `from_port` and there is more than one of them: every successor
-    // must run concurrently. We record its ordered successor list here so the
-    // node's handler can emit a `Command::goto([...])` instead of a plain update.
-    let fan_out_targets = |node_id: &str| -> Option<Vec<String>> {
-        let outgoing: Vec<_> = graph
-            .edges
-            .iter()
-            .filter(|e| e.from_node == node_id)
-            .collect();
-        if outgoing.len() < 2 {
-            return None;
-        }
-        let first_port = outgoing[0].from_port.as_str();
-        if outgoing.iter().all(|e| e.from_port == first_port) {
-            Some(outgoing.iter().map(|e| e.to_node.clone()).collect())
-        } else {
-            None
-        }
-    };
+    // How each node drives its successors (parallel fan-out, port-selective
+    // command routing, or plain edge following) is derived from its outgoing-edge
+    // shape by [`handler_routing`]; the handler and the lowering below both key
+    // off it so they stay in agreement.
 
     // Concurrency is required so a fan-out's successors execute in the same
     // superstep; the reducer folds their independent, per-id updates
@@ -451,19 +600,22 @@ fn build_graph(
 
     for node in &graph.nodes {
         let node = node.clone();
-        let predecessors: Vec<String> = graph
+        // Incoming edges as `(predecessor id, edge from_port)` pairs, so
+        // `collect_input` can gather each predecessor's items only from the port
+        // it actually emitted on (see `collect_input`).
+        let incoming: Vec<(String, String)> = graph
             .edges
             .iter()
             .filter(|e| e.to_node == node.id)
-            .map(|e| e.from_node.clone())
+            .map(|e| (e.from_node.clone(), e.from_port.clone()))
             .collect();
         let caps = capabilities.clone();
         let observer = observer.clone();
         let steps = steps.clone();
         let token = token.clone();
         let is_trigger = node.kind == NodeKind::Trigger;
-        // Successors to fan out to concurrently, or `None` for a non-fan-out node.
-        let fan_out = fan_out_targets(&node.id);
+        // How this node drives its successors once it has an update.
+        let routing = handler_routing(graph, &node.id);
         // Whether the node has an outgoing edge on the `error` port. A denied
         // approval gate (see the resume-deny path below) routes its error item
         // there when present, and fails the run when absent.
@@ -474,12 +626,12 @@ fn build_graph(
 
         builder = builder.add_node(node.id.clone(), move |state: Value, ctx| {
             let node = node.clone();
-            let predecessors = predecessors.clone();
+            let incoming = incoming.clone();
             let caps = caps.clone();
             let observer = observer.clone();
             let steps = steps.clone();
             let token = token.clone();
-            let fan_out = fan_out.clone();
+            let routing = routing.clone();
             // The resume value delivered to this node on a checkpointed resume, if
             // any. A bare `true` means "approve the interrupted gate"; a structured
             // `{ "rejected": [<gate id>, …] }` denies the named gate(s).
@@ -506,14 +658,25 @@ fn build_graph(
                 None => false,
             };
             async move {
-                // Wraps a node's partial update: a fan-out node drives all of its
-                // successors via a `Command::goto`, everything else emits a plain
-                // update and follows its static/conditional edge.
-                let emit = |update: Value| match &fan_out {
-                    Some(targets) => {
+                // Wraps a node's partial update into a routing result. A parallel
+                // fan-out drives all of its successors via a `Command::goto`; a
+                // port-command node drives only the successors of the port it
+                // emitted on (`port`, defaulting to `main`); everything else emits
+                // a plain update and follows its static/conditional edge.
+                let emit = |update: Value, port: Option<&str>| match &routing {
+                    HandlerRouting::Plain => NodeResult::Update(update),
+                    HandlerRouting::FanOut(targets) => {
                         NodeResult::Command(Command::goto(targets.clone()).with_update(update))
                     }
-                    None => NodeResult::Update(update),
+                    HandlerRouting::PortCommand(groups) => {
+                        let emitted = port.unwrap_or("main");
+                        let targets: Vec<String> = groups
+                            .iter()
+                            .find(|(p, _)| p == emitted)
+                            .map(|(_, targets)| targets.clone())
+                            .unwrap_or_default();
+                        NodeResult::Command(Command::goto(targets).with_update(update))
+                    }
                 };
 
                 // Cooperative cancellation, checked at the node boundary before
@@ -532,7 +695,7 @@ fn build_graph(
                 if is_trigger {
                     // The trigger payload is pre-seeded into the state; no-op update
                     // (still fanning out if the trigger has parallel successors).
-                    return Ok(emit(json!({})));
+                    return Ok(emit(json!({}), None));
                 }
 
                 // Human-in-the-loop approval gate. A node whose config sets
@@ -583,7 +746,10 @@ fn build_graph(
                             // directly via a `Command::goto`; a single/mixed-port error
                             // edge falls back to a plain update the conditional-edge
                             // router consumes.
-                            return Ok(emit(items_update(&node.id, &[item], Some("error"))?));
+                            return Ok(emit(
+                                items_update(&node.id, &[item], Some("error"))?,
+                                Some("error"),
+                            ));
                         }
                         // No error branch to route to — fail the run so the denial
                         // is not silently swallowed.
@@ -621,7 +787,7 @@ fn build_graph(
                     }
                 }
 
-                let input = collect_input(&state, &predecessors);
+                let input = collect_input(&state, &incoming);
                 let run_meta = state.get("run").cloned().unwrap_or(Value::Null);
                 // Every completed node's output slot, keyed by id. Handed to the
                 // executor so `=`-expressions can address any upstream node
@@ -741,20 +907,39 @@ fn build_graph(
                         };
                         steps.lock().expect("steps mutex poisoned").push(step.clone());
                         observer.on_step_finish(&step);
-                        Ok(emit(items_update(
-                            &node.id,
-                            &output.items,
-                            output.port.as_deref(),
-                        )?))
+                        let port = output.port.as_deref();
+                        Ok(emit(
+                            items_update(&node.id, &output.items, port)?,
+                            port,
+                        ))
                     }
                     None => {
                         tracing::warn!(node = %node.id, "node failed after retries");
+                        // Recover the data-binding diagnostics of the failed
+                        // attempt: the executor computes them while resolving config
+                        // but discards them on the error path, so re-resolve the same
+                        // config against the same scope to capture which
+                        // `=`-expressions resolved to null (e.g. a null arg that made
+                        // the tool error). Deterministic given identical input, so
+                        // this reproduces the last failed attempt's diagnostics; done
+                        // without re-warning to avoid duplicate log lines.
+                        let diagnostics = {
+                            let ctx = NodeContext {
+                                node: &node,
+                                input: &input,
+                                run: &run_meta,
+                                nodes: &nodes_state,
+                                caps: &caps,
+                            };
+                            let scope = crate::nodes::expr_scope(&ctx);
+                            crate::expr::resolve_traced(&node.config, &scope).1
+                        };
                         let step = ExecutionStep {
                             node_id: node.id.clone(),
                             status: StepStatus::Error,
                             output: Value::Null,
                             duration_ms,
-                            diagnostics: Vec::new(),
+                            diagnostics,
                         };
                         steps.lock().expect("steps mutex poisoned").push(step.clone());
                         observer.on_step_finish(&step);
@@ -762,22 +947,20 @@ fn build_graph(
                         // ran (`max_attempts >= 1`); the `None` arm is unreachable
                         // but handled defensively — emit an empty update, never panic.
                         let Some(err) = last_err else {
-                            return Ok(emit(items_update(&node.id, &[], None)?));
+                            return Ok(emit(items_update(&node.id, &[], None)?, None));
                         };
                         match on_error {
                             // Turn the failure into data on the default port.
-                            "continue" => Ok(emit(items_update(
-                                &node.id,
-                                &[error_item(&node.id, &err)],
+                            "continue" => Ok(emit(
+                                items_update(&node.id, &[error_item(&node.id, &err)], None)?,
                                 None,
-                            )?)),
+                            )),
                             // Turn the failure into data on the `error` port so the
                             // graph can route it to a recovery sub-graph.
-                            "route" => Ok(emit(items_update(
-                                &node.id,
-                                &[error_item(&node.id, &err)],
+                            "route" => Ok(emit(
+                                items_update(&node.id, &[error_item(&node.id, &err)], Some("error"))?,
                                 Some("error"),
-                            )?)),
+                            )),
                             // "stop" (default) and any unknown policy fail the run.
                             _ => Err(TinyAgentsError::Graph(err.to_string())),
                         }
@@ -807,49 +990,73 @@ fn build_graph(
         if outgoing.is_empty() {
             // Leaf node: nothing routes out, so it terminates the run.
             builder = builder.add_edge(node.id.clone(), END);
-        } else if let Some(dests) = fan_out_targets(&node.id) {
-            // Parallel fan-out: the node's handler drives every successor with a
-            // `Command::goto`, so we only declare the destination hints here. A
-            // command-routing node may not also carry static/conditional edges,
-            // so nothing else is wired for it.
-            builder = builder.with_command_destinations(node.id.clone(), dests);
-        } else if let [edge] = outgoing.as_slice() {
-            // Single successor. If the target is a fan-in point (more than one
-            // predecessor, e.g. a `merge`) wire it as a waiting edge so it runs
-            // only once every predecessor has completed — the merge barrier.
-            // Otherwise a plain static edge.
-            let target = edge.to_node.clone();
-            if incoming_counts
-                .get(edge.to_node.as_str())
-                .copied()
-                .unwrap_or(0)
-                > 1
-            {
-                builder = builder.add_waiting_edge(node.id.clone(), target);
-            } else {
-                builder = builder.add_edge(node.id.clone(), target);
+            continue;
+        }
+        match handler_routing(graph, &node.id) {
+            HandlerRouting::FanOut(dests) => {
+                // Parallel fan-out: the node's handler drives every successor with
+                // a `Command::goto`, so we only declare the destination hints here.
+                // A command-routing node may not also carry static/conditional
+                // edges, so nothing else is wired for it.
+                builder = builder.with_command_destinations(node.id.clone(), dests);
             }
-        } else {
-            // Branching: distinct ports lower to conditional edges keyed on the
-            // port the node recorded into state (defaulting to `main`).
-            let from = node.id.clone();
-            let routes: Vec<(String, String)> = outgoing
-                .iter()
-                .map(|e| (e.from_port.clone(), e.to_node.clone()))
-                .collect();
-            builder = builder.add_conditional_edges(
-                node.id.clone(),
-                move |state: &Value| -> String {
-                    state
-                        .get("nodes")
-                        .and_then(|nodes| nodes.get(&from))
-                        .and_then(|slot| slot.get("port"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("main")
-                        .to_string()
-                },
-                routes,
-            );
+            HandlerRouting::PortCommand(groups) => {
+                // Mixed-port node (e.g. `main->a, main->b, error->h`): the handler
+                // drives the emitted port's successors via `Command::goto`, so
+                // declare the full destination set (union across ports) as hints.
+                // This keeps every same-port successor (both `a` and `b`) instead
+                // of the conditional-edge route map dropping the duplicate label.
+                let dests: Vec<String> = groups
+                    .into_iter()
+                    .flat_map(|(_, targets)| targets)
+                    .collect();
+                builder = builder.with_command_destinations(node.id.clone(), dests);
+            }
+            HandlerRouting::Plain => {
+                if let [edge] = outgoing.as_slice() {
+                    // Single successor. If the target is a fan-in point (more than
+                    // one predecessor, e.g. a `merge`) it normally gets a waiting
+                    // edge so it runs only once every predecessor completed — the
+                    // merge barrier. But a fan-in whose predecessors are mutually
+                    // exclusive conditional branches (a *conditional join*) must
+                    // not hard-wait on the untaken branch, which never arrives and
+                    // would deadlock the barrier; wire those with plain edges so the
+                    // taken branch fires the join. Everything else is a plain edge.
+                    let target = edge.to_node.clone();
+                    let is_fan_in = incoming_counts
+                        .get(edge.to_node.as_str())
+                        .copied()
+                        .unwrap_or(0)
+                        > 1;
+                    if is_fan_in && !is_conditional_join(graph, &target) {
+                        builder = builder.add_waiting_edge(node.id.clone(), target);
+                    } else {
+                        builder = builder.add_edge(node.id.clone(), target);
+                    }
+                } else {
+                    // Branching: distinct ports (one target each) lower to
+                    // conditional edges keyed on the port the node recorded into
+                    // state (defaulting to `main`).
+                    let from = node.id.clone();
+                    let routes: Vec<(String, String)> = outgoing
+                        .iter()
+                        .map(|e| (e.from_port.clone(), e.to_node.clone()))
+                        .collect();
+                    builder = builder.add_conditional_edges(
+                        node.id.clone(),
+                        move |state: &Value| -> String {
+                            state
+                                .get("nodes")
+                                .and_then(|nodes| nodes.get(&from))
+                                .and_then(|slot| slot.get("port"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("main")
+                                .to_string()
+                        },
+                        routes,
+                    );
+                }
+            }
         }
     }
 
