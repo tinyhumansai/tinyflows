@@ -222,7 +222,10 @@ mod tests {
             vec![Item::new(json!({ "assignee": "" }))],
         )
         .await;
-        assert_eq!(empty_port, "false", "an empty assignee value must route false");
+        assert_eq!(
+            empty_port, "false",
+            "an empty assignee value must route false"
+        );
 
         let (missing_port, _) = route(
             json!({ "field": "=item.assignee" }),
@@ -232,6 +235,37 @@ mod tests {
         assert_eq!(
             missing_port, "false",
             "a missing assignee resolves to null via the expression and routes false"
+        );
+    }
+
+    #[tokio::test]
+    async fn jq_expression_in_field_evaluates_correctly() {
+        // A hybrid `field` value: the simple-path shorthand's bare scope key
+        // (`item`, no leading dot) piped into real jq (`any(...)`). Before the
+        // bare-scope-key normalization fix, a bare `item` at the head of a jq
+        // program parsed as an undefined jq function, the program failed to
+        // compile, `run_jq` returned `Null`, and the condition routed every
+        // item to `false` regardless of its labels.
+        let field = json!({ "field": r#"=item.labels | any(.name == "urgent")"# });
+
+        let (with_label_port, _) = route(
+            field.clone(),
+            vec![Item::new(json!({ "labels": [{ "name": "urgent" }] }))],
+        )
+        .await;
+        assert_eq!(
+            with_label_port, "true",
+            "an item carrying the 'urgent' label must route true"
+        );
+
+        let (without_label_port, _) = route(
+            field,
+            vec![Item::new(json!({ "labels": [{ "name": "normal" }] }))],
+        )
+        .await;
+        assert_eq!(
+            without_label_port, "false",
+            "an item without the 'urgent' label must route false"
         );
     }
 }
