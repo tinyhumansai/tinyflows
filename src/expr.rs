@@ -37,6 +37,8 @@
 //! [jq]: https://jqlang.org/
 //! [`jaq`]: https://crates.io/crates/jaq
 
+use std::borrow::Cow;
+
 use jaq_core::load::{Arena, File, Loader};
 use jaq_core::{Compiler, Ctx, Vars, data, unwrap_valr};
 use jaq_json::Val;
@@ -298,10 +300,76 @@ fn is_ident(seg: &str) -> bool {
 /// and would leak host secrets into node output; it is stripped before compile.
 const EXPR_DENIED_BUILTINS: &[&str] = &["env"];
 
+/// Repairs a hybrid expression that mixes the simple-path shorthand's bare
+/// scope key (e.g. `item`, with no leading dot) with a real jq pipe, such as
+/// `"item.labels | any(.name == \"in progress\") | not"`. That whole string
+/// fails [`is_simple_dotted_path`] (it contains a `|`), so [`evaluate`] routes
+/// it to [`run_jq`] as a jq program — but a *bare* `item` at the start of a jq
+/// program parses as a call to an undefined jq function named `item`, so the
+/// program fails to compile and [`run_jq`] silently returns [`Value::Null`]
+/// (which, fed into a `condition` node's truthiness check, routes every item
+/// to `false`).
+///
+/// If `program` starts with a bare identifier
+/// (`[A-Za-z_][A-Za-z0-9_-]*`) that is a **top-level key of `scope`** (e.g.
+/// `item`/`items`/`run`/`nodes`, per `nodes::expr_scope_for`), and the
+/// character immediately following that identifier is `.`, `|`, `[`, ` `, or
+/// end-of-string, this prepends a `.` so the identifier is read as a jq field
+/// access on the scope root (`.item...`) instead of a function call. A
+/// following `(` is deliberately excluded from that boundary set: it marks a
+/// jq function *call* (`any(...)`, `map(...)`) rather than a field reference,
+/// so `any(...)`/`map(...)` are left untouched even if `scope` happened to
+/// have a same-named top-level key.
+///
+/// Programs that do not start with a scope-key identifier (leading-dot jq
+/// like `.item...`, or an identifier scope doesn't recognize) are returned
+/// unchanged — this only changes expressions that would otherwise
+/// unconditionally fail to compile and resolve to `Null`. Plain dotted paths
+/// with no jq (`"item.labels"`, no `|`/`[`/space) never reach `run_jq` at all:
+/// [`evaluate`] takes the [`is_simple_dotted_path`] fast path for those.
+fn normalize_bare_scope_ref<'a>(program: &'a str, scope: &Value) -> Cow<'a, str> {
+    let mut chars = program.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return Cow::Borrowed(program);
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Cow::Borrowed(program);
+    }
+
+    // Walk the rest of the leading identifier (ASCII letters/digits/`_`/`-`),
+    // tracking the byte offset just past its last matching char.
+    let mut end = first.len_utf8();
+    for (i, c) in chars {
+        if c == '_' || c == '-' || c.is_ascii_alphanumeric() {
+            end = i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    let ident = &program[..end];
+    if scope.get(ident).is_none() {
+        return Cow::Borrowed(program);
+    }
+
+    let boundary_ok = match program[end..].chars().next() {
+        None => true,
+        Some(c) => matches!(c, '.' | '|' | '[' | ' '),
+    };
+    if boundary_ok {
+        Cow::Owned(format!(".{program}"))
+    } else {
+        Cow::Borrowed(program)
+    }
+}
+
 /// Compiles `program` as a jq filter and runs it once against `scope` (the jq
 /// input `.`), returning the first output value. Any compile/run failure,
 /// non-JSON output, or empty output yields [`Value::Null`]; this never panics.
 fn run_jq(program: &str, scope: &Value) -> Value {
+    let program = normalize_bare_scope_ref(program, scope);
+    let program = program.as_ref();
+
     // Convert the scope into a jq value; bail to Null if it cannot be represented.
     let Ok(input) = serde_json::from_value::<Val>(scope.clone()) else {
         return Value::Null;
@@ -607,6 +675,80 @@ mod tests {
         let scope = json!({ "item": {} });
         assert_eq!(evaluate(&json!("=.item |"), &scope), Value::Null);
         assert_eq!(evaluate(&json!("=(((("), &scope), Value::Null);
+    }
+
+    // --- bare-scope-key normalization (hybrid shorthand + jq pipe) ---------
+
+    #[test]
+    fn bare_scope_key_with_jq_pipe_is_normalized() {
+        // `item.labels | any(...) | not` is a hybrid: no leading dot (like the
+        // simple-path shorthand), but it has a jq pipe, so it fails
+        // `is_simple_dotted_path` and falls to `run_jq`, where a bare `item`
+        // would otherwise parse as an undefined jq function and fail to
+        // compile. It must be normalized to `.item...` and evaluate for real.
+        let program = r#"=item.labels | any(.name == "in progress") | not"#;
+
+        let with_label = json!({
+            "item": { "labels": [{ "name": "in progress" }] },
+        });
+        assert_eq!(
+            evaluate(&json!(program), &with_label),
+            json!(false),
+            "an item carrying the 'in progress' label must route/evaluate to false"
+        );
+
+        let without_label = json!({
+            "item": { "labels": [{ "name": "done" }] },
+        });
+        assert_eq!(
+            evaluate(&json!(program), &without_label),
+            json!(true),
+            "an item without the 'in progress' label must route/evaluate to true"
+        );
+    }
+
+    #[test]
+    fn bare_scope_key_normalization_does_not_break_leading_dot() {
+        // An expression that already starts with `.` is untouched by
+        // normalization (its first char is `.`, not an identifier char), so
+        // no double-dot (`..item`) is ever introduced.
+        let scope = json!({ "item": { "labels": [{ "name": "urgent" }] } });
+        assert_eq!(
+            evaluate(&json!(r#"=.item.labels | any(.name == "urgent")"#), &scope),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn bare_scope_key_normalization_does_not_clobber_jq_builtins() {
+        // `any(` is followed by `(`, which is excluded from the normalization
+        // boundary set, so a jq builtin call is never mistaken for a bare
+        // scope-key field reference. This expression already has its leading
+        // dot; it must keep evaluating exactly as jq intends.
+        let scope = json!({ "item": { "xs": [1, 2, 3] } });
+        assert_eq!(
+            evaluate(&json!("=.item.xs | any(. > 2)"), &scope),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn bare_scope_key_with_pipe_only() {
+        // `items | length` (no leading dot): `items` is a top-level scope key
+        // and the boundary char is a space, so it normalizes to
+        // `.items | length` and counts the array.
+        let scope = json!({ "items": [1, 2, 3, 4] });
+        assert_eq!(evaluate(&json!("=items | length"), &scope), json!(4));
+    }
+
+    #[test]
+    fn bare_ident_not_in_scope_stays_as_is() {
+        // `foobar` is not a top-level key of scope, so normalization leaves
+        // the program untouched; it still fails to compile as jq (bare
+        // `foobar` is an undefined function) and yields Null, same as before
+        // this fix.
+        let scope = json!({ "item": {} });
+        assert_eq!(evaluate(&json!("=foobar.x | length"), &scope), Value::Null);
     }
 
     // --- resolve (recursive config data-binding) --------------------------
