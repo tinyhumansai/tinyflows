@@ -1066,24 +1066,69 @@ fn build_graph(
             }
             HandlerRouting::Plain => {
                 if let [edge] = outgoing.as_slice() {
-                    // Single successor. If the target is a fan-in point (more than
-                    // one predecessor, e.g. a `merge`) it normally gets a waiting
-                    // edge so it runs only once every predecessor completed — the
-                    // merge barrier. But a fan-in whose predecessors are mutually
-                    // exclusive conditional branches (a *conditional join*) must
-                    // not hard-wait on the untaken branch, which never arrives and
-                    // would deadlock the barrier; wire those with plain edges so the
-                    // taken branch fires the join. Everything else is a plain edge.
                     let target = edge.to_node.clone();
-                    let is_fan_in = incoming_counts
-                        .get(edge.to_node.as_str())
-                        .copied()
-                        .unwrap_or(0)
-                        > 1;
-                    if is_fan_in && !is_conditional_join(graph, &target) {
-                        builder = builder.add_waiting_edge(node.id.clone(), target);
+                    if edge.from_port != "main" {
+                        // A single outgoing edge whose port is NOT the default
+                        // `main` (e.g. a `condition` wired with only a `true`
+                        // edge, no `false` edge) is not a plain pass-through: the
+                        // node still records which port it emitted on (see
+                        // `items_update`), and `collect_input` port-matches an
+                        // edge's `from_port` against that emitted port before
+                        // handing items to the successor. Wiring this as an
+                        // unconditional `add_edge` (the old behavior) made the
+                        // successor run on *every* execution — including when the
+                        // node emitted the other port — but with an EMPTY input,
+                        // since `collect_input` silently drops the mismatched
+                        // items. Downstream `=item`/`=item.<field>` expressions
+                        // then resolve to `null` instead of the run simply ending.
+                        //
+                        // Fix: lower it as a conditional edge (mirroring the
+                        // multi-edge branch below) that only follows `target` when
+                        // the emitted port matches `edge.from_port`, and falls
+                        // back to `END` otherwise. A `true`-only condition thus
+                        // behaves as a FILTER — it runs the successor (with
+                        // items) on `true`, and terminates the run to `END` on
+                        // `false` — instead of a leaky always-on edge.
+                        let from = node.id.clone();
+                        let from_port = edge.from_port.clone();
+                        builder = builder.add_conditional_edges(
+                            node.id.clone(),
+                            move |state: &Value| -> String {
+                                let emitted = state
+                                    .get("nodes")
+                                    .and_then(|nodes| nodes.get(&from))
+                                    .and_then(|slot| slot.get("port"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("main");
+                                if emitted == from_port.as_str() {
+                                    from_port.clone()
+                                } else {
+                                    END.to_string()
+                                }
+                            },
+                            [(edge.from_port.clone(), target), (END.to_string(), END.to_string())],
+                        );
                     } else {
-                        builder = builder.add_edge(node.id.clone(), target);
+                        // Single successor on the default `main` port. If the
+                        // target is a fan-in point (more than one predecessor,
+                        // e.g. a `merge`) it normally gets a waiting edge so it
+                        // runs only once every predecessor completed — the merge
+                        // barrier. But a fan-in whose predecessors are mutually
+                        // exclusive conditional branches (a *conditional join*)
+                        // must not hard-wait on the untaken branch, which never
+                        // arrives and would deadlock the barrier; wire those with
+                        // plain edges so the taken branch fires the join.
+                        // Everything else is a plain edge.
+                        let is_fan_in = incoming_counts
+                            .get(edge.to_node.as_str())
+                            .copied()
+                            .unwrap_or(0)
+                            > 1;
+                        if is_fan_in && !is_conditional_join(graph, &target) {
+                            builder = builder.add_waiting_edge(node.id.clone(), target);
+                        } else {
+                            builder = builder.add_edge(node.id.clone(), target);
+                        }
                     }
                 } else {
                     // Branching: distinct ports (one target each) lower to
@@ -2779,6 +2824,87 @@ mod tests {
         assert!(
             outcome.output["nodes"]["no"].is_null(),
             "false branch must not run"
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_single_true_edge_filters_on_false() {
+        // Regression for B15: a `condition` wired with only a `true` edge (no
+        // `false` edge — the common "gate/filter" shape) used to be lowered as
+        // an UNCONDITIONAL plain edge, so `sink` ran on *every* execution —
+        // including when the condition emitted `false` — but with an EMPTY
+        // input, since `collect_input` port-matches the edge's `true` against
+        // the emitted `false` and drops the items. It must now act as a FILTER:
+        // run `sink` (with items) when the branch is taken, and terminate the
+        // run to END — never running `sink` at all — when it isn't.
+        let mut condition = node("c", NodeKind::Condition);
+        condition.config = json!({ "field": "active" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                condition,
+                node("sink", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "c"), port_edge("c", "true", "sink")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        let truthy = run(&compiled, json!({ "active": true }), &caps)
+            .await
+            .expect("run");
+        assert_eq!(
+            truthy.output["nodes"]["sink"]["items"][0]["json"],
+            json!({ "active": true }),
+            "true branch must run sink WITH the item, not an empty input"
+        );
+
+        let falsey = run(&compiled, json!({ "active": false }), &caps)
+            .await
+            .expect("run");
+        assert!(
+            falsey.output["nodes"]["sink"].is_null(),
+            "false branch must terminate the run to END without running sink"
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_single_true_edge_item_flows_through() {
+        // trigger -> split_out (per-item fan-out) -> condition(field="assignee",
+        // true-only edge) -> sink. Proves the B15 fix end-to-end through a
+        // realistic shape: a downstream node's `=item.<field>` must see the real
+        // item, not null, when the guarding condition took the `true` branch.
+        let mut condition = node("c", NodeKind::Condition);
+        condition.config = json!({ "field": "assignee" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("s", NodeKind::SplitOut),
+                condition,
+                node("sink", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "s"), edge("s", "c"), port_edge("c", "true", "sink")],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+
+        // Truthy assignee: the item must flow all the way through to `sink`.
+        let assigned = run(&compiled, json!({ "assignee": "alice" }), &caps)
+            .await
+            .expect("run");
+        assert_eq!(
+            assigned.output["nodes"]["sink"]["items"][0]["json"]["assignee"],
+            json!("alice"),
+            "true branch must carry the real item through — not starve it to null"
+        );
+
+        // Missing assignee (falsey): `sink` must not run at all.
+        let unassigned = run(&compiled, json!({}), &caps).await.expect("run");
+        assert!(
+            unassigned.output["nodes"]["sink"].is_null(),
+            "false branch must not execute the guarded successor"
         );
     }
 

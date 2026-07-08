@@ -1,9 +1,11 @@
 //! The `condition` node: a two-way IF branch.
 
 use async_trait::async_trait;
+use serde_json::Value;
 
 use crate::error::Result;
-use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
+use crate::expr;
+use crate::nodes::{NodeContext, NodeExecutor, NodeOutput, expr_scope};
 
 /// Two-way conditional branch, emitting on the `true` or `false` port.
 #[derive(Debug, Default, Clone)]
@@ -12,14 +14,26 @@ pub struct ConditionNode;
 #[async_trait]
 impl NodeExecutor for ConditionNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
-        let field = ctx
-            .node
-            .config
-            .get("field")
-            .and_then(serde_json::Value::as_str);
+        let field = ctx.node.config.get("field").and_then(Value::as_str);
+        // `field` supports two shapes:
+        // - a plain string (e.g. `"assignee"`) — a literal key looked up on the
+        //   item's JSON, as before (backward-compatible);
+        // - an `=`-expression (e.g. `"=item.assignee"`) — resolved against the
+        //   node's expression scope (`item`/`items`/`run`/`nodes`) first, and
+        //   the *resolved value itself* is what gets truthiness-checked. Without
+        //   this, an expression field was read as a raw literal key
+        //   (`item.json.get("=item.assignee")`), which never matches any real
+        //   key and always routes `false`.
+        let resolved_expr_value = field.filter(|f| expr::is_expression(f)).map(|f| {
+            let scope = expr_scope(&ctx);
+            expr::evaluate(&Value::String(f.to_string()), &scope)
+        });
         let truthy = ctx.input.first().is_some_and(|item| {
+            if let Some(value) = &resolved_expr_value {
+                return is_truthy(value);
+            }
             let value = match field {
-                Some(f) => item.json.get(f).unwrap_or(&serde_json::Value::Null),
+                Some(f) => item.json.get(f).unwrap_or(&Value::Null),
                 None => &item.json,
             };
             is_truthy(value)
@@ -185,5 +199,39 @@ mod tests {
         let (port, items) = route(json!({ "field": "f" }), input.clone()).await;
         assert_eq!(port, "true", "first item decides the branch");
         assert_eq!(items, input, "all input items are routed through unchanged");
+    }
+
+    #[tokio::test]
+    async fn expression_in_field_resolves_and_checks_truthiness() {
+        // `field: "=item.assignee"` must be resolved against the expression
+        // scope and the RESOLVED VALUE's truthiness checked — not a literal key
+        // lookup for a key named `"=item.assignee"` (which would always be
+        // absent and always route `false`, regardless of the real assignee).
+        let (truthy_port, _) = route(
+            json!({ "field": "=item.assignee" }),
+            vec![Item::new(json!({ "assignee": "alice" }))],
+        )
+        .await;
+        assert_eq!(
+            truthy_port, "true",
+            "a non-empty assignee value must route true"
+        );
+
+        let (empty_port, _) = route(
+            json!({ "field": "=item.assignee" }),
+            vec![Item::new(json!({ "assignee": "" }))],
+        )
+        .await;
+        assert_eq!(empty_port, "false", "an empty assignee value must route false");
+
+        let (missing_port, _) = route(
+            json!({ "field": "=item.assignee" }),
+            vec![Item::new(json!({}))],
+        )
+        .await;
+        assert_eq!(
+            missing_port, "false",
+            "a missing assignee resolves to null via the expression and routes false"
+        );
     }
 }
