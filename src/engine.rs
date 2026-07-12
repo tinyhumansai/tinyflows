@@ -353,14 +353,18 @@ fn reaches_via_port(
 }
 
 /// Builds the partial state update a node contributes:
-/// `{ "nodes": { id: { items, port? } } }`. The chosen output `port` is recorded
-/// only when the node picked one, so conditional edges can route on it.
+/// `{ "nodes": { id: { items, port } } }`. The output `port` is explicitly
+/// cleared when the node uses the default route. This matters because the graph
+/// reducer merges node slots key-by-key: omitting `port` would preserve a port
+/// emitted by an earlier activation and could misroute loops after a node
+/// recovers from an error.
 fn items_update(node_id: &str, items: &[Item], port: Option<&str>) -> tinyagents::Result<Value> {
     let mut slot = Map::new();
     slot.insert("items".to_string(), serde_json::to_value(items)?);
-    if let Some(port) = port {
-        slot.insert("port".to_string(), Value::String(port.to_string()));
-    }
+    slot.insert(
+        "port".to_string(),
+        port.map_or(Value::Null, |port| Value::String(port.to_string())),
+    );
     let mut nodes = Map::new();
     nodes.insert(node_id.to_string(), Value::Object(slot));
     let mut root = Map::new();
@@ -1106,7 +1110,10 @@ fn build_graph(
                                     END.to_string()
                                 }
                             },
-                            [(edge.from_port.clone(), target), (END.to_string(), END.to_string())],
+                            [
+                                (edge.from_port.clone(), target),
+                                (END.to_string(), END.to_string()),
+                            ],
                         );
                     } else {
                         // Single successor on the default `main` port. If the
@@ -1876,6 +1883,12 @@ mod tests {
             ports: Vec::new(),
             position: None,
         }
+    }
+
+    #[test]
+    fn default_route_update_explicitly_clears_a_previous_port() {
+        let update = items_update("worker", &[], None).expect("serialize update");
+        assert_eq!(update["nodes"]["worker"]["port"], Value::Null);
     }
 
     #[tokio::test]
@@ -2884,7 +2897,11 @@ mod tests {
                 condition,
                 node("sink", NodeKind::OutputParser),
             ],
-            edges: vec![edge("t", "s"), edge("s", "c"), port_edge("c", "true", "sink")],
+            edges: vec![
+                edge("t", "s"),
+                edge("s", "c"),
+                port_edge("c", "true", "sink"),
+            ],
             ..Default::default()
         };
         let compiled = compile(&graph).expect("compile");
