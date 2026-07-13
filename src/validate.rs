@@ -113,6 +113,32 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
         }
     }
 
+    // A `condition` node's outgoing edges must emit on `from_port` "true" or
+    // "false" — routing is keyed EXCLUSIVELY on `from_port` (see
+    // `engine::outgoing_by_port` / `handler_routing`), so any other value
+    // (most commonly the default `"main"`, from an authoring mistake that put
+    // the branch label on `to_port` instead) is a hard authoring bug: it
+    // silently degrades to a parallel `FanOut` that drives BOTH branches
+    // unconditionally, with no runtime error or warning to point at the
+    // mistake. Caught here, at the door, instead.
+    let condition_node_ids: HashSet<&str> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Condition)
+        .map(|n| n.id.as_str())
+        .collect();
+    for edge in &graph.edges {
+        if condition_node_ids.contains(edge.from_node.as_str())
+            && edge.from_port != "true"
+            && edge.from_port != "false"
+        {
+            return Err(ValidationError::InvalidConditionRouting {
+                node: edge.from_node.clone(),
+                from_port: edge.from_port.clone(),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -455,6 +481,153 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(validate(&graph), Ok(()));
+    }
+
+    fn condition_node(id: &str) -> Node {
+        node(id, NodeKind::Condition)
+    }
+
+    #[test]
+    fn accepts_condition_with_branch_label_on_from_port() {
+        // The CORRECT shape (B23/B24): the branch label lives on `from_port`,
+        // `to_port` stays `"main"`.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                condition_node("gate"),
+                node("yes", NodeKind::Agent),
+                node("no", NodeKind::Agent),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "gate".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "true".to_string(),
+                    to_node: "yes".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "false".to_string(),
+                    to_node: "no".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn accepts_condition_with_only_one_branch_wired() {
+        // Wiring only the `true` (or only the `false`) branch is legal — the
+        // other simply dead-ends.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                condition_node("gate"),
+                node("yes", NodeKind::Agent),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "gate".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "true".to_string(),
+                    to_node: "yes".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn rejects_condition_with_branch_label_on_to_port_instead_of_from_port() {
+        // The BAD shape (B23/B24 — the exact bug the workflow_builder agent
+        // produced live): both edges share `from_port: "main"` with the branch
+        // label on `to_port` instead. Without this check, `handler_routing`
+        // would see one `from_port` group with two targets and classify it as
+        // a parallel `FanOut`, silently driving BOTH branches unconditionally.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                condition_node("gate"),
+                node("yes", NodeKind::Agent),
+                node("no", NodeKind::Agent),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "gate".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "yes".to_string(),
+                    to_port: "true".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "no".to_string(),
+                    to_port: "false".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::InvalidConditionRouting {
+                node: "gate".to_string(),
+                from_port: "main".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_condition_with_unrecognized_from_port() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                condition_node("gate"),
+                node("other", NodeKind::Agent),
+            ],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "gate".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "gate".to_string(),
+                    from_port: "maybe".to_string(),
+                    to_node: "other".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::InvalidConditionRouting {
+                node: "gate".to_string(),
+                from_port: "maybe".to_string(),
+            })
+        );
     }
 
     #[test]
