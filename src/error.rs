@@ -74,6 +74,31 @@ pub enum ValidationError {
         /// The highest schema version this crate understands.
         supported: u32,
     },
+
+    /// A `condition` node has an outgoing edge whose `from_port` is not one of
+    /// its two declared branch ports (`"true"` / `"false"`).
+    ///
+    /// Routing is keyed EXCLUSIVELY on `from_port` (see `engine::outgoing_by_port`
+    /// / `handler_routing`) — `to_port` is never consulted to decide which
+    /// successor fires. A condition node authored with the branch label on
+    /// `to_port` instead (e.g. `{from_port:"main", to_port:"true"}` and
+    /// `{from_port:"main", to_port:"false"}`) puts both edges in the SAME
+    /// `from_port` group, which `handler_routing` classifies as a parallel
+    /// `FanOut` — silently driving BOTH branches unconditionally instead of
+    /// gating on the condition's actual result. This is a HARD authoring
+    /// mistake, not a runtime data issue, so it is rejected here rather than
+    /// left as a silent no-op condition.
+    #[error(
+        "condition node {node} has an outgoing edge with from_port {from_port:?} — condition \
+         edges must emit on from_port \"true\" or \"false\" (the branch label belongs on \
+         from_port, not to_port; routing is keyed exclusively on from_port)"
+    )]
+    InvalidConditionRouting {
+        /// The offending condition node's id.
+        node: String,
+        /// The edge's actual (invalid) `from_port` value.
+        from_port: String,
+    },
 }
 
 /// Errors produced while compiling or running a workflow.
@@ -159,6 +184,16 @@ mod tests {
             .to_string(),
             "schema_version 5 is newer than this crate supports (max 1); \
              upgrade tinyflows to load this graph"
+        );
+        assert_eq!(
+            ValidationError::InvalidConditionRouting {
+                node: "gate".to_string(),
+                from_port: "main".to_string(),
+            }
+            .to_string(),
+            "condition node gate has an outgoing edge with from_port \"main\" — condition \
+             edges must emit on from_port \"true\" or \"false\" (the branch label belongs on \
+             from_port, not to_port; routing is keyed exclusively on from_port)"
         );
     }
 
