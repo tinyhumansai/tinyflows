@@ -101,6 +101,52 @@ pub enum ValidationError {
     },
 }
 
+impl ValidationError {
+    /// A stable, machine-readable code for this error variant.
+    ///
+    /// Unlike the human-readable [`Display`](std::fmt::Display) form, this is a
+    /// fixed `snake_case` identifier safe for a host to switch on or surface to
+    /// an agent as a structured `code` field. It never changes for a given
+    /// variant.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::MissingTrigger => "missing_trigger",
+            Self::MultipleTriggers(_) => "multiple_triggers",
+            Self::UnknownNode(_) => "unknown_node",
+            Self::DuplicateNodeId(_) => "duplicate_node_id",
+            Self::IllegalCycle(_) => "illegal_cycle",
+            Self::InvalidNodeConfig { .. } => "invalid_node_config",
+            Self::MissingErrorRoute(_) => "missing_error_route",
+            Self::DuplicateEdge { .. } => "duplicate_edge",
+            Self::InvalidOnError { .. } => "invalid_on_error",
+            Self::SchemaVersionTooNew { .. } => "schema_version_too_new",
+            Self::InvalidConditionRouting { .. } => "invalid_condition_routing",
+        }
+    }
+
+    /// The node id this error is anchored to, when it is node-specific.
+    ///
+    /// Returns `None` for graph-wide errors (`MissingTrigger`,
+    /// `SchemaVersionTooNew`) and for `MultipleTriggers` (which carries many
+    /// ids in its payload rather than a single anchor). Lets a host attach the
+    /// error to the right node in a structured validation report.
+    pub fn node_id(&self) -> Option<&str> {
+        match self {
+            Self::UnknownNode(id)
+            | Self::DuplicateNodeId(id)
+            | Self::IllegalCycle(id)
+            | Self::MissingErrorRoute(id) => Some(id),
+            Self::InvalidNodeConfig { node, .. }
+            | Self::InvalidOnError { node, .. }
+            | Self::InvalidConditionRouting { node, .. } => Some(node),
+            Self::DuplicateEdge { from_node, .. } => Some(from_node),
+            Self::MissingTrigger | Self::MultipleTriggers(_) | Self::SchemaVersionTooNew { .. } => {
+                None
+            }
+        }
+    }
+}
+
 /// Errors produced while compiling or running a workflow.
 #[derive(Debug, Error)]
 pub enum EngineError {

@@ -20,11 +20,13 @@
 #![warn(missing_docs)]
 
 pub mod caps;
+pub mod catalog;
 pub mod compiler;
 pub mod data;
 pub mod engine;
 pub mod error;
 pub mod expr;
+pub mod graph_ops;
 pub mod migrate;
 pub mod model;
 pub mod nodes;
