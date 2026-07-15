@@ -16,12 +16,36 @@ use crate::model::{NodeKind, WorkflowGraph};
 /// A1–A2.
 ///
 /// # Errors
-/// Returns the first [`ValidationError`] encountered.
+/// Returns the first [`ValidationError`] encountered. For a full list of every
+/// structural problem in one pass (so an author can fix them all at once
+/// instead of one round-trip per error), use [`validate_all`]; this function is
+/// exactly its first element and is kept for the fail-fast compile path.
 pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
+    match validate_all(graph).into_iter().next() {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// Validates a workflow graph's structure, collecting **every** independent
+/// error in one pass.
+///
+/// Returns an empty `Vec` for a valid graph. The checks are ordered
+/// deterministically (duplicate ids → trigger count → edge integrity →
+/// `on_error` policy → per-kind config → condition routing), and every error is
+/// self-contained (no check can panic on a graph that failed an earlier one),
+/// so accumulating is safe. The first element is identical to what
+/// [`validate`] returns, preserving the historical single-error contract.
+///
+/// This is what a host should surface to an author or agent: fixing five
+/// problems then costs one validate call, not five.
+pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+
     let mut seen = HashSet::new();
     for node in &graph.nodes {
         if !seen.insert(node.id.as_str()) {
-            return Err(ValidationError::DuplicateNodeId(node.id.clone()));
+            errors.push(ValidationError::DuplicateNodeId(node.id.clone()));
         }
     }
 
@@ -32,18 +56,18 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
         .map(|n| n.id.clone())
         .collect();
     match triggers.len() {
-        0 => return Err(ValidationError::MissingTrigger),
+        0 => errors.push(ValidationError::MissingTrigger),
         1 => {}
-        _ => return Err(ValidationError::MultipleTriggers(triggers)),
+        _ => errors.push(ValidationError::MultipleTriggers(triggers)),
     }
 
     let mut seen_edges = HashSet::new();
     for edge in &graph.edges {
         if graph.node(&edge.from_node).is_none() {
-            return Err(ValidationError::UnknownNode(edge.from_node.clone()));
+            errors.push(ValidationError::UnknownNode(edge.from_node.clone()));
         }
         if graph.node(&edge.to_node).is_none() {
-            return Err(ValidationError::UnknownNode(edge.to_node.clone()));
+            errors.push(ValidationError::UnknownNode(edge.to_node.clone()));
         }
         // Reject two identical edges (same source node/port and destination
         // node/port); a redundant duplicate is almost always an authoring slip.
@@ -53,7 +77,7 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
             edge.to_node.as_str(),
             edge.to_port.as_str(),
         )) {
-            return Err(ValidationError::DuplicateEdge {
+            errors.push(ValidationError::DuplicateEdge {
                 from_node: edge.from_node.clone(),
                 from_port: edge.from_port.clone(),
                 to_node: edge.to_node.clone(),
@@ -78,11 +102,11 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
                     .iter()
                     .any(|e| e.from_node == node.id && e.from_port == "error");
                 if !has_error_edge {
-                    return Err(ValidationError::MissingErrorRoute(node.id.clone()));
+                    errors.push(ValidationError::MissingErrorRoute(node.id.clone()));
                 }
             }
             other => {
-                return Err(ValidationError::InvalidOnError {
+                errors.push(ValidationError::InvalidOnError {
                     node: node.id.clone(),
                     value: other.to_string(),
                 });
@@ -103,7 +127,7 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|s| !s.is_empty());
             if has_inline == has_ref {
-                return Err(ValidationError::InvalidNodeConfig {
+                errors.push(ValidationError::InvalidNodeConfig {
                     node: node.id.clone(),
                     reason: "sub_workflow requires exactly one of `workflow` (inline) or \
                              `workflow_id` (reference)"
@@ -132,14 +156,14 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
             && edge.from_port != "true"
             && edge.from_port != "false"
         {
-            return Err(ValidationError::InvalidConditionRouting {
+            errors.push(ValidationError::InvalidConditionRouting {
                 node: edge.from_node.clone(),
                 from_port: edge.from_port.clone(),
             });
         }
     }
 
-    Ok(())
+    errors
 }
 
 #[cfg(test)]
@@ -641,6 +665,142 @@ mod tests {
         assert_eq!(
             validate(&graph),
             Err(ValidationError::DuplicateNodeId("dup".to_string()))
+        );
+    }
+
+    #[test]
+    fn validate_all_is_empty_for_a_valid_graph() {
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), node("a", NodeKind::Agent)],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "a".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(validate_all(&graph).is_empty());
+    }
+
+    #[test]
+    fn validate_all_first_element_matches_validate() {
+        // The single-error contract of `validate` must stay exactly the first
+        // element of `validate_all` — same graph, same lead error.
+        let graph = WorkflowGraph {
+            nodes: vec![node("dup", NodeKind::Agent), node("dup", NodeKind::Agent)],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_all(&graph).into_iter().next(),
+            validate(&graph).err()
+        );
+    }
+
+    #[test]
+    fn validate_all_accumulates_independent_errors() {
+        // A graph riddled with problems: no trigger, a duplicate node id, a
+        // dangling edge, an unknown on_error value, and a mis-wired condition.
+        // One pass should surface all of them, not just the first.
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("dup", NodeKind::Agent),
+                node("dup", NodeKind::Agent),
+                condition_node("gate"),
+                tool_node("x", serde_json::json!({ "on_error": "explode" })),
+            ],
+            edges: vec![Edge {
+                from_node: "gate".to_string(),
+                from_port: "maybe".to_string(),
+                to_node: "ghost".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        };
+        let errors = validate_all(&graph);
+        assert!(
+            errors.contains(&ValidationError::DuplicateNodeId("dup".to_string())),
+            "missing duplicate-id error in {errors:?}"
+        );
+        assert!(
+            errors.contains(&ValidationError::MissingTrigger),
+            "missing trigger error in {errors:?}"
+        );
+        assert!(
+            errors.contains(&ValidationError::UnknownNode("ghost".to_string())),
+            "missing unknown-node error in {errors:?}"
+        );
+        assert!(
+            errors.contains(&ValidationError::InvalidOnError {
+                node: "x".to_string(),
+                value: "explode".to_string(),
+            }),
+            "missing invalid-on_error error in {errors:?}"
+        );
+        assert!(
+            errors.contains(&ValidationError::InvalidConditionRouting {
+                node: "gate".to_string(),
+                from_port: "maybe".to_string(),
+            }),
+            "missing condition-routing error in {errors:?}"
+        );
+        // Five distinct problems, five errors — no fail-fast truncation.
+        assert!(
+            errors.len() >= 5,
+            "expected >=5 accumulated errors, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_all_reports_every_duplicate_and_every_dangling_edge() {
+        // Two separate dangling edges must both be reported (fail-fast would
+        // stop at the first).
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger)],
+            edges: vec![
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "ghost1".to_string(),
+                    to_port: "main".to_string(),
+                },
+                Edge {
+                    from_node: "t".to_string(),
+                    from_port: "main".to_string(),
+                    to_node: "ghost2".to_string(),
+                    to_port: "main".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let errors = validate_all(&graph);
+        assert!(errors.contains(&ValidationError::UnknownNode("ghost1".to_string())));
+        assert!(errors.contains(&ValidationError::UnknownNode("ghost2".to_string())));
+    }
+
+    #[test]
+    fn validation_error_code_and_node_id_accessors() {
+        assert_eq!(ValidationError::MissingTrigger.code(), "missing_trigger");
+        assert_eq!(ValidationError::MissingTrigger.node_id(), None);
+        assert_eq!(
+            ValidationError::UnknownNode("ghost".to_string()).code(),
+            "unknown_node"
+        );
+        assert_eq!(
+            ValidationError::UnknownNode("ghost".to_string()).node_id(),
+            Some("ghost")
+        );
+        assert_eq!(
+            ValidationError::InvalidConditionRouting {
+                node: "gate".to_string(),
+                from_port: "main".to_string(),
+            }
+            .node_id(),
+            Some("gate")
+        );
+        assert_eq!(
+            ValidationError::MultipleTriggers(vec!["a".to_string()]).node_id(),
+            None
         );
     }
 }
