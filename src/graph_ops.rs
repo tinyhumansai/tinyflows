@@ -40,14 +40,16 @@ pub enum GraphOp {
     /// `config` are recursively merged onto the node's existing config, and a
     /// `null` value deletes that key. Fails if no node has `id`.
     UpdateNodeConfig {
-        /// The target node id.
+        /// The target node id. Accepts the alias `node_id`.
+        #[serde(alias = "node_id")]
         id: NodeId,
         /// The partial config to merge (a `null` leaf deletes the key).
         config: Value,
     },
     /// Replace a node's human-readable `name`. Fails if no node has `id`.
     SetNodeName {
-        /// The target node id.
+        /// The target node id. Accepts the alias `node_id`.
+        #[serde(alias = "node_id")]
         id: NodeId,
         /// The new display name.
         name: String,
@@ -59,14 +61,17 @@ pub enum GraphOp {
     /// node that others bind to should re-point those bindings itself. Fails if
     /// `new_id` is empty or already in use, or if no node has `id`.
     RenameNode {
-        /// The current node id.
+        /// The current node id. Accepts the alias `node_id`.
+        #[serde(alias = "node_id")]
         id: NodeId,
-        /// The new node id.
+        /// The new node id. Accepts the alias `new_node_id`.
+        #[serde(alias = "new_node_id")]
         new_id: NodeId,
     },
     /// Remove a node and every edge incident on it. Fails if no node has `id`.
     RemoveNode {
-        /// The node id to remove.
+        /// The node id to remove. Accepts the alias `node_id`.
+        #[serde(alias = "node_id")]
         id: NodeId,
     },
     /// Add a directed edge. Fails if either endpoint node is missing or the
@@ -91,7 +96,8 @@ pub enum GraphOp {
     },
     /// Set (or move) a node's canvas position. Fails if no node has `id`.
     SetNodePosition {
-        /// The target node id.
+        /// The target node id. Accepts the alias `node_id`.
+        #[serde(alias = "node_id")]
         id: NodeId,
         /// The new canvas position.
         position: Position,
@@ -648,5 +654,85 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn id_fields_accept_the_node_id_alias() {
+        // remove_node { node_id } is a natural guess and must round-trip to `id`.
+        let op: GraphOp = serde_json::from_value(json!({
+            "op": "remove_node", "node_id": "trigger"
+        }))
+        .unwrap();
+        assert_eq!(
+            op,
+            GraphOp::RemoveNode {
+                id: "trigger".into()
+            }
+        );
+
+        // update_node_config { node_id, config }
+        let op: GraphOp = serde_json::from_value(json!({
+            "op": "update_node_config", "node_id": "a", "config": { "prompt": "hi" }
+        }))
+        .unwrap();
+        assert_eq!(
+            op,
+            GraphOp::UpdateNodeConfig {
+                id: "a".into(),
+                config: json!({ "prompt": "hi" }),
+            }
+        );
+
+        // set_node_name { node_id, name }
+        let op: GraphOp = serde_json::from_value(json!({
+            "op": "set_node_name", "node_id": "a", "name": "Renamed"
+        }))
+        .unwrap();
+        assert_eq!(
+            op,
+            GraphOp::SetNodeName {
+                id: "a".into(),
+                name: "Renamed".into(),
+            }
+        );
+
+        // set_node_position { node_id, position }
+        let op: GraphOp = serde_json::from_value(json!({
+            "op": "set_node_position", "node_id": "a", "position": { "x": 1.0, "y": 2.0 }
+        }))
+        .unwrap();
+        assert_eq!(
+            op,
+            GraphOp::SetNodePosition {
+                id: "a".into(),
+                position: Position { x: 1.0, y: 2.0 },
+            }
+        );
+
+        // rename_node accepts node_id + new_node_id aliases together.
+        let op: GraphOp = serde_json::from_value(json!({
+            "op": "rename_node", "node_id": "a", "new_node_id": "agent1"
+        }))
+        .unwrap();
+        assert_eq!(
+            op,
+            GraphOp::RenameNode {
+                id: "a".into(),
+                new_id: "agent1".into(),
+            }
+        );
+
+        // Canonical `id` / `new_id` still work unchanged.
+        let op: GraphOp = serde_json::from_value(json!({
+            "op": "rename_node", "id": "a", "new_id": "agent1"
+        }))
+        .unwrap();
+        assert_eq!(
+            op,
+            GraphOp::RenameNode {
+                id: "a".into(),
+                new_id: "agent1".into(),
+            }
+        );
     }
 }
