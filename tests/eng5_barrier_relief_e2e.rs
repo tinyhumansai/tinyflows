@@ -230,6 +230,117 @@ async fn pure_conditional_join_regression() {
     }
 }
 
+/// Multi-hop conditional predecessor: `cond--true-->x--main-->a` (`x` a
+/// plain pass-through node, not the merge's direct predecessor), `c` is
+/// unconditionally reachable, and `a`/`c` feed `m`. `a` sits TWO hops behind
+/// `cond`'s `true` port, not one — this is the coordinator-flagged gap. A
+/// same-superstep "is `a` freshly scheduled into `next` this step" check
+/// would fire a phantom arrival for `a` the instant `cond` completes, even
+/// on the taken branch — `a` is not yet in that step's `next` (only `x`
+/// is), it needs one more superstep to run. The fix (`reaches_deterministically`
+/// in `tinyagents`) instead resolves `cond`'s actual routing target (`x`)
+/// and walks it forward through the compiled graph's deterministic edges,
+/// which is correct regardless of hop count.
+fn multi_hop_conditional_graph() -> WorkflowGraph {
+    WorkflowGraph {
+        name: "eng5_multi_hop_conditional".to_string(),
+        nodes: vec![
+            trigger("start"),
+            node("cond", NodeKind::Condition, json!({ "field": "flag" })),
+            node("x", NodeKind::Transform, Value::Null),
+            tagged("a", "a"),
+            tagged("b", "b"),
+            tagged("c", "c"),
+            node("m", NodeKind::Merge, Value::Null),
+        ],
+        edges: vec![
+            edge("start", "main", "cond"),
+            edge("start", "main", "c"),
+            edge("cond", "true", "x"),
+            edge("cond", "false", "b"),
+            edge("x", "main", "a"),
+            edge("a", "main", "m"),
+            edge("c", "main", "m"),
+        ],
+        ..Default::default()
+    }
+}
+
+/// flag:true — `cond` takes the `true` branch, so `x` (and, one superstep
+/// later, `a`) DOES run. This is the data-loss guard for the multi-hop case:
+/// under the coordinator-flagged bug (a same-superstep "freshly scheduled"
+/// check), the barrier relief for (`cond`, `a`, `m`) would fire the instant
+/// `cond` completes — `a` is not yet in that step's `next`, only `x` is —
+/// registering a phantom arrival that lets `m` fire off `c`'s arrival alone,
+/// *before* `a`'s real item ever commits. This test MUST fail against that
+/// bug and pass once the relief is keyed on `cond`'s resolved routing target
+/// reaching `a` (Option 1, implemented in `tinyagents`'s
+/// `reaches_deterministically`) — `m` must include BOTH `a`'s and `c`'s
+/// items.
+#[tokio::test]
+async fn multi_hop_conditional_taken_no_data_loss() {
+    let compiled = compile(&multi_hop_conditional_graph()).expect("compile");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        run(&compiled, json!({ "flag": true }), &mock_capabilities()),
+    )
+    .await
+    .expect("multi-hop conditional fan-in must not deadlock when the branch is taken")
+    .expect("run");
+    let out = &outcome.output;
+
+    assert!(
+        !out["nodes"]["x"]["items"].is_null(),
+        "the taken `true` branch (`x`) must have run"
+    );
+    assert!(
+        out["nodes"]["b"].is_null(),
+        "the untaken `false` branch (`b`) must not have run"
+    );
+    let tags = merge_tags(out, "m");
+    assert_eq!(
+        tags,
+        HashSet::from(["a".to_string(), "c".to_string()]),
+        "no data loss: m must include a's item (reached via the x pass-through) as well as c's"
+    );
+}
+
+/// flag:false — `cond` takes the `false` branch (to `b`, never wired into
+/// `m`), so neither `x` nor `a` ever runs. Implemented Option 1 (the
+/// general, correct fix keyed on the brancher's resolved routing target, not
+/// same-superstep scheduling — see `tinyagents`'s `reaches_deterministically`
+/// in `src/graph/compiled/routing.rs`), so the multi-hop untaken-branch case
+/// is fully fixed, not merely a documented residual limitation: `m`'s
+/// barrier still clears on `c` alone via the relief, exactly as the direct
+/// (one-hop) case does.
+#[tokio::test]
+async fn multi_hop_conditional_not_taken_completes() {
+    let compiled = compile(&multi_hop_conditional_graph()).expect("compile");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        run(&compiled, json!({ "flag": false }), &mock_capabilities()),
+    )
+    .await
+    .expect("multi-hop conditional fan-in must not deadlock when the branch is untaken")
+    .expect("run");
+    let out = &outcome.output;
+
+    assert!(
+        out["nodes"]["x"].is_null(),
+        "the untaken `true` branch (`x`) must not have run"
+    );
+    assert!(
+        out["nodes"]["a"].is_null(),
+        "the untaken `true` branch (`a`, behind `x`) must not have run"
+    );
+    let tags = merge_tags(out, "m");
+    assert_eq!(
+        tags,
+        HashSet::from(["c".to_string()]),
+        "m should fire with only c's item once its barrier is relieved of a"
+    );
+}
+
 /// Pure unconditional fan-in: `start` fans out to `a` and `b` in parallel (no
 /// branching involved) and both always run; `m` waits for both, exactly as
 /// before — `conditional_predecessors` is empty for this graph, so no
