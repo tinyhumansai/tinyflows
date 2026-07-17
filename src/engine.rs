@@ -268,57 +268,113 @@ fn handler_routing(graph: &crate::model::WorkflowGraph, node_id: &str) -> Handle
     }
 }
 
-/// Whether the fan-in node `merge_id` is a **conditional join**: every one of its
-/// predecessors sits on a distinct port of a common upstream brancher, so at most
-/// one predecessor ever runs. Such a join must not hard-wait on all predecessors
-/// (a waiting-edge barrier would deadlock on the untaken branch) — it fires when
-/// the taken branch arrives.
+/// Whether `to` is reachable from `from` by following only edges on the
+/// default `"main"` port, without ever expanding through `stop`.
 ///
-/// Detected conservatively: there must be a brancher `B` (a node whose outgoing
-/// edges use >=2 distinct ports) such that each predecessor is reachable from
-/// **exactly one** of `B`'s ports, and the predecessor→port mapping is injective
-/// (no two predecessors share a port). When detection is unsure it returns
-/// `false`, preserving the safe waiting-edge barrier. Reachability is measured
-/// forward from each of `B`'s ports without passing through `merge_id`, so the
-/// join point itself never counts as a shared reconvergence.
-fn is_conditional_join(graph: &crate::model::WorkflowGraph, merge_id: &str) -> bool {
-    let preds: Vec<&str> = graph
+/// This is the "always runs" reachability test: a node reached this way runs
+/// on *every* execution (plain pass-throughs and parallel fan-outs alike,
+/// since a `FanOut`/`PortCommand` node's declared successors all still sit on
+/// a single shared port in `graph.edges`), whereas a node only reachable by
+/// stepping onto a non-`main` port (a `true`/`false`/custom branch port) may
+/// legitimately never run in a given execution — its brancher chose a
+/// different port. `stop` mirrors [`reaches_via_port`]'s parameter: it keeps
+/// the search from walking past a fan-in join point.
+fn has_unconditional_path(
+    graph: &crate::model::WorkflowGraph,
+    from: &str,
+    to: &str,
+    stop: &str,
+) -> bool {
+    if from == to {
+        return true;
+    }
+    let mut stack: Vec<&str> = graph
+        .edges
+        .iter()
+        .filter(|e| e.from_node == from && e.from_port == "main")
+        .map(|e| e.to_node.as_str())
+        .collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    while let Some(node) = stack.pop() {
+        if node == to {
+            return true;
+        }
+        if node == stop || !seen.insert(node) {
+            continue;
+        }
+        stack.extend(
+            graph
+                .edges
+                .iter()
+                .filter(|e| e.from_node == node && e.from_port == "main")
+                .map(|e| e.to_node.as_str()),
+        );
+    }
+    false
+}
+
+/// The direct predecessors of the fan-in node `merge_id` that are **not**
+/// reachable from the workflow's trigger via an unconditional (`"main"`-only)
+/// path — i.e. predecessors that sit behind a conditional/branch port and so
+/// may legitimately never run in a given execution.
+///
+/// Every incoming edge of a fan-in node is lowered as a waiting edge (see the
+/// edge-lowering loop below), so a fan-in with any conditional predecessor
+/// needs a [`GraphBuilder::add_barrier_relief`] registration for it or its
+/// barrier would wait forever on the branch that was never taken. A fan-in
+/// whose predecessors are all unconditionally reachable (a plain diamond or a
+/// parallel fan-out join) returns an empty set — those still hard-wait on
+/// every predecessor, which is correct because every predecessor always runs.
+///
+/// Returns an empty set when the graph has no unique trigger (defensive; a
+/// validated workflow always has exactly one).
+fn conditional_predecessors(
+    graph: &crate::model::WorkflowGraph,
+    merge_id: &str,
+) -> std::collections::HashSet<String> {
+    let Some(trigger) = graph.trigger() else {
+        return std::collections::HashSet::new();
+    };
+    graph
         .edges
         .iter()
         .filter(|e| e.to_node == merge_id)
-        .map(|e| e.from_node.as_str())
-        .collect();
-    if preds.len() < 2 {
-        return false;
-    }
+        .map(|e| e.from_node.clone())
+        .filter(|pred| !has_unconditional_path(graph, &trigger.id, pred, merge_id))
+        .collect()
+}
+
+/// Finds a brancher node `B` and one of its (>=2) outgoing ports whose
+/// routing decides whether `predecessor` runs, so a
+/// [`GraphBuilder::add_barrier_relief`] can be registered against `B`'s own
+/// completion — the exact activation that decides `predecessor`'s fate.
+///
+/// A node counts as a brancher only when it has two or more distinct
+/// outgoing ports (mirrors the old `is_conditional_join`'s brancher
+/// detection): a same-port `FanOut`/`PortCommand` node's successors all run
+/// together and are never conditional. Returns the first match in graph node
+/// order; when no brancher is found (defensive — should not happen for a
+/// `conditional_predecessors` result on a validated graph) the caller skips
+/// registering a relief, preserving the safe (if potentially
+/// over-cautious/deadlocking) waiting-edge barrier rather than guessing.
+fn find_conditional_brancher(
+    graph: &crate::model::WorkflowGraph,
+    predecessor: &str,
+    stop: &str,
+) -> Option<String> {
     for brancher in &graph.nodes {
-        let ports: Vec<String> = outgoing_by_port(graph, &brancher.id)
-            .into_iter()
-            .map(|(port, _)| port)
-            .collect();
+        let ports = outgoing_by_port(graph, &brancher.id);
         if ports.len() < 2 {
             continue;
         }
-        let mut used_ports: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut ok = true;
-        for pred in &preds {
-            let reaching: Vec<&str> = ports
-                .iter()
-                .filter(|port| reaches_via_port(graph, &brancher.id, port, pred, merge_id))
-                .map(String::as_str)
-                .collect();
-            // A predecessor must be reachable from exactly one of the brancher's
-            // ports, and that port must be unique to it (injective mapping).
-            if reaching.len() != 1 || !used_ports.insert(reaching[0]) {
-                ok = false;
-                break;
-            }
-        }
-        if ok && used_ports.len() >= 2 {
-            return true;
+        if ports
+            .iter()
+            .any(|(port, _)| reaches_via_port(graph, &brancher.id, port, predecessor, stop))
+        {
+            return Some(brancher.id.clone());
         }
     }
-    false
+    None
 }
 
 /// Whether `target` is reachable from `brancher`'s `port` successors, walking
@@ -1118,20 +1174,27 @@ fn build_graph(
                     } else {
                         // Single successor on the default `main` port. If the
                         // target is a fan-in point (more than one predecessor,
-                        // e.g. a `merge`) it normally gets a waiting edge so it
-                        // runs only once every predecessor completed — the merge
-                        // barrier. But a fan-in whose predecessors are mutually
-                        // exclusive conditional branches (a *conditional join*)
-                        // must not hard-wait on the untaken branch, which never
-                        // arrives and would deadlock the barrier; wire those with
-                        // plain edges so the taken branch fires the join.
-                        // Everything else is a plain edge.
+                        // e.g. a `merge`) it gets a waiting edge so it runs only
+                        // once every predecessor completed — the merge barrier.
+                        //
+                        // Every fan-in edge is wired as waiting unconditionally,
+                        // even when some predecessors are mutually exclusive
+                        // conditional branches (a *conditional join*): lowering a
+                        // conditional predecessor's edge as *plain* instead would
+                        // let a *taken* branch's downstream node race past the
+                        // barrier — the join can fire off the superstep snapshot
+                        // *before* the conditional branch's items are committed,
+                        // silently dropping them. Any fan-in with a conditional
+                        // predecessor instead gets a barrier-relief registration
+                        // (see below) so the all-waiting barrier still clears when
+                        // that predecessor's branch is never taken, without ever
+                        // weakening the barrier itself.
                         let is_fan_in = incoming_counts
                             .get(edge.to_node.as_str())
                             .copied()
                             .unwrap_or(0)
                             > 1;
-                        if is_fan_in && !is_conditional_join(graph, &target) {
+                        if is_fan_in {
                             builder = builder.add_waiting_edge(node.id.clone(), target);
                         } else {
                             builder = builder.add_edge(node.id.clone(), target);
@@ -1160,6 +1223,27 @@ fn build_graph(
                         routes,
                     );
                 }
+            }
+        }
+    }
+
+    // Mixed fan-in barrier relief. Every fan-in node above was wired with
+    // all-waiting edges, even when one or more of its predecessors sit behind
+    // a conditional branch that may never be taken — hard-waiting on all of
+    // them is the only way to avoid the taken-branch data race described
+    // above, but it means a *mixed* fan-in (one unconditionally-reachable
+    // predecessor plus one reachable only via a conditional branch) would
+    // deadlock forever on the branch that was never taken. For each such
+    // conditional predecessor, register a relief against the brancher whose
+    // port decides its fate, so the barrier can still clear on its remaining
+    // predecessors when that branch goes untaken.
+    for merge in &graph.nodes {
+        if incoming_counts.get(merge.id.as_str()).copied().unwrap_or(0) <= 1 {
+            continue;
+        }
+        for predecessor in conditional_predecessors(graph, &merge.id) {
+            if let Some(brancher) = find_conditional_brancher(graph, &predecessor, &merge.id) {
+                builder = builder.add_barrier_relief(brancher, predecessor, merge.id.clone());
             }
         }
     }
