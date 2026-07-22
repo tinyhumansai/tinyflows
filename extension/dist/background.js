@@ -33,8 +33,11 @@ var CdpExecutor = class {
       case "open": {
         const url = action.url;
         if (!/^https?:\/\//i.test(url)) throw new BrowserError("unsupported_page", "Only HTTP(S) URLs can be opened");
-        await this.debuggerApi.sendCommand(target, "Page.navigate", { url });
-        await waitForReady(this.debuggerApi, target, signal);
+        const marker = `__tinyflows_navigation_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        await evaluate(this.debuggerApi, target, `globalThis[${JSON.stringify(marker)}]=true`);
+        const navigation = await this.debuggerApi.sendCommand(target, "Page.navigate", { url });
+        if (navigation.errorText) throw new BrowserError("browser_failure", navigation.errorText);
+        await waitForReady(this.debuggerApi, target, signal, navigation.loaderId ? marker : void 0);
         return { url };
       }
       case "snapshot":
@@ -179,11 +182,14 @@ async function withTimeout(operation, ms, controller) {
 function ensureActive(signal) {
   if (signal.aborted) throw new BrowserError("cancelled", "Browser action was cancelled");
 }
-async function waitForReady(api, target, signal) {
+async function waitForReady(api, target, signal, previousDocumentMarker) {
   while (true) {
     ensureActive(signal);
-    const ready = await evaluate(api, target, "document.readyState");
-    if (ready === "interactive" || ready === "complete") return;
+    const state = await evaluate(api, target, `({
+      ready: document.readyState,
+      previousDocument: ${previousDocumentMarker ? `globalThis[${JSON.stringify(previousDocumentMarker)}] === true` : "false"}
+    })`);
+    if (!state.previousDocument && (state.ready === "interactive" || state.ready === "complete")) return;
     await delay(25);
   }
 }
@@ -215,7 +221,7 @@ function isBrowserAction(value) {
     case "is_visible":
       return exactStrings(value, ["action", "selector"], ["selector"]);
     case "fill":
-      return exactStrings(value, ["action", "selector", "value"], ["selector", "value"]);
+      return hasExactKeys(value, ["action", "selector", "value"]) && typeof value.selector === "string" && value.selector.length > 0 && typeof value.value === "string";
     case "type":
       return exactStrings(value, ["action", "text"], ["text"], ["selector"]);
     case "get_text":

@@ -106,7 +106,8 @@ export function isBrowserAction(value: unknown): value is BrowserAction {
     case 'open': return exactStrings(value, ['action', 'url'], ['url']);
     case 'snapshot': case 'get_title': case 'get_url': case 'close': return hasExactKeys(value, ['action']);
     case 'click': case 'hover': case 'is_visible': return exactStrings(value, ['action', 'selector'], ['selector']);
-    case 'fill': return exactStrings(value, ['action', 'selector', 'value'], ['selector', 'value']);
+    case 'fill': return hasExactKeys(value, ['action', 'selector', 'value']) &&
+      typeof value.selector === 'string' && value.selector.length > 0 && typeof value.value === 'string';
     case 'type': return exactStrings(value, ['action', 'text'], ['text'], ['selector']);
     case 'get_text': return exactStrings(value, ['action'], [], ['selector']);
     case 'screenshot': return hasOnlyKeys(value, ['action', 'selector', 'full_page']) &&

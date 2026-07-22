@@ -13,10 +13,22 @@ function executor(responses: unknown[] = []) {
 
 describe('CDP action execution', () => {
   it('navigates only to HTTP pages and returns structured data', async () => {
-    const { instance, sendCommand } = executor([{}, { result: { value: 'complete' } }]);
+    const { instance, sendCommand } = executor([
+      { result: { value: true } }, { loaderId: 'destination' },
+      { result: { value: { ready: 'complete', previousDocument: true } } },
+      { result: { value: { ready: 'complete', previousDocument: false } } }
+    ]);
     await expect(instance.execute(request({ action: 'open', url: 'https://example.com' }))).resolves.toEqual({ url: 'https://example.com' });
     expect(sendCommand).toHaveBeenCalledWith({ tabId: 7 }, 'Page.navigate', { url: 'https://example.com' });
+    expect(sendCommand).toHaveBeenCalledTimes(4);
     await expect(instance.execute(request({ action: 'open', url: 'chrome://settings' }))).rejects.toMatchObject({ code: 'unsupported_page' });
+  });
+
+  it('surfaces navigation failures instead of reporting an open success', async () => {
+    const { instance } = executor([{ result: { value: true } }, { errorText: 'net::ERR_FAILED' }]);
+    await expect(instance.execute(request({ action: 'open', url: 'https://example.com' }))).rejects.toMatchObject({
+      code: 'browser_failure', message: 'net::ERR_FAILED'
+    });
   });
 
   it('executes evaluate, keyboard, mouse, screenshot, and close actions', async () => {

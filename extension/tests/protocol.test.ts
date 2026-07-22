@@ -12,7 +12,8 @@ describe('browser protocol validation', () => {
     expect(isBrowserRequest(base)).toBe(true);
     const actions = [
       { action: 'open', url: 'https://example.com' }, { action: 'snapshot' },
-      { action: 'fill', selector: '#q', value: 'tiny' }, { action: 'type', text: 'hi', selector: '#q' },
+      { action: 'fill', selector: '#q', value: 'tiny' }, { action: 'fill', selector: '#q', value: '' },
+      { action: 'type', text: 'hi', selector: '#q' },
       { action: 'get_text' }, { action: 'get_title' }, { action: 'get_url' },
       { action: 'screenshot', full_page: true }, { action: 'wait', duration_ms: 20, selector: '#x' },
       { action: 'press', key: 'Enter' }, { action: 'hover', selector: '#x' },

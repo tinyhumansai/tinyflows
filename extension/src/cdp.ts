@@ -22,8 +22,13 @@ export class CdpExecutor {
       case 'open': {
         const url = action.url;
         if (!/^https?:\/\//i.test(url)) throw new BrowserError('unsupported_page', 'Only HTTP(S) URLs can be opened');
-        await this.debuggerApi.sendCommand(target, 'Page.navigate', { url });
-        await waitForReady(this.debuggerApi, target, signal);
+        const marker = `__tinyflows_navigation_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        await evaluate(this.debuggerApi, target, `globalThis[${JSON.stringify(marker)}]=true`);
+        const navigation = await this.debuggerApi.sendCommand(target, 'Page.navigate', { url }) as {
+          errorText?: string; loaderId?: string;
+        };
+        if (navigation.errorText) throw new BrowserError('browser_failure', navigation.errorText);
+        await waitForReady(this.debuggerApi, target, signal, navigation.loaderId ? marker : undefined);
         return { url };
       }
       case 'snapshot':
@@ -162,11 +167,19 @@ function ensureActive(signal: AbortSignal): void {
   if (signal.aborted) throw new BrowserError('cancelled', 'Browser action was cancelled');
 }
 
-async function waitForReady(api: DebuggerApi, target: chrome.debugger.Debuggee, signal: AbortSignal): Promise<void> {
+async function waitForReady(
+  api: DebuggerApi,
+  target: chrome.debugger.Debuggee,
+  signal: AbortSignal,
+  previousDocumentMarker?: string
+): Promise<void> {
   while (true) {
     ensureActive(signal);
-    const ready = await evaluate(api, target, 'document.readyState');
-    if (ready === 'interactive' || ready === 'complete') return;
+    const state = await evaluate(api, target, `({
+      ready: document.readyState,
+      previousDocument: ${previousDocumentMarker ? `globalThis[${JSON.stringify(previousDocumentMarker)}] === true` : 'false'}
+    })`) as { ready?: unknown; previousDocument?: unknown };
+    if (!state.previousDocument && (state.ready === 'interactive' || state.ready === 'complete')) return;
     await delay(25);
   }
 }
