@@ -56,7 +56,10 @@ fn extension_path_and_pairing_commands_are_scriptable() {
     {
         use std::os::unix::fs::PermissionsExt;
         let secret = state.join("credentials/chrome-extension-relay.secret");
-        assert_eq!(std::fs::metadata(secret).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
     std::fs::remove_dir_all(state).expect("clean temporary state");
 }

@@ -395,9 +395,12 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(request.request_id, response.request_id());
-        assert_eq!(request.action, BrowserAction::Fill {
-            selector: "#email".into(),
-            value: "person@example.com".into(),
-        });
+        assert_eq!(
+            request.action,
+            BrowserAction::Fill {
+                selector: "#email".into(),
+                value: "person@example.com".into(),
+            }
+        );
     }
 }
