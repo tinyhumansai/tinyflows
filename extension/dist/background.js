@@ -143,7 +143,7 @@ async function evaluate(api, target, expression) {
   return result.result?.value;
 }
 async function elementPoint(api, target, selector) {
-  const expression = `(() => { const e=document.querySelector(${JSON.stringify(selector)}); if(!e)return null; e.scrollIntoView({block:"center",inline:"center"}); const r=e.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`;
+  const expression = `(() => { const e=document.querySelector(${JSON.stringify(selector)}); if(!e)return null; e.scrollIntoView({block:"center",inline:"center"}); const r=e.getBoundingClientRect(); const s=getComputedStyle(e); if(r.width<=0||r.height<=0||s.visibility==="hidden"||s.display==="none"||s.pointerEvents==="none")return null; const x=r.left+r.width/2,y=r.top+r.height/2,hit=document.elementFromPoint(x,y); if(!hit||!(hit===e||e.contains(hit)))return null; return {x,y}; })()`;
   const point = await evaluate(api, target, expression);
   if (!point || typeof point.x !== "number" || typeof point.y !== "number") {
     throw new BrowserError("element_not_found", `No element matches ${selector}`);
@@ -529,24 +529,28 @@ var TabManager = class {
     return this.list();
   }
   async share(tabId) {
+    if (this.shared.has(tabId)) return (await this.assertShared(tabId)).shared;
     const tab = await this.api.tabs.get(tabId);
     ensureSupported(tab.url);
     if (tab.windowId === void 0) throw new BrowserError("invalid_request", "Tab has no window");
+    await this.api.debugger.attach({ tabId }, "1.3");
     let groupId;
-    const groups = await this.api.tabGroups.query({ windowId: tab.windowId, title: GROUP_TITLE });
-    const existing = groups[0];
-    if (existing) {
-      groupId = existing.id;
-      await this.api.tabs.group({ groupId, tabIds: [tabId] });
-    } else {
-      groupId = await this.api.tabs.group({ tabIds: [tabId] });
-      await this.api.tabGroups.update(groupId, { title: GROUP_TITLE, color: "blue", collapsed: false });
-    }
     try {
-      await this.api.debugger.attach({ tabId }, "1.3");
+      const groups = await this.api.tabGroups.query({ windowId: tab.windowId, title: GROUP_TITLE });
+      const existing = groups[0];
+      if (existing) {
+        groupId = existing.id;
+        await this.api.tabs.group({ groupId, tabIds: [tabId] });
+      } else {
+        groupId = await this.api.tabs.group({ tabIds: [tabId] });
+        await this.api.tabGroups.update(groupId, { title: GROUP_TITLE, color: "blue", collapsed: false });
+      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes("already attached")) throw error;
+      try {
+        await this.api.debugger.detach({ tabId });
+      } catch {
+      }
+      throw error;
     }
     const shared = { tabId, groupId, windowId: tab.windowId, attachedAt: Date.now() };
     this.shared.set(tabId, shared);

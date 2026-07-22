@@ -40,6 +40,15 @@ describe('explicit tab sharing', () => {
     await expect(new TabManager(restricted.mock as any).share(5)).rejects.toMatchObject({ code: 'unsupported_page' });
   });
 
+  it('does not share a tab owned by another debugger', async () => {
+    const fixture = api();
+    fixture.mock.debugger.attach.mockRejectedValue(new Error('Another debugger is already attached'));
+    const manager = new TabManager(fixture.mock as any);
+    await expect(manager.share(5)).rejects.toThrow(/already attached/);
+    expect(manager.has(5)).toBe(false);
+    expect(fixture.mock.tabs.group).not.toHaveBeenCalled();
+  });
+
   it('rehydrates only valid saved tabs and restores debugger sessions', async () => {
     const fixture = api({ groupId: 9 });
     fixture.setStored({ 'tinyflows.sharedTabs.v1': [{ tabId: 5, groupId: 9, windowId: 1, attachedAt: 1 }, { bad: true }] });

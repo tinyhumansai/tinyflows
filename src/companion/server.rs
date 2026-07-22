@@ -219,11 +219,11 @@ impl CompanionServer {
                     run_id: spawned_run_id.clone(),
                     status: "success".into(),
                 }),
-                Err(error) => server.send_json(&RunEvent::Failed {
+                Err(_) => server.send_json(&RunEvent::Failed {
                     protocol_version: BROWSER_PROTOCOL_VERSION,
                     run_id: spawned_run_id.clone(),
                     code: "workflow_failed".into(),
-                    message: error.to_string(),
+                    message: "Workflow execution failed in the native companion".into(),
                 }),
             }
             if let Ok(mut relay) = server.inner.relay.lock() {

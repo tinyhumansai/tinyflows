@@ -60,6 +60,17 @@ describe('CDP action execution', () => {
     vi.useRealTimers();
   });
 
+  it('requires click and hover targets to be visible and hit-testable', async () => {
+    const { instance, sendCommand } = executor([{ result: { value: null } }]);
+    await expect(instance.execute(request({ action: 'click', selector: '#hidden' }))).rejects.toMatchObject({
+      code: 'element_not_found'
+    });
+    expect(sendCommand).not.toHaveBeenCalledWith(
+      { tabId: 7 }, 'Input.dispatchMouseEvent', expect.anything()
+    );
+    expect(JSON.stringify((sendCommand.mock.calls as unknown[][])[0]?.[2])).toContain('elementFromPoint');
+  });
+
   it('fills, types, scrolls, waits, and finds semantically', async () => {
     const { instance, sendCommand } = executor([
       { result: { value: true } }, { result: { value: true } }, {}, {},

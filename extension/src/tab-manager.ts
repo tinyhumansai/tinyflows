@@ -37,25 +37,26 @@ export class TabManager {
   }
 
   async share(tabId: number): Promise<SharedTab> {
+    if (this.shared.has(tabId)) return (await this.assertShared(tabId)).shared;
     const tab = await this.api.tabs.get(tabId);
     ensureSupported(tab.url);
     if (tab.windowId === undefined) throw new BrowserError('invalid_request', 'Tab has no window');
 
+    await this.api.debugger.attach({ tabId }, '1.3');
     let groupId: number;
-    const groups = await this.api.tabGroups.query({ windowId: tab.windowId, title: GROUP_TITLE });
-    const existing = groups[0];
-    if (existing) {
-      groupId = existing.id;
-      await this.api.tabs.group({ groupId, tabIds: [tabId] });
-    } else {
-      groupId = await this.api.tabs.group({ tabIds: [tabId] });
-      await this.api.tabGroups.update(groupId, { title: GROUP_TITLE, color: 'blue', collapsed: false });
-    }
     try {
-      await this.api.debugger.attach({ tabId }, '1.3');
+      const groups = await this.api.tabGroups.query({ windowId: tab.windowId, title: GROUP_TITLE });
+      const existing = groups[0];
+      if (existing) {
+        groupId = existing.id;
+        await this.api.tabs.group({ groupId, tabIds: [tabId] });
+      } else {
+        groupId = await this.api.tabs.group({ tabIds: [tabId] });
+        await this.api.tabGroups.update(groupId, { title: GROUP_TITLE, color: 'blue', collapsed: false });
+      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes('already attached')) throw error;
+      try { await this.api.debugger.detach({ tabId }); } catch { /* attach rollback */ }
+      throw error;
     }
     const shared = { tabId, groupId, windowId: tab.windowId, attachedAt: Date.now() };
     this.shared.set(tabId, shared);

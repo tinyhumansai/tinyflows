@@ -126,7 +126,7 @@ async function evaluate(api: DebuggerApi, target: chrome.debugger.Debuggee, expr
 }
 
 async function elementPoint(api: DebuggerApi, target: chrome.debugger.Debuggee, selector: string) {
-  const expression = `(() => { const e=document.querySelector(${JSON.stringify(selector)}); if(!e)return null; e.scrollIntoView({block:"center",inline:"center"}); const r=e.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`;
+  const expression = `(() => { const e=document.querySelector(${JSON.stringify(selector)}); if(!e)return null; e.scrollIntoView({block:"center",inline:"center"}); const r=e.getBoundingClientRect(); const s=getComputedStyle(e); if(r.width<=0||r.height<=0||s.visibility==="hidden"||s.display==="none"||s.pointerEvents==="none")return null; const x=r.left+r.width/2,y=r.top+r.height/2,hit=document.elementFromPoint(x,y); if(!hit||!(hit===e||e.contains(hit)))return null; return {x,y}; })()`;
   const point = await evaluate(api, target, expression) as { x?: unknown; y?: unknown } | null;
   if (!point || typeof point.x !== 'number' || typeof point.y !== 'number') {
     throw new BrowserError('element_not_found', `No element matches ${selector}`);
