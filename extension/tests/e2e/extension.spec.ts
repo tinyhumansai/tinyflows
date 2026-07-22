@@ -122,6 +122,22 @@ test('executes a deterministic signed-in shopping journey over the relay', async
   expect(await action({ action: 'get_text', selector: '.product-name' })).toBe('Trail Boot');
   await action({ action: 'click', selector: '#result' });
   expect(await action({ action: 'get_text', selector: '#details' })).toContain('$89');
+  const closeRequestId = `journey:${sequence + 1}`;
+  await action({ action: 'close' });
+  await expect.poll(() => messages.some((message) =>
+    (message as {event?:string;tab_id?:number}).event === 'tab_revoked' &&
+    (message as {tab_id?:number}).tab_id === tabId
+  )).toBe(true);
+  const closeResponseIndex = messages.findIndex((message) =>
+    (message as {status?:string;request_id?:string}).status === 'ok' &&
+    (message as {request_id?:string}).request_id === closeRequestId
+  );
+  const revokeIndex = messages.findIndex((message) =>
+    (message as {event?:string;tab_id?:number}).event === 'tab_revoked' &&
+    (message as {tab_id?:number}).tab_id === tabId
+  );
+  expect(closeResponseIndex).toBeGreaterThanOrEqual(0);
+  expect(revokeIndex).toBeGreaterThan(closeResponseIndex);
 
   extensionSocket?.close();
   await new Promise<void>((resolveClosed) => relayServer.close(() => resolveClosed()));

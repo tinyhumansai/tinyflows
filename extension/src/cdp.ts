@@ -10,18 +10,20 @@ export class CdpExecutor {
     private readonly tabsApi: TabsApi = chrome.tabs
   ) {}
 
-  async execute(request: BrowserRequest): Promise<unknown> {
-    const operation = this.run(request.tab_id, request.action);
-    return withTimeout(operation, request.timeout_ms);
+  async execute(request: BrowserRequest, controller = new AbortController()): Promise<unknown> {
+    const operation = this.run(request.tab_id, request.action, controller.signal);
+    return withTimeout(operation, request.timeout_ms, controller);
   }
 
-  private async run(tabId: number, action: BrowserAction): Promise<unknown> {
+  private async run(tabId: number, action: BrowserAction, signal: AbortSignal): Promise<unknown> {
+    ensureActive(signal);
     const target = { tabId };
     switch (action.action) {
       case 'open': {
         const url = action.url;
         if (!/^https?:\/\//i.test(url)) throw new BrowserError('unsupported_page', 'Only HTTP(S) URLs can be opened');
         await this.debuggerApi.sendCommand(target, 'Page.navigate', { url });
+        await waitForReady(this.debuggerApi, target, signal);
         return { url };
       }
       case 'snapshot':
@@ -43,12 +45,14 @@ export class CdpExecutor {
       }
       case 'click': {
         const point = await elementPoint(this.debuggerApi, target, action.selector);
+        ensureActive(signal);
         await mouse(this.debuggerApi, target, 'mousePressed', point, 1);
         await mouse(this.debuggerApi, target, 'mouseReleased', point, 1);
         return { clicked: true };
       }
       case 'hover': {
         const point = await elementPoint(this.debuggerApi, target, action.selector);
+        ensureActive(signal);
         await mouse(this.debuggerApi, target, 'mouseMoved', point, 0);
         return { hovered: true };
       }
@@ -85,6 +89,7 @@ export class CdpExecutor {
         if (!selector) { await delay(ms); return { waitedMs: ms }; }
         const deadline = Date.now() + ms;
         while (Date.now() < deadline) {
+          ensureActive(signal);
           if (await evaluate(this.debuggerApi, target, visibleExpression(selector))) return { visible: true };
           await delay(Math.min(100, Math.max(1, deadline - Date.now())));
         }
@@ -141,11 +146,27 @@ function findExpression(text: string): string {
   return `(() => { const q=${JSON.stringify(text)}.toLowerCase(); return [...document.querySelectorAll("a,button,input,textarea,select,[role],[aria-label]")].filter(e => ((e.textContent||"")+" "+(e.getAttribute("aria-label")||"")).toLowerCase().includes(q)).slice(0,50).map(e => ({tag:e.tagName.toLowerCase(),text:(e.textContent||"").trim().slice(0,500),role:e.getAttribute("role"),ariaLabel:e.getAttribute("aria-label")})); })()`;
 }
 function delay(ms: number) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); }
-async function withTimeout<T>(operation: Promise<T>, ms: number): Promise<T> {
+async function withTimeout<T>(operation: Promise<T>, ms: number, controller: AbortController): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new BrowserError('action_timeout', `Browser action timed out after ${ms}ms`, true)), ms);
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new BrowserError('action_timeout', `Browser action timed out after ${ms}ms`, true));
+    }, ms);
   });
   try { return await Promise.race([operation, timeout]); }
   finally { if (timer) clearTimeout(timer); }
+}
+
+function ensureActive(signal: AbortSignal): void {
+  if (signal.aborted) throw new BrowserError('cancelled', 'Browser action was cancelled');
+}
+
+async function waitForReady(api: DebuggerApi, target: chrome.debugger.Debuggee, signal: AbortSignal): Promise<void> {
+  while (true) {
+    ensureActive(signal);
+    const ready = await evaluate(api, target, 'document.readyState');
+    if (ready === 'interactive' || ready === 'complete') return;
+    await delay(25);
+  }
 }

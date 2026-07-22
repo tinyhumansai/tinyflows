@@ -8,7 +8,7 @@ mod protocol;
 mod routing;
 
 pub use protocol::{
-    BROWSER_PROTOCOL_VERSION, BrowserAction, BrowserError, BrowserErrorCode, BrowserEvent,
-    BrowserRequest, BrowserResponse, BrowserResult,
+    BROWSER_PROTOCOL_VERSION, BrowserAction, BrowserCancel, BrowserCancelType, BrowserError,
+    BrowserErrorCode, BrowserEvent, BrowserRequest, BrowserResponse, BrowserResult,
 };
 pub use routing::{BrowserRelay, ChromeToolInvoker, RoutingToolInvoker};

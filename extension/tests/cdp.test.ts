@@ -13,7 +13,7 @@ function executor(responses: unknown[] = []) {
 
 describe('CDP action execution', () => {
   it('navigates only to HTTP pages and returns structured data', async () => {
-    const { instance, sendCommand } = executor();
+    const { instance, sendCommand } = executor([{}, { result: { value: 'complete' } }]);
     await expect(instance.execute(request({ action: 'open', url: 'https://example.com' }))).resolves.toEqual({ url: 'https://example.com' });
     expect(sendCommand).toHaveBeenCalledWith({ tabId: 7 }, 'Page.navigate', { url: 'https://example.com' });
     await expect(instance.execute(request({ action: 'open', url: 'chrome://settings' }))).rejects.toMatchObject({ code: 'unsupported_page' });

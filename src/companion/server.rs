@@ -19,13 +19,15 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::browser::{
-    BROWSER_PROTOCOL_VERSION, BrowserError, BrowserErrorCode, BrowserRelay, BrowserRequest,
-    BrowserResponse, ChromeToolInvoker, RoutingToolInvoker,
+    BROWSER_PROTOCOL_VERSION, BrowserCancel, BrowserCancelType, BrowserError, BrowserErrorCode,
+    BrowserEvent, BrowserRelay, BrowserRequest, BrowserResponse, ChromeToolInvoker,
+    RoutingToolInvoker,
 };
 use crate::caps::Capabilities;
 use crate::compiler::compile;
-use crate::engine::{CancellationToken, run_cancellable};
+use crate::engine::{CancellationToken, run_cancellable_with_observer};
 use crate::model::WorkflowGraph;
+use crate::observability::{ExecutionStep, RunObserver};
 
 use super::{
     Authenticator, CompanionControlRequest, CompanionControlResponse, PROTOCOL_SUBPROTOCOL,
@@ -71,7 +73,7 @@ struct ServerInner {
     native_secret: String,
     authenticator: Authenticator,
     relay: Mutex<RelayState>,
-    outbound: tokio::sync::RwLock<Option<mpsc::UnboundedSender<Message>>>,
+    outbound: Mutex<Option<mpsc::UnboundedSender<Message>>>,
     pending: tokio::sync::Mutex<HashMap<String, PendingSender>>,
     workflows_dir: PathBuf,
     capabilities: Capabilities,
@@ -99,7 +101,7 @@ impl CompanionServer {
                 native_secret,
                 authenticator,
                 relay: Mutex::new(RelayState::new(config.policy)?),
-                outbound: tokio::sync::RwLock::new(None),
+                outbound: Mutex::new(None),
                 pending: tokio::sync::Mutex::new(HashMap::new()),
                 workflows_dir: config.workflows_dir,
                 capabilities: config.capabilities,
@@ -144,6 +146,17 @@ impl CompanionServer {
         input: Value,
     ) -> Result<String, CompanionServerError> {
         let graph = load_workflow(&self.inner.workflows_dir, workflow_id)?;
+        let node_kinds = graph
+            .nodes
+            .iter()
+            .map(|node| {
+                let kind = serde_json::to_value(&node.kind)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".into());
+                (node.id.clone(), kind)
+            })
+            .collect::<HashMap<_, _>>();
         let compiled =
             compile(&graph).map_err(|error| CompanionServerError::Workflow(error.to_string()))?;
         let sequence = self.inner.next_run.fetch_add(1, Ordering::Relaxed) + 1;
@@ -166,6 +179,7 @@ impl CompanionServer {
         let spawned_run_id = run_id.clone();
         tokio::spawn(async move {
             server.send_json(&RunEvent::Started {
+                protocol_version: BROWSER_PROTOCOL_VERSION,
                 run_id: spawned_run_id.clone(),
                 tab_id,
             });
@@ -181,15 +195,32 @@ impl CompanionServer {
                 browser,
                 server.inner.capabilities.tools.clone(),
             ));
-            match run_cancellable(&compiled, input, &capabilities, token).await {
+            let observer = Arc::new(CompanionObserver {
+                server: server.clone(),
+                run_id: spawned_run_id.clone(),
+                node_kinds,
+            }) as Arc<dyn RunObserver>;
+            match run_cancellable_with_observer(&compiled, input, &capabilities, token, &observer)
+                .await
+            {
                 Ok(value) if value.cancelled => server.send_json(&RunEvent::Cancelled {
+                    protocol_version: BROWSER_PROTOCOL_VERSION,
                     run_id: spawned_run_id.clone(),
                 }),
+                Ok(value) if !value.pending_approvals.is_empty() => {
+                    server.send_json(&RunEvent::AwaitingApproval {
+                        protocol_version: BROWSER_PROTOCOL_VERSION,
+                        run_id: spawned_run_id.clone(),
+                        pending_approvals: value.pending_approvals,
+                    });
+                }
                 Ok(value) => server.send_json(&RunEvent::Completed {
+                    protocol_version: BROWSER_PROTOCOL_VERSION,
                     run_id: spawned_run_id.clone(),
                     output: value.output,
                 }),
                 Err(error) => server.send_json(&RunEvent::Failed {
+                    protocol_version: BROWSER_PROTOCOL_VERSION,
                     run_id: spawned_run_id.clone(),
                     code: "workflow_failed".into(),
                     message: error.to_string(),
@@ -229,17 +260,23 @@ impl CompanionServer {
         let Ok(text) = serde_json::to_string(value) else {
             return;
         };
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            if let Some(sender) = inner.outbound.read().await.as_ref() {
-                let _ = sender.send(Message::Text(text.into()));
-            }
-        });
+        if let Ok(outbound) = self.inner.outbound.lock()
+            && let Some(sender) = outbound.as_ref()
+        {
+            let _ = sender.send(Message::Text(text.into()));
+        }
     }
 
     async fn dispatch(&self, responses: Vec<BrowserResponse>) {
         let mut pending = self.inner.pending.lock().await;
         for response in responses {
+            if matches!(response, BrowserResponse::Error { .. }) {
+                self.send_json(&BrowserCancel {
+                    protocol_version: BROWSER_PROTOCOL_VERSION,
+                    message_type: BrowserCancelType::BrowserCancel,
+                    request_id: response.request_id().to_owned(),
+                });
+            }
             if let Some(sender) = pending.remove(response.request_id()) {
                 let result = match response {
                     BrowserResponse::Error { error, .. } => Err(error),
@@ -248,6 +285,43 @@ impl CompanionServer {
                 let _ = sender.send(result);
             }
         }
+    }
+}
+
+struct CompanionObserver {
+    server: CompanionServer,
+    run_id: String,
+    node_kinds: HashMap<String, String>,
+}
+
+impl RunObserver for CompanionObserver {
+    fn on_step_start(&self, node_id: &str) {
+        let node_kind = self
+            .node_kinds
+            .get(node_id)
+            .cloned()
+            .unwrap_or_else(|| "unknown".into());
+        self.server.send_json(&RunEvent::StepStarted {
+            protocol_version: BROWSER_PROTOCOL_VERSION,
+            run_id: self.run_id.clone(),
+            node_id: node_id.to_owned(),
+            node_kind,
+        });
+    }
+
+    fn on_step_finish(&self, step: &ExecutionStep) {
+        let node_kind = self
+            .node_kinds
+            .get(&step.node_id)
+            .cloned()
+            .unwrap_or_else(|| "unknown".into());
+        self.server.send_json(&RunEvent::StepCompleted {
+            protocol_version: BROWSER_PROTOCOL_VERSION,
+            run_id: self.run_id.clone(),
+            node_id: step.node_id.clone(),
+            node_kind,
+            output: step.output.clone(),
+        });
     }
 }
 
@@ -275,12 +349,18 @@ impl BrowserRelay for SocketRelay {
             .insert(request.request_id.clone(), sender);
         let wire = serde_json::to_string(&request)
             .map_err(|error| browser_error(BrowserErrorCode::InvalidRequest, &error.to_string()))?;
-        let outbound = self.inner.outbound.read().await.clone().ok_or_else(|| {
-            browser_error(
-                BrowserErrorCode::RelayDisconnected,
-                "extension is disconnected",
-            )
-        })?;
+        let outbound = self
+            .inner
+            .outbound
+            .lock()
+            .map_err(|_| browser_error(BrowserErrorCode::RelayDisconnected, "relay unavailable"))?
+            .clone()
+            .ok_or_else(|| {
+                browser_error(
+                    BrowserErrorCode::RelayDisconnected,
+                    "extension is disconnected",
+                )
+            })?;
         if outbound.send(Message::Text(wire.into())).is_err() {
             self.inner.pending.lock().await.remove(&request.request_id);
             return Err(browser_error(
@@ -299,12 +379,29 @@ impl BrowserRelay for SocketRelay {
                 if let Ok(mut relay) = self.inner.relay.lock() {
                     let _ = relay.expire_actions(Instant::now());
                 }
+                send_cancel(&self.inner, &request.request_id);
                 Err(browser_error(
                     BrowserErrorCode::ActionTimeout,
                     "browser action exceeded its deadline",
                 ))
             }
         }
+    }
+}
+
+fn send_cancel(inner: &ServerInner, request_id: &str) {
+    let cancel = BrowserCancel {
+        protocol_version: BROWSER_PROTOCOL_VERSION,
+        message_type: BrowserCancelType::BrowserCancel,
+        request_id: request_id.to_owned(),
+    };
+    let Ok(wire) = serde_json::to_string(&cancel) else {
+        return;
+    };
+    if let Ok(outbound) = inner.outbound.lock()
+        && let Some(sender) = outbound.as_ref()
+    {
+        let _ = sender.send(Message::Text(wire.into()));
     }
 }
 
@@ -315,6 +412,43 @@ struct NativeRunRequest {
     tab_id: TabId,
     #[serde(default)]
     input: Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HeartbeatMessage {
+    protocol_version: u32,
+    #[serde(rename = "type")]
+    message_type: HeartbeatType,
+}
+
+#[derive(serde::Deserialize)]
+enum HeartbeatType {
+    #[serde(rename = "heartbeat")]
+    Heartbeat,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TabSharedMessage {
+    protocol_version: u32,
+    event: TabSharedType,
+    tab: AnnouncedTab,
+}
+
+#[derive(serde::Deserialize)]
+enum TabSharedType {
+    #[serde(rename = "tab_shared")]
+    TabShared,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnnouncedTab {
+    id: u64,
+    window_id: u64,
+    url: String,
+    title: String,
 }
 
 async fn native_tabs(State(server): State<CompanionServer>, headers: HeaderMap) -> Response {
@@ -433,7 +567,9 @@ async fn extension_session(server: CompanionServer, socket: WebSocket) {
             return;
         }
     }
-    *server.inner.outbound.write().await = Some(sender);
+    if let Ok(mut outbound) = server.inner.outbound.lock() {
+        *outbound = Some(sender);
+    }
     let writer = tokio::spawn(async move {
         while let Some(message) = receiver.recv().await {
             if sink.send(message).await.is_err() {
@@ -468,7 +604,9 @@ async fn extension_session(server: CompanionServer, socket: WebSocket) {
             },
         }
     }
-    *server.inner.outbound.write().await = None;
+    if let Ok(mut outbound) = server.inner.outbound.lock() {
+        *outbound = None;
+    }
     let responses = {
         server
             .inner
@@ -483,7 +621,11 @@ async fn extension_session(server: CompanionServer, socket: WebSocket) {
 
 async fn handle_text(server: &CompanionServer, session: &str, text: &str) -> Result<(), ()> {
     let value: Value = serde_json::from_str(text).map_err(|_| ())?;
-    if value.get("type").and_then(Value::as_str) == Some("heartbeat") {
+    if let Ok(heartbeat) = serde_json::from_value::<HeartbeatMessage>(value.clone()) {
+        if heartbeat.protocol_version != BROWSER_PROTOCOL_VERSION {
+            return Err(());
+        }
+        let HeartbeatType::Heartbeat = heartbeat.message_type;
         return server
             .inner
             .relay
@@ -493,13 +635,16 @@ async fn handle_text(server: &CompanionServer, session: &str, text: &str) -> Res
             .map_err(|_| ());
     }
     if let Ok(response) = serde_json::from_value::<BrowserResponse>(value.clone()) {
-        server
+        let completion = server
             .inner
             .relay
             .lock()
             .map_err(|_| ())?
-            .complete_action(session, &response)
-            .map_err(|_| ())?;
+            .complete_action(session, &response);
+        if matches!(completion, Err(super::RelayError::UnknownRequestId)) {
+            return Ok(());
+        }
+        completion.map_err(|_| ())?;
         if let Some(sender) = server
             .inner
             .pending
@@ -511,37 +656,61 @@ async fn handle_text(server: &CompanionServer, session: &str, text: &str) -> Res
         }
         return Ok(());
     }
-    match value.get("event").and_then(Value::as_str) {
-        Some("tab_shared") => {
-            let tab = value.get("tab").ok_or(())?;
-            server
-                .inner
-                .relay
-                .lock()
-                .map_err(|_| ())?
-                .tabs_mut()
-                .share(
-                    tab.get("id").and_then(Value::as_u64).ok_or(())?,
-                    tab.get("window_id").and_then(Value::as_u64).ok_or(())?,
-                    tab.get("url").and_then(Value::as_str).ok_or(())?,
-                    tab.get("title").and_then(Value::as_str).unwrap_or_default(),
-                )
-                .map_err(|_| ())?;
-            return Ok(());
+    if let Ok(message) = serde_json::from_value::<TabSharedMessage>(value.clone()) {
+        if message.protocol_version != BROWSER_PROTOCOL_VERSION {
+            return Err(());
         }
-        Some("tab_revoked") => {
-            let tab_id = value.get("tab_id").and_then(Value::as_u64).ok_or(())?;
-            let (_, responses) = server
-                .inner
-                .relay
-                .lock()
-                .map_err(|_| ())?
-                .revoke_tab(tab_id);
-            server.dispatch(responses).await;
-            return Ok(());
+        let TabSharedType::TabShared = message.event;
+        server
+            .inner
+            .relay
+            .lock()
+            .map_err(|_| ())?
+            .tabs_mut()
+            .share(
+                message.tab.id,
+                message.tab.window_id,
+                message.tab.url,
+                message.tab.title,
+            )
+            .map_err(|_| ())?;
+        return Ok(());
+    }
+    if let Ok(event) = serde_json::from_value::<BrowserEvent>(value.clone()) {
+        let version = match &event {
+            BrowserEvent::ActionStarted {
+                protocol_version, ..
+            }
+            | BrowserEvent::ActionCompleted {
+                protocol_version, ..
+            }
+            | BrowserEvent::ActionFailed {
+                protocol_version, ..
+            }
+            | BrowserEvent::TabRevoked {
+                protocol_version, ..
+            }
+            | BrowserEvent::RelayDisconnected { protocol_version } => *protocol_version,
+        };
+        if version != BROWSER_PROTOCOL_VERSION {
+            return Err(());
         }
-        Some("action_started" | "action_completed" | "action_failed") => return Ok(()),
-        _ => {}
+        match event {
+            BrowserEvent::TabRevoked { tab_id, .. } => {
+                let (_, responses) = server
+                    .inner
+                    .relay
+                    .lock()
+                    .map_err(|_| ())?
+                    .revoke_tab(tab_id);
+                server.dispatch(responses).await;
+                return Ok(());
+            }
+            BrowserEvent::ActionStarted { .. }
+            | BrowserEvent::ActionCompleted { .. }
+            | BrowserEvent::ActionFailed { .. } => return Ok(()),
+            BrowserEvent::RelayDisconnected { .. } => return Err(()),
+        }
     }
     let request = serde_json::from_value::<CompanionControlRequest>(value).map_err(|_| ())?;
     let response = handle_control(server, request).await;

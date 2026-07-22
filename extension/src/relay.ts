@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION, isBrowserRequest, isControlResponse, isRunEvent } from './protocol';
+import { PROTOCOL_VERSION, isBrowserCancel, isBrowserRequest, isControlResponse, isRunEvent } from './protocol';
 import type { BrowserRequest, BrowserResponse, ControlRequest, ControlResponse, RunEvent } from './protocol';
 
 const CONFIG_KEY = 'tinyflows.relayConfig.v1';
@@ -16,6 +16,7 @@ export class RelayClient {
   private retries = 0;
   private stopped = false;
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private onBrowserCancel: (requestId: string) => void = () => undefined;
 
   constructor(
     private readonly onBrowserRequest: (request: BrowserRequest) => Promise<BrowserResponse>,
@@ -30,6 +31,10 @@ export class RelayClient {
     const config = await this.getConfig();
     if (!config) { this.onState('unpaired'); return; }
     this.connect(config);
+  }
+
+  setBrowserCancelHandler(handler: (requestId: string) => void): void {
+    this.onBrowserCancel = handler;
   }
 
   stop(): void {
@@ -96,6 +101,8 @@ export class RelayClient {
     try { message = JSON.parse(raw); } catch { return; }
     if (isBrowserRequest(message)) {
       this.send(await this.onBrowserRequest(message));
+    } else if (isBrowserCancel(message)) {
+      this.onBrowserCancel(message.request_id);
     } else if (isControlResponse(message)) {
       this.settle(message);
     } else if (isRunEvent(message)) {

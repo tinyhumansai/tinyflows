@@ -10,28 +10,58 @@ const tabs = new TabManager();
 const executor = new CdpExecutor();
 let relayState: RelayState = 'unpaired';
 const pendingWorkflowTabs = new Set<number>();
+const activeAutomationTabs = new Set<number>();
+const closingWorkflowTabs = new Set<number>();
+const actions = new Map<string, AbortController>();
+let bootPromise: Promise<void> | undefined;
 
 const relay = new RelayClient(handleBrowserRequest, handleRelayState, (event) => {
   void chrome.runtime.sendMessage({ type: 'run.event', event }).catch(() => undefined);
 });
+relay.setBrowserCancelHandler((requestId) => actions.get(requestId)?.abort());
 
 async function handleBrowserRequest(request: BrowserRequest): Promise<BrowserResponse> {
+  const controller = new AbortController();
+  actions.set(request.request_id, controller);
+  activeAutomationTabs.add(request.tab_id);
+  if (request.action.action === 'close') closingWorkflowTabs.add(request.tab_id);
+  notifyRunEvent({ event: 'browser_action_started', protocol_version: PROTOCOL_VERSION, run_id: request.run_id,
+    request_id: request.request_id, tab_id: request.tab_id, action: request.action.action });
   relay.send({ event: 'action_started', protocol_version: PROTOCOL_VERSION, request_id: request.request_id, run_id: request.run_id, tab_id: request.tab_id });
   try {
     await tabs.assertShared(request.tab_id);
-    const data = await executor.execute(request);
+    const data = await executor.execute(request, controller);
     relay.send({ event: 'action_completed', protocol_version: PROTOCOL_VERSION, request_id: request.request_id, result: { data } });
+    notifyRunEvent({ event: 'browser_action_completed', protocol_version: PROTOCOL_VERSION, run_id: request.run_id,
+      request_id: request.request_id, output: data });
+    if (request.action.action === 'close') {
+      await tabs.revoke(request.tab_id, false);
+      setTimeout(() => relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: request.tab_id }), 0);
+    }
     return { status: 'ok', protocol_version: PROTOCOL_VERSION, request_id: request.request_id, result: { data } };
   } catch (cause) {
     const error = toBrowserError(cause);
     const data = { code: error.code, message: error.message };
     relay.send({ event: 'action_failed', protocol_version: PROTOCOL_VERSION, request_id: request.request_id, error: data });
+    notifyRunEvent({ event: 'browser_action_failed', protocol_version: PROTOCOL_VERSION, run_id: request.run_id,
+      request_id: request.request_id, code: error.code, message: error.message });
     return { status: 'error', protocol_version: PROTOCOL_VERSION, request_id: request.request_id, error: data };
+  } finally {
+    actions.delete(request.request_id);
+    activeAutomationTabs.delete(request.tab_id);
+    closingWorkflowTabs.delete(request.tab_id);
   }
+}
+
+function notifyRunEvent(event: unknown): void {
+  void chrome.runtime.sendMessage({ type: 'run.event', event }).catch(() => undefined);
 }
 
 function handleRelayState(state: RelayState): void {
   relayState = state;
+  if (state !== 'connected') {
+    for (const controller of actions.values()) controller.abort();
+  }
   const badge = state === 'connected' ? 'connected' : state === 'failed' ? 'failed' : 'reconnecting';
   void tabs.markAll(badge);
   if (state === 'connected') void announceAllSharedTabs();
@@ -41,13 +71,16 @@ function handleRelayState(state: RelayState): void {
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
 });
-chrome.runtime.onStartup.addListener(() => { void boot(); });
+chrome.runtime.onStartup.addListener(() => { void bootOnce(); });
 chrome.tabs.onRemoved.addListener((tabId) => {
   pendingWorkflowTabs.delete(tabId);
-  if (tabs.has(tabId)) { void tabs.revoke(tabId, false); relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: tabId }); }
+  if (tabs.has(tabId)) {
+    void tabs.revoke(tabId, false);
+    if (!closingWorkflowTabs.has(tabId)) relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: tabId });
+  }
 });
 chrome.tabs.onCreated.addListener((tab) => {
-  if (tab.id !== undefined && tab.openerTabId !== undefined && tabs.has(tab.openerTabId)) {
+  if (tab.id !== undefined && tab.openerTabId !== undefined && activeAutomationTabs.has(tab.openerTabId)) {
     pendingWorkflowTabs.add(tab.id);
   }
 });
@@ -58,12 +91,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       if (relayState === 'connected') relay.send(tabSharedEvent(await tabs.announcement(tabId)));
     }).catch(() => undefined);
   }
-  if (tabs.has(tabId) && changeInfo.groupId !== undefined) {
+  if (tabs.has(tabId) && changeInfo.groupId !== undefined && !closingWorkflowTabs.has(tabId)) {
     void tabs.assertShared(tabId).catch(() => relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: tabId }));
   }
 });
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId !== undefined && tabs.has(source.tabId)) {
+    if (closingWorkflowTabs.has(source.tabId)) return;
     void tabs.revoke(source.tabId, false);
     relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: source.tabId });
   }
@@ -94,7 +128,12 @@ async function handleUiMessage(message: unknown): Promise<unknown> {
       await relay.configure({ url: String(item.url ?? ''), pairingToken: String(item.pairingToken ?? '') });
       return { ok: true };
     case 'workflow.list': return { ok: true, result: await relay.request('workflow.list', {}) };
-    case 'workflow.start': return { ok: true, result: await relay.request('workflow.start', { workflow_id: item.workflowId, tab_id: item.tabId }) };
+    case 'workflow.start': {
+      const result = await relay.request('workflow.start', { workflow_id: item.workflowId, tab_id: item.tabId });
+      const runId = result && typeof result === 'object' ? String((result as Record<string, unknown>).run_id ?? '') : '';
+      if (runId) await relay.request('run.subscribe', { run_id: runId });
+      return { ok: true, result };
+    }
     case 'workflow.cancel': return { ok: true, result: await relay.request('workflow.cancel', { run_id: item.runId }) };
     default: throw new Error('Unknown UI request');
   }
@@ -111,4 +150,8 @@ async function boot(): Promise<void> {
   await tabs.rehydrate();
   await relay.start();
 }
-void boot();
+function bootOnce(): Promise<void> {
+  bootPromise ??= boot();
+  return bootPromise;
+}
+void bootOnce();

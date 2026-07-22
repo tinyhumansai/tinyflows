@@ -34,14 +34,18 @@ async function start(workflowId: string): Promise<void> {
   const value = response.result as Record<string, unknown> | undefined;
   activeRunId = String(value?.run_id ?? value?.id ?? '');
   run.textContent = `Run ${activeRunId || 'started'}`; cancel.hidden = !activeRunId;
+  if (activeRunId) addEvent({ event: 'started', protocol_version: 1, run_id: activeRunId, tab_id: tab.id });
 }
 function showError(message: string): void { run.innerHTML = '<p class="error"></p>'; run.querySelector('p')!.textContent = message; }
 function addEvent(value: unknown): void {
+  const event = value as Record<string, unknown>;
+  const runId = typeof event.run_id === 'string' ? event.run_id : undefined;
+  if (!activeRunId || runId !== activeRunId) return;
   const li = document.createElement('li');
-  const event = value as { event?: string; data?: unknown; run_id?: string };
-  li.textContent = `${event.event ?? 'event'} · ${JSON.stringify(event.data ?? {})}`;
+  const details = { ...event };
+  delete details.event; delete details.protocol_version; delete details.run_id;
+  li.textContent = `${String(event.event ?? 'event')} · ${JSON.stringify(details)}`;
   events.prepend(li); while (events.children.length > 200) events.lastElementChild?.remove();
-  if (event.run_id) activeRunId = event.run_id;
 }
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'relay.state') $('connection').textContent = `Companion: ${message.state}`;

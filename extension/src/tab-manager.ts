@@ -139,7 +139,7 @@ export class TabManager {
 }
 
 function ensureSupported(url?: string): void {
-  if (!url || /^(chrome|chrome-extension|edge|devtools|about|view-source):/i.test(url)) {
+  if (!url || !/^https?:\/\//i.test(url)) {
     throw new BrowserError('unsupported_page', 'Chrome does not permit automation on this page');
   }
 }

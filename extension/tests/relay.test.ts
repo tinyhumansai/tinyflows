@@ -44,8 +44,17 @@ describe('authenticated relay', () => {
     expect(sent).toEqual({ protocol_version: 1, request_id: sent.request_id, method: 'workflow.list' });
     sockets[0]?.message({ protocol_version: 1, status: 'workflows', request_id: sent.request_id, workflows: [{ id: 'one', name: 'One' }] });
     await expect(pending).resolves.toEqual([{ id: 'one', name: 'One' }]);
-    sockets[0]?.message({ event: 'step_started', run_id: 'run', node_id: 'one', node_kind: 'browser' });
+    sockets[0]?.message({ event: 'step_started', protocol_version: 1, run_id: 'run', node_id: 'one', node_kind: 'browser' });
     expect(events).toHaveLength(1); relay.stop();
+  });
+
+  it('forwards correlated browser cancellation', async () => {
+    const { relay, sockets } = setup();
+    const cancelled: string[] = [];
+    relay.setBrowserCancelHandler((requestId) => cancelled.push(requestId));
+    await relay.start(); sockets[0]?.open();
+    sockets[0]?.message({ protocol_version: 1, type: 'browser.cancel', request_id: 'run:7' });
+    expect(cancelled).toEqual(['run:7']); relay.stop();
   });
 
   it('rejects non-loopback config and stays unpaired without config', async () => {

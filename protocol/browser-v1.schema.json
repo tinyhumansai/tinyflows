@@ -57,6 +57,55 @@
       "additionalProperties":false,
       "required":["status","protocol_version","request_id","error"],
       "properties":{"status":{"const":"error"},"protocol_version":{"const":1},"request_id":{"type":"string","minLength":1},"error":{"$ref":"#/$defs/error"}}
+    },
+    {
+      "title":"BrowserCancel",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["protocol_version","type","request_id"],
+      "properties":{"protocol_version":{"const":1},"type":{"const":"browser.cancel"},"request_id":{"type":"string","minLength":1}}
+    },
+    {
+      "title":"TabSharedEvent",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["event","protocol_version","tab"],
+      "properties":{"event":{"const":"tab_shared"},"protocol_version":{"const":1},"tab":{"type":"object","additionalProperties":false,"required":["id","window_id","url","title"],"properties":{"id":{"type":"integer","minimum":0},"window_id":{"type":"integer","minimum":0},"url":{"type":"string","pattern":"^https?://"},"title":{"type":"string"}}}}
+    },
+    {
+      "title":"BrowserActionStartedEvent",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["event","protocol_version","request_id","run_id","tab_id"],
+      "properties":{"event":{"const":"action_started"},"protocol_version":{"const":1},"request_id":{"type":"string","minLength":1},"run_id":{"type":"string","minLength":1},"tab_id":{"type":"integer","minimum":0}}
+    },
+    {
+      "title":"BrowserActionCompletedEvent",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["event","protocol_version","request_id","result"],
+      "properties":{"event":{"const":"action_completed"},"protocol_version":{"const":1},"request_id":{"type":"string","minLength":1},"result":{"type":"object","additionalProperties":false,"required":["data"],"properties":{"data":{}}}}
+    },
+    {
+      "title":"BrowserActionFailedEvent",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["event","protocol_version","request_id","error"],
+      "properties":{"event":{"const":"action_failed"},"protocol_version":{"const":1},"request_id":{"type":"string","minLength":1},"error":{"$ref":"#/$defs/error"}}
+    },
+    {
+      "title":"TabRevokedEvent",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["event","protocol_version","tab_id"],
+      "properties":{"event":{"const":"tab_revoked"},"protocol_version":{"const":1},"tab_id":{"type":"integer","minimum":0}}
+    },
+    {
+      "title":"RelayDisconnectedEvent",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["event","protocol_version"],
+      "properties":{"event":{"const":"relay_disconnected"},"protocol_version":{"const":1}}
     }
   ]
 }

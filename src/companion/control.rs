@@ -21,6 +21,8 @@ pub struct WorkflowSummary {
 pub enum RunEvent {
     /// The native host accepted a run.
     Started {
+        /// Control protocol version.
+        protocol_version: u32,
         /// Run receiving this event.
         run_id: RunId,
         /// Explicit tab selected when the run started.
@@ -28,6 +30,8 @@ pub enum RunEvent {
     },
     /// A workflow node began executing.
     StepStarted {
+        /// Control protocol version.
+        protocol_version: u32,
         /// Run receiving this event.
         run_id: RunId,
         /// Workflow node id.
@@ -37,15 +41,67 @@ pub enum RunEvent {
     },
     /// A workflow node completed.
     StepCompleted {
+        /// Control protocol version.
+        protocol_version: u32,
         /// Run receiving this event.
         run_id: RunId,
         /// Workflow node id.
         node_id: String,
+        /// Node kind shown by the side panel.
+        node_kind: String,
         /// Structured non-secret output.
         output: Value,
     },
+    /// A workflow paused at one or more native approval gates.
+    AwaitingApproval {
+        /// Control protocol version.
+        protocol_version: u32,
+        /// Run receiving this event.
+        run_id: RunId,
+        /// Gate node ids awaiting a host-owned approval decision.
+        pending_approvals: Vec<String>,
+    },
+    /// Chrome began a browser action for this run.
+    BrowserActionStarted {
+        /// Control protocol version.
+        protocol_version: u32,
+        /// Run receiving this event.
+        run_id: RunId,
+        /// Browser request correlation id.
+        request_id: String,
+        /// Explicit target tab.
+        tab_id: TabId,
+        /// Stable browser action name.
+        action: String,
+    },
+    /// Chrome completed a browser action for this run.
+    BrowserActionCompleted {
+        /// Control protocol version.
+        protocol_version: u32,
+        /// Run receiving this event.
+        run_id: RunId,
+        /// Browser request correlation id.
+        request_id: String,
+        /// Structured browser result.
+        output: Value,
+    },
+    /// Chrome failed a browser action for this run.
+    BrowserActionFailed {
+        /// Control protocol version.
+        protocol_version: u32,
+        /// Run receiving this event.
+        run_id: RunId,
+        /// Browser request correlation id.
+        request_id: String,
+        /// Stable browser failure code.
+        code: String,
+        /// Actionable non-secret diagnostic.
+        message: String,
+    },
     /// A workflow run reached a terminal success state.
     Completed {
+        /// Control protocol version.
+        protocol_version: u32,
         /// Run receiving this event.
         run_id: RunId,
         /// Final structured workflow output.
@@ -53,6 +109,8 @@ pub enum RunEvent {
     },
     /// A workflow run reached a terminal failure state.
     Failed {
+        /// Control protocol version.
+        protocol_version: u32,
         /// Run receiving this event.
         run_id: RunId,
         /// Stable machine-readable failure code.
@@ -62,6 +120,8 @@ pub enum RunEvent {
     },
     /// The native host cancelled the run.
     Cancelled {
+        /// Control protocol version.
+        protocol_version: u32,
         /// Run receiving this event.
         run_id: RunId,
     },

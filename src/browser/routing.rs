@@ -17,6 +17,8 @@ use crate::error::{EngineError, Result};
 
 /// Default deadline attached to a browser action when the host does not override it.
 pub const DEFAULT_BROWSER_ACTION_TIMEOUT_MS: u64 = 30_000;
+/// Largest deadline accepted by both sides of protocol v1.
+pub const MAX_BROWSER_ACTION_TIMEOUT_MS: u64 = 60_000;
 
 /// Authenticated transport from the native companion to the Chrome extension.
 ///
@@ -95,6 +97,22 @@ impl ToolInvoker for ChromeToolInvoker {
                 details: None,
             })
         })?;
+        if !(1..=MAX_BROWSER_ACTION_TIMEOUT_MS).contains(&self.timeout_ms) {
+            return Err(Self::capability_error(&BrowserError {
+                code: BrowserErrorCode::InvalidRequest,
+                message: format!(
+                    "browser timeout must be between 1 and {MAX_BROWSER_ACTION_TIMEOUT_MS} ms"
+                ),
+                details: None,
+            }));
+        }
+        validate_action(&action).map_err(|message| {
+            Self::capability_error(&BrowserError {
+                code: BrowserErrorCode::InvalidRequest,
+                message,
+                details: None,
+            })
+        })?;
         let request_id = self.next_request_id();
         let request = BrowserRequest {
             protocol_version: BROWSER_PROTOCOL_VERSION,
@@ -138,6 +156,38 @@ impl ToolInvoker for ChromeToolInvoker {
             BrowserResponse::Error { error, .. } => Err(Self::capability_error(&error)),
         }
     }
+}
+
+fn validate_action(action: &BrowserAction) -> std::result::Result<(), String> {
+    let required = match action {
+        BrowserAction::Open { url } => {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err("browser open URL must use HTTP(S)".into());
+            }
+            Some(("url", url.as_str()))
+        }
+        BrowserAction::Click { selector }
+        | BrowserAction::Hover { selector }
+        | BrowserAction::IsVisible { selector } => Some(("selector", selector.as_str())),
+        BrowserAction::Fill { selector, .. } => Some(("selector", selector.as_str())),
+        BrowserAction::Press { key } => Some(("key", key.as_str())),
+        BrowserAction::Find { query } => Some(("query", query.as_str())),
+        BrowserAction::Type { text, .. } => Some(("text", text.as_str())),
+        BrowserAction::Snapshot
+        | BrowserAction::GetText { .. }
+        | BrowserAction::GetTitle
+        | BrowserAction::GetUrl
+        | BrowserAction::Screenshot { .. }
+        | BrowserAction::Wait { .. }
+        | BrowserAction::Scroll { .. }
+        | BrowserAction::Close => None,
+    };
+    if let Some((field, value)) = required
+        && value.is_empty()
+    {
+        return Err(format!("browser action field `{field}` must not be empty"));
+    }
+    Ok(())
 }
 
 /// Routes explicit browser calls to Chrome and delegates every other tool unchanged.
@@ -242,6 +292,31 @@ mod tests {
         assert!(
             matches!(error, EngineError::Capability(message) if message.starts_with("browser:invalid_request:"))
         );
+    }
+
+    #[tokio::test]
+    async fn chrome_invoker_rejects_invalid_semantics_before_relaying() {
+        let relay = RecordingRelay::success(Value::Null);
+        let invoker = ChromeToolInvoker::new(relay.clone(), "run-1", 7).with_timeout_ms(60_001);
+        let error = invoker
+            .invoke("browser", json!({"action":"click","selector":"#go"}), None)
+            .await
+            .expect_err("oversized timeout must fail");
+        assert!(error.to_string().contains("timeout must be between"));
+        assert!(relay.requests.lock().unwrap().is_empty());
+
+        let relay = RecordingRelay::success(Value::Null);
+        let invoker = ChromeToolInvoker::new(relay.clone(), "run-1", 7);
+        let error = invoker
+            .invoke(
+                "browser",
+                json!({"action":"open","url":"chrome://settings"}),
+                None,
+            )
+            .await
+            .expect_err("restricted URL must fail natively");
+        assert!(error.to_string().contains("must use HTTP(S)"));
+        assert!(relay.requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

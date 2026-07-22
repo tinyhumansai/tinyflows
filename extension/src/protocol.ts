@@ -35,6 +35,12 @@ export interface BrowserRequest {
   action: BrowserAction;
 }
 
+export interface BrowserCancel {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: 'browser.cancel';
+  request_id: string;
+}
+
 export type BrowserResponse =
   | { status: 'ok'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; result: { data: unknown } }
   | { status: 'error'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; error: BrowserErrorData };
@@ -70,12 +76,16 @@ export type ControlResponse =
   | { status: 'tabs'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; tabs: unknown[] }
   | { status: 'connection'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; connected: boolean };
 export type RunEvent =
-  | { event: 'started'; run_id: string; tab_id: number }
-  | { event: 'step_started'; run_id: string; node_id: string; node_kind: string }
-  | { event: 'step_completed'; run_id: string; node_id: string; output: unknown }
-  | { event: 'completed'; run_id: string; output: unknown }
-  | { event: 'failed'; run_id: string; code: string; message: string }
-  | { event: 'cancelled'; run_id: string };
+  | { event: 'started'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; tab_id: number }
+  | { event: 'step_started'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; node_id: string; node_kind: string }
+  | { event: 'step_completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; node_id: string; node_kind: string; output: unknown }
+  | { event: 'awaiting_approval'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; pending_approvals: string[] }
+  | { event: 'browser_action_started'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; request_id: string; tab_id: number; action: string }
+  | { event: 'browser_action_completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; request_id: string; output: unknown }
+  | { event: 'browser_action_failed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; request_id: string; code: string; message: string }
+  | { event: 'completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; output: unknown }
+  | { event: 'failed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; code: string; message: string }
+  | { event: 'cancelled'; protocol_version: typeof PROTOCOL_VERSION; run_id: string };
 
 export function isBrowserRequest(value: unknown): value is BrowserRequest {
   if (!isRecordWithKeys(value, ['protocol_version', 'request_id', 'run_id', 'tab_id', 'timeout_ms', 'action'])) return false;
@@ -83,6 +93,11 @@ export function isBrowserRequest(value: unknown): value is BrowserRequest {
     Number.isSafeInteger(value.tab_id) && (value.tab_id as number) >= 0 &&
     Number.isSafeInteger(value.timeout_ms) && (value.timeout_ms as number) >= 1 &&
     (value.timeout_ms as number) <= 60_000 && isBrowserAction(value.action);
+}
+
+export function isBrowserCancel(value: unknown): value is BrowserCancel {
+  return isRecordWithKeys(value, ['protocol_version', 'type', 'request_id']) &&
+    value.protocol_version === PROTOCOL_VERSION && value.type === 'browser.cancel' && isId(value.request_id);
 }
 
 export function isBrowserAction(value: unknown): value is BrowserAction {
@@ -117,14 +132,21 @@ export function isControlResponse(value: unknown): value is ControlResponse {
   }
 }
 export function isRunEvent(value: unknown): value is RunEvent {
-  if (!isRecord(value) || !isId(value.run_id)) return false;
+  if (!isRecord(value) || value.protocol_version !== PROTOCOL_VERSION || !isId(value.run_id)) return false;
   switch (value.event) {
-    case 'started': return hasExactKeys(value, ['event', 'run_id', 'tab_id']) && Number.isSafeInteger(value.tab_id);
-    case 'step_started': return hasExactKeys(value, ['event', 'run_id', 'node_id', 'node_kind']) && isId(value.node_id) && isId(value.node_kind);
-    case 'step_completed': return hasExactKeys(value, ['event', 'run_id', 'node_id', 'output']) && isId(value.node_id);
-    case 'completed': return hasExactKeys(value, ['event', 'run_id', 'output']);
-    case 'failed': return hasExactKeys(value, ['event', 'run_id', 'code', 'message']) && isId(value.code) && typeof value.message === 'string';
-    case 'cancelled': return hasExactKeys(value, ['event', 'run_id']);
+    case 'started': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'tab_id']) && Number.isSafeInteger(value.tab_id);
+    case 'step_started': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'node_id', 'node_kind']) && isId(value.node_id) && isId(value.node_kind);
+    case 'step_completed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'node_id', 'node_kind', 'output']) && isId(value.node_id) && isId(value.node_kind);
+    case 'awaiting_approval': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'pending_approvals']) &&
+      Array.isArray(value.pending_approvals) && value.pending_approvals.every(isId);
+    case 'browser_action_started': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'request_id', 'tab_id', 'action']) &&
+      isId(value.request_id) && Number.isSafeInteger(value.tab_id) && isId(value.action);
+    case 'browser_action_completed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'request_id', 'output']) && isId(value.request_id);
+    case 'browser_action_failed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'request_id', 'code', 'message']) &&
+      isId(value.request_id) && isId(value.code) && typeof value.message === 'string';
+    case 'completed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'output']);
+    case 'failed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'code', 'message']) && isId(value.code) && typeof value.message === 'string';
+    case 'cancelled': return hasExactKeys(value, ['event', 'protocol_version', 'run_id']);
     default: return false;
   }
 }

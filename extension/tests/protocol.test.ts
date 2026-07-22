@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { isBrowserAction, isBrowserRequest, isControlResponse, isRunEvent, tabSharedEvent } from '../src/protocol';
+import { isBrowserAction, isBrowserCancel, isBrowserRequest, isControlResponse, isRunEvent, tabSharedEvent } from '../src/protocol';
 
 const base = {
   protocol_version: 1, request_id: 'req-1', run_id: 'run-1', tab_id: 4, timeout_ms: 1000,
@@ -36,8 +36,10 @@ describe('browser protocol validation', () => {
   it('validates control responses and run events separately', () => {
     expect(isControlResponse({ protocol_version: 1, status: 'workflows', request_id: 'r', workflows: [] })).toBe(true);
     expect(isControlResponse({ protocol_version: 1, status: 'ok', request_id: '', result: null })).toBe(false);
-    expect(isRunEvent({ event: 'step_started', run_id: 'r', node_id: 'n', node_kind: 'tool_call' })).toBe(true);
-    expect(isRunEvent({ event: 'cancelled', run_id: 'r', extra: 1 })).toBe(false);
+    expect(isRunEvent({ event: 'step_started', protocol_version: 1, run_id: 'r', node_id: 'n', node_kind: 'tool_call' })).toBe(true);
+    expect(isRunEvent({ event: 'awaiting_approval', protocol_version: 1, run_id: 'r', pending_approvals: ['gate'] })).toBe(true);
+    expect(isRunEvent({ event: 'browser_action_started', protocol_version: 1, run_id: 'r', request_id: 'q', tab_id: 1, action: 'click' })).toBe(true);
+    expect(isRunEvent({ event: 'cancelled', protocol_version: 1, run_id: 'r', extra: 1 })).toBe(false);
   });
 
   it('builds the strict canonical shared-tab announcement', () => {
@@ -51,5 +53,7 @@ describe('browser protocol validation', () => {
     const fixtureUrl = new URL('../../protocol/fixtures/browser-request.v1.json', import.meta.url);
     const fixture: unknown = JSON.parse(readFileSync(fixtureUrl, 'utf8'));
     expect(isBrowserRequest(fixture)).toBe(true);
+    const cancelUrl = new URL('../../protocol/fixtures/browser-cancel.v1.json', import.meta.url);
+    expect(isBrowserCancel(JSON.parse(readFileSync(cancelUrl, 'utf8')))).toBe(true);
   });
 });

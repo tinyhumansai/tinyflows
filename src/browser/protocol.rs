@@ -120,6 +120,27 @@ pub struct BrowserRequest {
     pub action: BrowserAction,
 }
 
+/// A native cancellation instruction for one in-flight browser action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserCancel {
+    /// Protocol version used to encode this message.
+    pub protocol_version: u32,
+    /// Fixed message discriminator.
+    #[serde(rename = "type")]
+    pub message_type: BrowserCancelType,
+    /// Correlation id of the action that must stop.
+    pub request_id: String,
+}
+
+/// Wire discriminator for [`BrowserCancel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrowserCancelType {
+    /// Cancel one correlated browser action.
+    #[serde(rename = "browser.cancel")]
+    BrowserCancel,
+}
+
 /// Structured successful action data returned by Chrome.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -394,13 +415,37 @@ mod tests {
             "../../protocol/fixtures/browser-response.v1.json"
         ))
         .unwrap();
+        let cancel: BrowserCancel = serde_json::from_str(include_str!(
+            "../../protocol/fixtures/browser-cancel.v1.json"
+        ))
+        .unwrap();
         assert_eq!(request.request_id, response.request_id());
+        assert_eq!(request.request_id, cancel.request_id);
         assert_eq!(
             request.action,
             BrowserAction::Fill {
                 selector: "#email".into(),
                 value: "person@example.com".into(),
             }
+        );
+    }
+
+    #[test]
+    fn cancellation_message_is_strict_and_versioned() {
+        let cancel = BrowserCancel {
+            protocol_version: BROWSER_PROTOCOL_VERSION,
+            message_type: BrowserCancelType::BrowserCancel,
+            request_id: "run:1".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&cancel).unwrap()["type"],
+            "browser.cancel"
+        );
+        assert!(
+            serde_json::from_value::<BrowserCancel>(json!({
+                "protocol_version":1,"type":"browser.cancel","request_id":"r","extra":true
+            }))
+            .is_err()
         );
     }
 }
