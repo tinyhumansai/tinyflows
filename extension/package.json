@@ -10,7 +10,7 @@
     "test:e2e": "npm run build && playwright test",
     "typecheck": "tsc --noEmit",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",
-    "package": "node scripts/package.mjs"
+    "package": "npm run build && node scripts/package.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.31.0",

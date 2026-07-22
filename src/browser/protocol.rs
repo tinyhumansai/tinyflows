@@ -1,6 +1,6 @@
 //! Versioned messages exchanged with the TinyFlows Chrome extension.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 /// The first supported browser relay protocol version.
@@ -11,7 +11,7 @@ pub const BROWSER_PROTOCOL_VERSION: u32 = 1;
 /// The enum is internally tagged, so workflow arguments use the direct form
 /// `{ "action": "click", "selector": "button" }`. Unknown actions and
 /// unknown fields are rejected instead of being silently ignored.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrowserAction {
     /// Navigate the shared tab to `url`.
@@ -100,6 +100,122 @@ pub enum BrowserAction {
         /// Human-readable description to locate.
         query: String,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum BrowserActionUnchecked {
+    Open {
+        url: String,
+    },
+    Snapshot,
+    Click {
+        selector: String,
+    },
+    Fill {
+        selector: String,
+        value: String,
+    },
+    Type {
+        #[serde(default)]
+        selector: Option<String>,
+        text: String,
+    },
+    GetText {
+        #[serde(default)]
+        selector: Option<String>,
+    },
+    GetTitle,
+    GetUrl,
+    Screenshot {
+        #[serde(default)]
+        selector: Option<String>,
+        #[serde(default)]
+        full_page: bool,
+    },
+    Wait {
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        #[serde(default)]
+        selector: Option<String>,
+    },
+    Press {
+        key: String,
+    },
+    Hover {
+        selector: String,
+    },
+    Scroll {
+        #[serde(default)]
+        x: i64,
+        #[serde(default)]
+        y: i64,
+    },
+    IsVisible {
+        selector: String,
+    },
+    Close,
+    Find {
+        query: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for BrowserAction {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("browser action must be an object"))?;
+        let action = object.get("action").and_then(Value::as_str);
+        if matches!(action, Some("snapshot" | "get_title" | "get_url" | "close"))
+            && object.len() != 1
+        {
+            return Err(serde::de::Error::custom(
+                "unit browser actions accept only the `action` field",
+            ));
+        }
+        serde_json::from_value::<BrowserActionUnchecked>(value)
+            .map(Into::into)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<BrowserActionUnchecked> for BrowserAction {
+    fn from(value: BrowserActionUnchecked) -> Self {
+        match value {
+            BrowserActionUnchecked::Open { url } => Self::Open { url },
+            BrowserActionUnchecked::Snapshot => Self::Snapshot,
+            BrowserActionUnchecked::Click { selector } => Self::Click { selector },
+            BrowserActionUnchecked::Fill { selector, value } => Self::Fill { selector, value },
+            BrowserActionUnchecked::Type { selector, text } => Self::Type { selector, text },
+            BrowserActionUnchecked::GetText { selector } => Self::GetText { selector },
+            BrowserActionUnchecked::GetTitle => Self::GetTitle,
+            BrowserActionUnchecked::GetUrl => Self::GetUrl,
+            BrowserActionUnchecked::Screenshot {
+                selector,
+                full_page,
+            } => Self::Screenshot {
+                selector,
+                full_page,
+            },
+            BrowserActionUnchecked::Wait {
+                duration_ms,
+                selector,
+            } => Self::Wait {
+                duration_ms,
+                selector,
+            },
+            BrowserActionUnchecked::Press { key } => Self::Press { key },
+            BrowserActionUnchecked::Hover { selector } => Self::Hover { selector },
+            BrowserActionUnchecked::Scroll { x, y } => Self::Scroll { x, y },
+            BrowserActionUnchecked::IsVisible { selector } => Self::IsVisible { selector },
+            BrowserActionUnchecked::Close => Self::Close,
+            BrowserActionUnchecked::Find { query } => Self::Find { query },
+        }
+    }
 }
 
 /// A correlated command sent from the native companion to Chrome.
@@ -346,6 +462,13 @@ mod tests {
             )
             .is_err()
         );
+        for action in ["snapshot", "get_title", "get_url", "close"] {
+            assert!(
+                serde_json::from_value::<BrowserAction>(json!({"action":action,"extra":true}))
+                    .is_err(),
+                "{action} must reject unknown fields"
+            );
+        }
     }
 
     #[test]

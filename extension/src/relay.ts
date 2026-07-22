@@ -10,7 +10,7 @@ type StorageApi = Pick<typeof chrome.storage, 'local'>;
 type WebSocketFactory = (url: string, protocols: string[]) => WebSocket;
 
 export class RelayClient {
-  private socket?: WebSocket;
+  private socket: WebSocket | undefined;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private retries = 0;
@@ -41,7 +41,9 @@ export class RelayClient {
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.socket?.close(1000, 'extension stopped');
+    const socket = this.socket;
+    this.socket = undefined;
+    socket?.close(1000, 'extension stopped');
     this.rejectPending('Relay disconnected');
   }
 
@@ -88,11 +90,12 @@ export class RelayClient {
       this.heartbeatTimer = setInterval(() => this.send({ protocol_version: PROTOCOL_VERSION, type: 'heartbeat' }), 15_000);
     };
     socket.onmessage = (event) => { void this.handleMessage(String(event.data)); };
-    socket.onerror = () => this.onState('failed');
+    socket.onerror = () => { if (socket === this.socket) this.onState('failed'); };
     socket.onclose = () => {
+      if (socket !== this.socket) return;
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       this.rejectPending('Relay disconnected');
-      if (!this.stopped && socket === this.socket) this.scheduleReconnect(config);
+      if (!this.stopped) this.scheduleReconnect(config);
     };
   }
 
@@ -142,7 +145,7 @@ function assertConfig(value: RelayConfig): void {
 function isRelayConfig(value: unknown): value is RelayConfig {
   if (typeof value !== 'object' || value === null) return false;
   const item = value as Record<string, unknown>;
-  if (typeof item.url !== 'string' || typeof item.pairingToken !== 'string' || !/^[A-Za-z0-9]{32,512}$/.test(item.pairingToken)) return false;
+  if (typeof item.url !== 'string' || typeof item.pairingToken !== 'string' || !/^[A-Za-z0-9_-]{32,512}$/.test(item.pairingToken)) return false;
   try {
     const url = new URL(item.url);
     return url.protocol === 'ws:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]');

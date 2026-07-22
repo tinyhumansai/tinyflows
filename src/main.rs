@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -87,7 +88,7 @@ async fn start_companion(arguments: &[&str]) -> Result<(), String> {
 
 async fn native_get(resource: &str, arguments: &[&str]) -> Result<(), String> {
     let (url, secret) = native_connection(arguments)?;
-    let response = reqwest::Client::new()
+    let response = native_client()?
         .get(format!("{url}/v1/native/{resource}"))
         .bearer_auth(secret.expose())
         .send()
@@ -106,7 +107,7 @@ async fn native_run(workflow_id: &str, arguments: &[&str]) -> Result<(), String>
         .map_err(|error| format!("invalid --input JSON: {error}"))?
         .unwrap_or(Value::Null);
     let (url, secret) = native_connection(arguments)?;
-    let response = reqwest::Client::new()
+    let response = native_client()?
         .post(format!("{url}/v1/native/runs"))
         .bearer_auth(secret.expose())
         .json(&json!({"workflow_id":workflow_id,"tab_id":tab_id,"input":input}))
@@ -114,6 +115,13 @@ async fn native_run(workflow_id: &str, arguments: &[&str]) -> Result<(), String>
         .await
         .map_err(|error| error.to_string())?;
     print_response(response).await
+}
+
+fn native_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 fn native_connection(
@@ -275,15 +283,24 @@ struct MemoryState(Mutex<HashMap<String, Value>>);
 #[async_trait]
 impl StateStore for MemoryState {
     async fn load(&self, key: &str) -> EngineResult<Option<Value>> {
-        Ok(self.0.lock().ok().and_then(|state| state.get(key).cloned()))
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| state_lock_error())?
+            .get(key)
+            .cloned())
     }
     async fn store(&self, key: &str, value: Value) -> EngineResult<()> {
         self.0
             .lock()
-            .map_err(|_| unavailable("state store"))?
+            .map_err(|_| state_lock_error())?
             .insert(key.to_owned(), value);
         Ok(())
     }
+}
+
+fn state_lock_error() -> EngineError {
+    EngineError::Capability("standalone companion state store lock poisoned".into())
 }
 
 struct NoResolver;
@@ -303,5 +320,24 @@ fn standalone_capabilities() -> tinyflows::caps::Capabilities {
         state: Arc::new(MemoryState::default()),
         resolver: Arc::new(NoResolver),
         agent: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn poisoned_memory_state_is_an_error_not_a_missing_key() {
+        let state = MemoryState::default();
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = state.0.lock().unwrap();
+            panic!("poison state lock");
+        }));
+
+        assert!(state.load("missing").await.is_err());
+        assert!(state.store("key", Value::Null).await.is_err());
     }
 }

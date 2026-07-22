@@ -343,7 +343,9 @@ var RelayClient = class {
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.socket?.close(1e3, "extension stopped");
+    const socket = this.socket;
+    this.socket = void 0;
+    socket?.close(1e3, "extension stopped");
     this.rejectPending("Relay disconnected");
   }
   async configure(config) {
@@ -390,11 +392,14 @@ var RelayClient = class {
     socket.onmessage = (event) => {
       void this.handleMessage(String(event.data));
     };
-    socket.onerror = () => this.onState("failed");
+    socket.onerror = () => {
+      if (socket === this.socket) this.onState("failed");
+    };
     socket.onclose = () => {
+      if (socket !== this.socket) return;
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       this.rejectPending("Relay disconnected");
-      if (!this.stopped && socket === this.socket) this.scheduleReconnect(config);
+      if (!this.stopped) this.scheduleReconnect(config);
     };
   }
   async handleMessage(raw) {
@@ -457,7 +462,7 @@ function assertConfig(value) {
 function isRelayConfig(value) {
   if (typeof value !== "object" || value === null) return false;
   const item = value;
-  if (typeof item.url !== "string" || typeof item.pairingToken !== "string" || !/^[A-Za-z0-9]{32,512}$/.test(item.pairingToken)) return false;
+  if (typeof item.url !== "string" || typeof item.pairingToken !== "string" || !/^[A-Za-z0-9_-]{32,512}$/.test(item.pairingToken)) return false;
   try {
     const url = new URL(item.url);
     return url.protocol === "ws:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]");

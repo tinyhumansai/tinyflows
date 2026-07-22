@@ -61,5 +61,18 @@ describe('authenticated relay', () => {
     const empty = setup(null); await empty.relay.start(); expect(empty.states).toContain('unpaired');
     const configured = setup();
     await expect(configured.relay.configure({ url: 'wss://evil.example/ws', pairingToken: TOKEN })).rejects.toThrow(/loopback/);
+    await expect(configured.relay.configure({ url: 'ws://127.0.0.1:32189/ws', pairingToken: `${TOKEN.slice(0, 30)}-_` })).resolves.toBeUndefined();
+    configured.relay.stop();
+  });
+
+  it('ignores close and error events from a replaced socket', async () => {
+    const { relay, sockets, states } = setup();
+    await relay.start(); sockets[0]?.open();
+    await relay.configure({ url: 'ws://127.0.0.1:32190/v1/extension', pairingToken: TOKEN });
+    sockets[1]?.open();
+    sockets[0]?.onerror?.(); sockets[0]?.onclose?.();
+    expect(states.at(-1)).toBe('connected');
+    expect(sockets).toHaveLength(2);
+    relay.stop();
   });
 });

@@ -58,6 +58,7 @@ test('executes a deterministic signed-in shopping journey over the relay', async
   const relayServer = new WebSocketServer({ port: 0, host: '127.0.0.1', handleProtocols(protocols) {
     return protocols.has('tinyflows.v1') ? 'tinyflows.v1' : false;
   }});
+  try {
   await new Promise<void>((resolveListening) => relayServer.once('listening', resolveListening));
   const relayConnected = new Promise<void>((resolveConnected) => {
     relayServer.on('connection', (socket) => {
@@ -139,6 +140,8 @@ test('executes a deterministic signed-in shopping journey over the relay', async
   expect(closeResponseIndex).toBeGreaterThanOrEqual(0);
   expect(revokeIndex).toBeGreaterThan(closeResponseIndex);
 
-  extensionSocket?.close();
-  await new Promise<void>((resolveClosed) => relayServer.close(() => resolveClosed()));
+  } finally {
+    extensionSocket?.close();
+    await new Promise<void>((resolveClosed) => relayServer.close(() => resolveClosed()));
+  }
 });

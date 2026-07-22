@@ -3,7 +3,6 @@ import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import yazl from 'yazl';
-import './build.mjs';
 
 async function files(root, dir = root) {
   const entries = await readdir(dir);
