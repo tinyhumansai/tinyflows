@@ -57,7 +57,7 @@ export class RelayClient {
   async request(method: ControlRequest['method'], params: Record<string, unknown>, timeoutMs = 15_000): Promise<unknown> {
     if (!this.socket || this.socket.readyState !== 1) throw new Error('Relay is not connected');
     const request_id = crypto.randomUUID();
-    const request: ControlRequest = { protocol_version: PROTOCOL_VERSION, type: 'control.request', request_id, method, params };
+    const request = controlRequest(method, request_id, params);
     const result = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(request_id); reject(new Error(`${method} timed out`)); }, timeoutMs);
       this.pending.set(request_id, { resolve, reject, timer });
@@ -107,8 +107,13 @@ export class RelayClient {
     const pending = this.pending.get(response.request_id);
     if (!pending) return;
     clearTimeout(pending.timer); this.pending.delete(response.request_id);
-    if (response.ok) pending.resolve(response.result);
-    else pending.reject(new Error(response.error?.message ?? 'Companion request failed'));
+    switch (response.status) {
+      case 'ok': pending.resolve(response.result); break;
+      case 'workflows': pending.resolve(response.workflows); break;
+      case 'tabs': pending.resolve(response.tabs); break;
+      case 'connection': pending.resolve({ connected: response.connected }); break;
+      case 'error': pending.reject(new Error(response.message)); break;
+    }
   }
 
   private scheduleReconnect(config: RelayConfig): void {
@@ -130,10 +135,22 @@ function assertConfig(value: RelayConfig): void {
 function isRelayConfig(value: unknown): value is RelayConfig {
   if (typeof value !== 'object' || value === null) return false;
   const item = value as Record<string, unknown>;
-  if (typeof item.url !== 'string' || typeof item.pairingToken !== 'string' || !/^[A-Za-z0-9_-]{16,512}$/.test(item.pairingToken)) return false;
+  if (typeof item.url !== 'string' || typeof item.pairingToken !== 'string' || !/^[A-Za-z0-9]{32,512}$/.test(item.pairingToken)) return false;
   try {
     const url = new URL(item.url);
     return url.protocol === 'ws:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]');
   } catch { return false; }
 }
 export { DEFAULT_URL };
+
+function controlRequest(method: ControlRequest['method'], request_id: string, params: Record<string, unknown>): ControlRequest {
+  const base = { protocol_version: PROTOCOL_VERSION, request_id };
+  switch (method) {
+    case 'workflow.list': return { ...base, method };
+    case 'tab.list': return { ...base, method };
+    case 'connection.status': return { ...base, method };
+    case 'workflow.start': return { ...base, method, workflow_id: String(params.workflow_id ?? ''), tab_id: Number(params.tab_id), input: params.input ?? {} };
+    case 'workflow.cancel': return { ...base, method, run_id: String(params.run_id ?? '') };
+    case 'run.subscribe': return { ...base, method, run_id: String(params.run_id ?? '') };
+  }
+}

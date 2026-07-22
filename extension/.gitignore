@@ -2,3 +2,5 @@ node_modules/
 dist/
 artifacts/
 coverage/
+test-results/
+playwright-report/

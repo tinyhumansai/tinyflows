@@ -12,7 +12,8 @@ class FakeSocket {
   open() { this.readyState = 1; this.onopen?.(); }
   message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
 }
-function setup(config: unknown = { url: 'ws://127.0.0.1:32189/v1/extension', pairingToken: 'abcdefghijklmnop' }) {
+const TOKEN = '0123456789abcdef0123456789abcdef';
+function setup(config: unknown = { url: 'ws://127.0.0.1:32189/v1/extension', pairingToken: TOKEN }) {
   const sockets: FakeSocket[] = []; const states: string[] = []; const events: unknown[] = [];
   let stored: Record<string, unknown> = { 'tinyflows.relayConfig.v1': config };
   const storage = { local: { get: vi.fn(async () => stored), set: vi.fn(async (value) => { stored = value; }) } };
@@ -26,8 +27,8 @@ function setup(config: unknown = { url: 'ws://127.0.0.1:32189/v1/extension', pai
 describe('authenticated relay', () => {
   it('puts the secret in a websocket subprotocol and handles browser requests', async () => {
     const { relay, sockets, states } = setup(); await relay.start();
-    expect(sockets[0]?.url).not.toContain('abcdefghijklmnop');
-    expect(sockets[0]?.protocols).toContain('tinyflows.auth.abcdefghijklmnop');
+    expect(sockets[0]?.url).not.toContain(TOKEN);
+    expect(sockets[0]?.protocols).toContain(`tinyflows.auth.${TOKEN}`);
     sockets[0]?.open(); expect(states).toContain('connected');
     sockets[0]?.message({ protocol_version: 1, request_id: 'r', run_id: 'x', tab_id: 1, timeout_ms: 1000, action: { action: 'get_title' } });
     await vi.waitFor(() => expect(sockets[0]?.sent.some((item) => JSON.parse(item).status === 'ok')).toBe(true));
@@ -38,15 +39,16 @@ describe('authenticated relay', () => {
     const { relay, sockets, events } = setup(); await relay.start(); sockets[0]?.open();
     const pending = relay.request('workflow.list', {});
     const sent = JSON.parse(sockets[0]!.sent.at(-1)!);
-    sockets[0]?.message({ protocol_version: 1, type: 'control.response', request_id: sent.request_id, ok: true, result: ['one'] });
-    await expect(pending).resolves.toEqual(['one']);
-    sockets[0]?.message({ protocol_version: 1, type: 'run.event', run_id: 'run', event: 'step', data: {} });
+    expect(sent).toEqual({ protocol_version: 1, request_id: sent.request_id, method: 'workflow.list' });
+    sockets[0]?.message({ protocol_version: 1, status: 'workflows', request_id: sent.request_id, workflows: [{ id: 'one', name: 'One' }] });
+    await expect(pending).resolves.toEqual([{ id: 'one', name: 'One' }]);
+    sockets[0]?.message({ event: 'step_started', run_id: 'run', node_id: 'one', node_kind: 'browser' });
     expect(events).toHaveLength(1); relay.stop();
   });
 
   it('rejects non-loopback config and stays unpaired without config', async () => {
     const empty = setup(null); await empty.relay.start(); expect(empty.states).toContain('unpaired');
     const configured = setup();
-    await expect(configured.relay.configure({ url: 'wss://evil.example/ws', pairingToken: 'abcdefghijklmnop' })).rejects.toThrow(/loopback/);
+    await expect(configured.relay.configure({ url: 'wss://evil.example/ws', pairingToken: TOKEN })).rejects.toThrow(/loopback/);
   });
 });

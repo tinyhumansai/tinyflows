@@ -47,4 +47,20 @@ describe('explicit tab sharing', () => {
     await expect(manager.rehydrate()).resolves.toHaveLength(1);
     expect(fixture.mock.debugger.attach).toHaveBeenCalledWith({ tabId: 5 }, '1.3');
   });
+
+  it('reuses the named group, toggles sharing, and updates all badges', async () => {
+    const fixture = api(); fixture.mock.tabGroups.query.mockResolvedValue([{ id: 12 }] as any);
+    const manager = new TabManager(fixture.mock as any);
+    await expect(manager.toggle(5)).resolves.toBe(true);
+    expect(fixture.mock.tabs.group).toHaveBeenCalledWith({ groupId: 12, tabIds: [5] });
+    await manager.markAll('reconnecting');
+    await expect(manager.toggle(5)).resolves.toBe(false);
+  });
+
+  it('revokes a saved tab when its group was renamed', async () => {
+    const fixture = api({ groupId: 9 }); fixture.setStored({ 'tinyflows.sharedTabs.v1': [{ tabId: 5, groupId: 9, windowId: 1, attachedAt: 1 }] });
+    fixture.mock.tabGroups.get.mockResolvedValue({ id: 9, title: 'Other' } as any);
+    const manager = new TabManager(fixture.mock as any); await manager.rehydrate();
+    expect(manager.list()).toEqual([]);
+  });
 });

@@ -57,4 +57,17 @@ describe('CDP action execution', () => {
     await expect(instance.execute(request({ action: 'find', query: 'Buy' }))).resolves.toEqual([{ tag: 'button', text: 'Buy' }]);
     expect(sendCommand).toHaveBeenCalled();
   });
+
+  it('reads text and visibility and clips element screenshots', async () => {
+    const { instance, sendCommand } = executor([
+      { result: { value: 'text' } }, { result: { value: true } },
+      { result: { value: { x: 1, y: 2, width: 30, height: 40, scale: 1 } } }, { data: 'clip' },
+      { cssContentSize: { x: 0, y: 0, width: 100, height: 200 } }, { data: 'full' }
+    ]);
+    await expect(instance.execute(request({ action: 'get_text', selector: '#x' }))).resolves.toBe('text');
+    await expect(instance.execute(request({ action: 'is_visible', selector: '#x' }))).resolves.toBe(true);
+    await expect(instance.execute(request({ action: 'screenshot', selector: '#x' }))).resolves.toEqual({ data: 'clip' });
+    await expect(instance.execute(request({ action: 'screenshot', full_page: true }))).resolves.toEqual({ data: 'full' });
+    expect(sendCommand).toHaveBeenCalledWith({ tabId: 7 }, 'Page.captureScreenshot', expect.objectContaining({ clip: expect.any(Object) }));
+  });
 });

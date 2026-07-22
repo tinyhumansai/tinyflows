@@ -15,5 +15,9 @@ export default tseslint.config(
   {
     files: ['scripts/*.mjs'],
     languageOptions: { globals: { process: 'readonly', Buffer: 'readonly', console: 'readonly' } }
+  },
+  {
+    files: ['tests/e2e/*.ts'],
+    rules: { 'no-empty-pattern': 'off' }
   }
 );

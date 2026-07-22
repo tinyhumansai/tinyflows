@@ -46,28 +46,26 @@ export type BrowserEvent =
   | { event: 'tab_revoked'; protocol_version: typeof PROTOCOL_VERSION; tab_id: number }
   | { event: 'relay_disconnected'; protocol_version: typeof PROTOCOL_VERSION };
 
-export interface ControlRequest {
-  protocol_version: typeof PROTOCOL_VERSION;
-  type: 'control.request';
-  request_id: string;
-  method: 'workflow.list' | 'workflow.start' | 'workflow.cancel' | 'run.subscribe' | 'tab.list';
-  params: Record<string, unknown>;
-}
-export interface ControlResponse {
-  protocol_version: typeof PROTOCOL_VERSION;
-  type: 'control.response';
-  request_id: string;
-  ok: boolean;
-  result?: unknown;
-  error?: { code: string; message: string };
-}
-export interface RunEvent {
-  protocol_version: typeof PROTOCOL_VERSION;
-  type: 'run.event';
-  run_id: string;
-  event: string;
-  data: unknown;
-}
+export type ControlRequest =
+  | { method: 'workflow.list'; protocol_version: typeof PROTOCOL_VERSION; request_id: string }
+  | { method: 'workflow.start'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; workflow_id: string; tab_id: number; input: unknown }
+  | { method: 'workflow.cancel'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; run_id: string }
+  | { method: 'run.subscribe'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; run_id: string }
+  | { method: 'tab.list'; protocol_version: typeof PROTOCOL_VERSION; request_id: string }
+  | { method: 'connection.status'; protocol_version: typeof PROTOCOL_VERSION; request_id: string };
+export type ControlResponse =
+  | { status: 'ok'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; result: unknown }
+  | { status: 'error'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; code: string; message: string }
+  | { status: 'workflows'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; workflows: Array<{id:string; name:string}> }
+  | { status: 'tabs'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; tabs: unknown[] }
+  | { status: 'connection'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; connected: boolean };
+export type RunEvent =
+  | { event: 'started'; run_id: string; tab_id: number }
+  | { event: 'step_started'; run_id: string; node_id: string; node_kind: string }
+  | { event: 'step_completed'; run_id: string; node_id: string; output: unknown }
+  | { event: 'completed'; run_id: string; output: unknown }
+  | { event: 'failed'; run_id: string; code: string; message: string }
+  | { event: 'cancelled'; run_id: string };
 
 export function isBrowserRequest(value: unknown): value is BrowserRequest {
   if (!isRecordWithKeys(value, ['protocol_version', 'request_id', 'run_id', 'tab_id', 'timeout_ms', 'action'])) return false;
@@ -98,12 +96,27 @@ export function isBrowserAction(value: unknown): value is BrowserAction {
 }
 
 export function isControlResponse(value: unknown): value is ControlResponse {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['protocol_version', 'type', 'request_id', 'ok', 'result', 'error'])) return false;
-  return value.protocol_version === PROTOCOL_VERSION && value.type === 'control.response' && isId(value.request_id) && typeof value.ok === 'boolean';
+  if (!isRecord(value) || value.protocol_version !== PROTOCOL_VERSION || !isId(value.request_id)) return false;
+  switch (value.status) {
+    case 'ok': return hasExactKeys(value, ['status', 'protocol_version', 'request_id', 'result']);
+    case 'error': return hasExactKeys(value, ['status', 'protocol_version', 'request_id', 'code', 'message']) && isId(value.code) && typeof value.message === 'string';
+    case 'workflows': return hasExactKeys(value, ['status', 'protocol_version', 'request_id', 'workflows']) && Array.isArray(value.workflows);
+    case 'tabs': return hasExactKeys(value, ['status', 'protocol_version', 'request_id', 'tabs']) && Array.isArray(value.tabs);
+    case 'connection': return hasExactKeys(value, ['status', 'protocol_version', 'request_id', 'connected']) && typeof value.connected === 'boolean';
+    default: return false;
+  }
 }
 export function isRunEvent(value: unknown): value is RunEvent {
-  return isRecordWithKeys(value, ['protocol_version', 'type', 'run_id', 'event', 'data']) &&
-    value.protocol_version === PROTOCOL_VERSION && value.type === 'run.event' && isId(value.run_id) && isId(value.event);
+  if (!isRecord(value) || !isId(value.run_id)) return false;
+  switch (value.event) {
+    case 'started': return hasExactKeys(value, ['event', 'run_id', 'tab_id']) && Number.isSafeInteger(value.tab_id);
+    case 'step_started': return hasExactKeys(value, ['event', 'run_id', 'node_id', 'node_kind']) && isId(value.node_id) && isId(value.node_kind);
+    case 'step_completed': return hasExactKeys(value, ['event', 'run_id', 'node_id', 'output']) && isId(value.node_id);
+    case 'completed': return hasExactKeys(value, ['event', 'run_id', 'output']);
+    case 'failed': return hasExactKeys(value, ['event', 'run_id', 'code', 'message']) && isId(value.code) && typeof value.message === 'string';
+    case 'cancelled': return hasExactKeys(value, ['event', 'run_id']);
+    default: return false;
+  }
 }
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

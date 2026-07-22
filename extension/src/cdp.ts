@@ -32,7 +32,13 @@ export class CdpExecutor {
       case 'is_visible': return evaluate(this.debuggerApi, target, visibleExpression(action.selector));
       case 'find': return evaluate(this.debuggerApi, target, findExpression(action.query));
       case 'screenshot': {
-        const result = await this.debuggerApi.sendCommand(target, 'Page.captureScreenshot', { format: 'png', fromSurface: true });
+        const options: Record<string, unknown> = { format: 'png', fromSurface: true, captureBeyondViewport: action.full_page ?? false };
+        if (action.selector) options.clip = await elementRect(this.debuggerApi, target, action.selector);
+        else if (action.full_page) {
+          const metrics = await this.debuggerApi.sendCommand(target, 'Page.getLayoutMetrics', {}) as { cssContentSize?: {x:number;y:number;width:number;height:number} };
+          if (metrics.cssContentSize) options.clip = { ...metrics.cssContentSize, scale: 1 };
+        }
+        const result = await this.debuggerApi.sendCommand(target, 'Page.captureScreenshot', options);
         return result;
       }
       case 'click': {
@@ -54,8 +60,8 @@ export class CdpExecutor {
       }
       case 'type': {
         if (action.selector) {
-          const ok = await evaluate(this.debuggerApi, target, `document.querySelector(${JSON.stringify(action.selector)})?.focus() ?? false`);
-          if (ok === null) throw new BrowserError('element_not_found', `No element matches ${action.selector}`);
+          const ok = await evaluate(this.debuggerApi, target, `(() => { const e=document.querySelector(${JSON.stringify(action.selector)}); if(!e)return null; e.focus(); return true; })()`);
+          if (ok !== true) throw new BrowserError('element_not_found', `No element matches ${action.selector}`);
         }
         await this.debuggerApi.sendCommand(target, 'Input.insertText', { text: action.text });
         return { typed: true };
@@ -105,6 +111,15 @@ async function elementPoint(api: DebuggerApi, target: chrome.debugger.Debuggee, 
     throw new BrowserError('element_not_found', `No element matches ${selector}`);
   }
   return { x: point.x, y: point.y };
+}
+
+async function elementRect(api: DebuggerApi, target: chrome.debugger.Debuggee, selector: string) {
+  const expression = `(() => { const e=document.querySelector(${JSON.stringify(selector)}); if(!e)return null; const r=e.getBoundingClientRect(); return {x:r.left+scrollX,y:r.top+scrollY,width:r.width,height:r.height,scale:1}; })()`;
+  const rect = await evaluate(api, target, expression) as {x?:unknown;y?:unknown;width?:unknown;height?:unknown;scale?:unknown} | null;
+  if (!rect || typeof rect.x !== 'number' || typeof rect.y !== 'number' || typeof rect.width !== 'number' || typeof rect.height !== 'number') {
+    throw new BrowserError('element_not_found', `No element matches ${selector}`);
+  }
+  return rect;
 }
 
 async function mouse(api: DebuggerApi, target: chrome.debugger.Debuggee, type: string, point: {x: number; y: number}, clickCount: number) {

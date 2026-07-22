@@ -32,9 +32,9 @@ describe('browser protocol validation', () => {
   });
 
   it('validates control responses and run events separately', () => {
-    expect(isControlResponse({ protocol_version: 1, type: 'control.response', request_id: 'r', ok: true, result: [] })).toBe(true);
-    expect(isControlResponse({ protocol_version: 1, type: 'control.response', request_id: '', ok: true })).toBe(false);
-    expect(isRunEvent({ protocol_version: 1, type: 'run.event', run_id: 'r', event: 'step', data: {} })).toBe(true);
-    expect(isRunEvent({ protocol_version: 1, type: 'run.event', run_id: 'r', event: 'step', data: {}, extra: 1 })).toBe(false);
+    expect(isControlResponse({ protocol_version: 1, status: 'workflows', request_id: 'r', workflows: [] })).toBe(true);
+    expect(isControlResponse({ protocol_version: 1, status: 'ok', request_id: '', result: null })).toBe(false);
+    expect(isRunEvent({ event: 'step_started', run_id: 'r', node_id: 'n', node_kind: 'tool_call' })).toBe(true);
+    expect(isRunEvent({ event: 'cancelled', run_id: 'r', extra: 1 })).toBe(false);
   });
 });
