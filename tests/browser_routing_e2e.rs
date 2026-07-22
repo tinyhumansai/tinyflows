@@ -1,5 +1,7 @@
 //! Mixed browser and integration routing through ordinary `tool_call` nodes.
 
+#![cfg(feature = "mock")]
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;

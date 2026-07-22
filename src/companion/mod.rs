@@ -8,11 +8,14 @@
 mod auth;
 mod control;
 mod relay;
+mod server;
 mod tabs;
 
 pub use auth::{
-    AuthError, AuthenticatedSession, Authenticator, PairingSecret, SecretStore, WebSocketHandshake,
+    AUTH_SUBPROTOCOL_PREFIX, AuthError, AuthenticatedSession, Authenticator, PROTOCOL_SUBPROTOCOL,
+    PairingSecret, SecretStore, WebSocketHandshake,
 };
 pub use control::{CompanionControlRequest, CompanionControlResponse, RunEvent, WorkflowSummary};
 pub use relay::{DisconnectOutcome, PendingAction, RelayError, RelayPolicy, RelayState, SessionId};
+pub use server::{CompanionServer, CompanionServerConfig, CompanionServerError};
 pub use tabs::{RunBinding, RunId, SharedTab, TabId, TabRegistry, TabRegistryError};

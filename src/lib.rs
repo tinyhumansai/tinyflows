@@ -22,6 +22,7 @@
 pub mod browser;
 pub mod caps;
 pub mod catalog;
+pub mod companion;
 pub mod compiler;
 pub mod data;
 pub mod engine;
