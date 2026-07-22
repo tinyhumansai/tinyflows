@@ -55,6 +55,7 @@ describe('explicit tab sharing', () => {
     expect(fixture.mock.tabs.group).toHaveBeenCalledWith({ groupId: 12, tabIds: [5] });
     await manager.markAll('reconnecting');
     await expect(manager.announcement(5)).resolves.toEqual({ id: 5, window_id: 1, url: 'https://example.com', title: 'Example' });
+    expect(fixture.mock.tabs.get).toHaveBeenCalledTimes(2);
     await expect(manager.toggle(5)).resolves.toBe(false);
   });
 

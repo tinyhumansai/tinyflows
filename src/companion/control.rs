@@ -106,8 +106,8 @@ pub enum RunEvent {
         protocol_version: u32,
         /// Run receiving this event.
         run_id: RunId,
-        /// Final structured workflow output.
-        output: Value,
+        /// Stable terminal status without host-owned workflow output.
+        status: String,
     },
     /// A workflow run reached a terminal failure state.
     Failed {
@@ -310,6 +310,24 @@ mod tests {
                 "request_id": "control-2", "include_unshared": true
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn completed_event_contains_no_host_owned_output() {
+        let event = RunEvent::Completed {
+            protocol_version: 1,
+            run_id: "run-1".into(),
+            status: "success".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "event": "completed",
+                "protocol_version": 1,
+                "run_id": "run-1",
+                "status": "success"
+            })
         );
     }
 }

@@ -7,11 +7,15 @@ var BrowserError = class extends Error {
     this.name = "BrowserError";
   }
 };
-function toBrowserError(error) {
+async function toBrowserError(error, tabId, tabsApi) {
   if (error instanceof BrowserError) return error;
   const message = error instanceof Error ? error.message : String(error);
-  if (message.toLowerCase().includes("no tab with id")) {
-    return new BrowserError("tab_revoked", "The shared tab no longer exists");
+  if (tabId !== void 0) {
+    try {
+      await (tabsApi ?? chrome.tabs).get(tabId);
+    } catch {
+      return new BrowserError("tab_revoked", "The shared tab no longer exists");
+    }
   }
   return new BrowserError("browser_failure", message || "Unknown browser error");
 }
@@ -54,8 +58,10 @@ var CdpExecutor = class {
         return evaluate(this.debuggerApi, target, findExpression(action.query));
       case "screenshot": {
         const options = { format: "png", fromSurface: true, captureBeyondViewport: action.full_page ?? false };
-        if (action.selector) options.clip = await elementRect(this.debuggerApi, target, action.selector);
-        else if (action.full_page) {
+        if (action.selector) {
+          options.clip = await elementRect(this.debuggerApi, target, action.selector);
+          options.captureBeyondViewport = true;
+        } else if (action.full_page) {
           const metrics = await this.debuggerApi.sendCommand(target, "Page.getLayoutMetrics", {});
           if (metrics.cssContentSize) options.clip = { ...metrics.cssContentSize, scale: 1 };
         }
@@ -128,7 +134,12 @@ var CdpExecutor = class {
 async function evaluate(api, target, expression) {
   const response = await api.sendCommand(target, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
   const result = response;
-  if (result.exceptionDetails) throw new BrowserError("browser_failure", "Page evaluation failed");
+  if (result.exceptionDetails) {
+    throw new BrowserError(
+      "browser_failure",
+      result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? "Page evaluation failed"
+    );
+  }
   return result.result?.value;
 }
 async function elementPoint(api, target, selector) {
@@ -275,7 +286,7 @@ function isRunEvent(value) {
     case "browser_action_failed":
       return hasExactKeys(value, ["event", "protocol_version", "run_id", "request_id", "code", "message"]) && isId(value.request_id) && isId(value.code) && typeof value.message === "string";
     case "completed":
-      return hasExactKeys(value, ["event", "protocol_version", "run_id", "output"]);
+      return hasExactKeys(value, ["event", "protocol_version", "run_id", "status"]) && value.status === "success";
     case "failed":
       return hasExactKeys(value, ["event", "protocol_version", "run_id", "code", "message"]) && isId(value.code) && typeof value.message === "string";
     case "cancelled":
@@ -585,7 +596,7 @@ var TabManager = class {
       await this.revoke(tabId, false);
       throw new BrowserError("tab_revoked", "The TinyFlows group was removed or renamed");
     }
-    return record;
+    return { shared: record, tab };
   }
   list() {
     return [...this.shared.values()].sort((a, b) => a.tabId - b.tabId);
@@ -594,12 +605,11 @@ var TabManager = class {
     return this.shared.has(tabId);
   }
   async announcement(tabId) {
-    const shared = await this.assertShared(tabId);
-    const tab = await this.api.tabs.get(tabId);
+    const { shared, tab } = await this.assertShared(tabId);
     return {
       id: tabId,
       window_id: shared.windowId,
-      url: tab.url,
+      url: tab.url ?? "",
       title: tab.title ?? ""
     };
   }
@@ -638,8 +648,6 @@ function isSharedTab(value) {
 var tabs = new TabManager();
 var executor = new CdpExecutor();
 var relayState = "unpaired";
-var pendingWorkflowTabs = /* @__PURE__ */ new Set();
-var activeAutomationTabs = /* @__PURE__ */ new Set();
 var closingWorkflowTabs = /* @__PURE__ */ new Set();
 var actions = /* @__PURE__ */ new Map();
 var bootPromise;
@@ -650,7 +658,6 @@ relay.setBrowserCancelHandler((requestId) => actions.get(requestId)?.abort());
 async function handleBrowserRequest(request) {
   const controller = new AbortController();
   actions.set(request.request_id, controller);
-  activeAutomationTabs.add(request.tab_id);
   if (request.action.action === "close") closingWorkflowTabs.add(request.tab_id);
   notifyRunEvent({
     event: "browser_action_started",
@@ -678,7 +685,7 @@ async function handleBrowserRequest(request) {
     }
     return { status: "ok", protocol_version: PROTOCOL_VERSION, request_id: request.request_id, result: { data } };
   } catch (cause) {
-    const error = toBrowserError(cause);
+    const error = await toBrowserError(cause, request.tab_id);
     const data = { code: error.code, message: error.message };
     relay.send({ event: "action_failed", protocol_version: PROTOCOL_VERSION, request_id: request.request_id, error: data });
     notifyRunEvent({
@@ -692,7 +699,6 @@ async function handleBrowserRequest(request) {
     return { status: "error", protocol_version: PROTOCOL_VERSION, request_id: request.request_id, error: data };
   } finally {
     actions.delete(request.request_id);
-    activeAutomationTabs.delete(request.tab_id);
     closingWorkflowTabs.delete(request.tab_id);
   }
 }
@@ -716,24 +722,12 @@ chrome.runtime.onStartup.addListener(() => {
   void bootOnce();
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
-  pendingWorkflowTabs.delete(tabId);
   if (tabs.has(tabId)) {
     void tabs.revoke(tabId, false);
     if (!closingWorkflowTabs.has(tabId)) relay.send({ event: "tab_revoked", protocol_version: PROTOCOL_VERSION, tab_id: tabId });
   }
 });
-chrome.tabs.onCreated.addListener((tab) => {
-  if (tab.id !== void 0 && tab.openerTabId !== void 0 && activeAutomationTabs.has(tab.openerTabId)) {
-    pendingWorkflowTabs.add(tab.id);
-  }
-});
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (pendingWorkflowTabs.has(tabId) && changeInfo.url?.startsWith("http")) {
-    pendingWorkflowTabs.delete(tabId);
-    void tabs.share(tabId).then(async () => {
-      if (relayState === "connected") relay.send(tabSharedEvent(await tabs.announcement(tabId)));
-    }).catch(() => void 0);
-  }
   if (tabs.has(tabId) && changeInfo.groupId !== void 0 && !closingWorkflowTabs.has(tabId)) {
     void tabs.assertShared(tabId).catch(() => relay.send({ event: "tab_revoked", protocol_version: PROTOCOL_VERSION, tab_id: tabId }));
   }

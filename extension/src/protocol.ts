@@ -83,7 +83,7 @@ export type RunEvent =
   | { event: 'browser_action_started'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; request_id: string; tab_id: number; action: string }
   | { event: 'browser_action_completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; request_id: string; output: unknown }
   | { event: 'browser_action_failed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; request_id: string; code: string; message: string }
-  | { event: 'completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; output: unknown }
+  | { event: 'completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; status: 'success' }
   | { event: 'failed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; code: string; message: string }
   | { event: 'cancelled'; protocol_version: typeof PROTOCOL_VERSION; run_id: string };
 
@@ -147,7 +147,7 @@ export function isRunEvent(value: unknown): value is RunEvent {
     case 'browser_action_completed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'request_id', 'output']) && isId(value.request_id);
     case 'browser_action_failed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'request_id', 'code', 'message']) &&
       isId(value.request_id) && isId(value.code) && typeof value.message === 'string';
-    case 'completed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'output']);
+    case 'completed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'status']) && value.status === 'success';
     case 'failed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'code', 'message']) && isId(value.code) && typeof value.message === 'string';
     case 'cancelled': return hasExactKeys(value, ['event', 'protocol_version', 'run_id']);
     default: return false;

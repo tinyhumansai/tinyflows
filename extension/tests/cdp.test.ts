@@ -83,6 +83,15 @@ describe('CDP action execution', () => {
     await expect(instance.execute(request({ action: 'is_visible', selector: '#x' }))).resolves.toBe(true);
     await expect(instance.execute(request({ action: 'screenshot', selector: '#x' }))).resolves.toEqual({ data: 'clip' });
     await expect(instance.execute(request({ action: 'screenshot', full_page: true }))).resolves.toEqual({ data: 'full' });
-    expect(sendCommand).toHaveBeenCalledWith({ tabId: 7 }, 'Page.captureScreenshot', expect.objectContaining({ clip: expect.any(Object) }));
+    expect(sendCommand).toHaveBeenCalledWith({ tabId: 7 }, 'Page.captureScreenshot', expect.objectContaining({
+      clip: expect.any(Object), captureBeyondViewport: true
+    }));
+  });
+
+  it('surfaces page evaluation diagnostics', async () => {
+    const { instance } = executor([{ exceptionDetails: { exception: { description: 'ReferenceError: broken' } } }]);
+    await expect(instance.execute(request({ action: 'get_title' }))).rejects.toMatchObject({
+      code: 'browser_failure', message: 'ReferenceError: broken'
+    });
   });
 });

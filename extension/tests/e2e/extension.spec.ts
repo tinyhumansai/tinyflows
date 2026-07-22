@@ -45,8 +45,13 @@ test('explicitly shares and revokes an ordinary tab through the TinyFlows group'
   const control = await context.newPage(); await control.goto(`chrome-extension://${extensionId}/popup.html`);
   const shared = await control.evaluate(async (id) => chrome.runtime.sendMessage({ type: 'tab.toggle', tabId: id }), tabId);
   expect(shared).toMatchObject({ ok: true, shared: true });
+  const childPromise = context.waitForEvent('page');
+  await target.evaluate(() => { window.open('http://tinyflows.test/?child=1'); });
+  const child = await childPromise;
+  await child.waitForLoadState();
   const state = await control.evaluate(async () => chrome.runtime.sendMessage({ type: 'state' }));
   expect(state.tabs).toEqual([expect.objectContaining({ tabId })]);
+  await child.close();
   const revoked = await control.evaluate(async (id) => chrome.runtime.sendMessage({ type: 'tab.toggle', tabId: id }), tabId);
   expect(revoked).toMatchObject({ ok: true, shared: false });
 });

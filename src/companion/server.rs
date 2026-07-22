@@ -214,10 +214,10 @@ impl CompanionServer {
                         pending_approvals: value.pending_approvals,
                     });
                 }
-                Ok(value) => server.send_json(&RunEvent::Completed {
+                Ok(_) => server.send_json(&RunEvent::Completed {
                     protocol_version: BROWSER_PROTOCOL_VERSION,
                     run_id: spawned_run_id.clone(),
-                    output: value.output,
+                    status: "success".into(),
                 }),
                 Err(error) => server.send_json(&RunEvent::Failed {
                     protocol_version: BROWSER_PROTOCOL_VERSION,

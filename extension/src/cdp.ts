@@ -40,7 +40,10 @@ export class CdpExecutor {
       case 'find': return evaluate(this.debuggerApi, target, findExpression(action.query));
       case 'screenshot': {
         const options: Record<string, unknown> = { format: 'png', fromSurface: true, captureBeyondViewport: action.full_page ?? false };
-        if (action.selector) options.clip = await elementRect(this.debuggerApi, target, action.selector);
+        if (action.selector) {
+          options.clip = await elementRect(this.debuggerApi, target, action.selector);
+          options.captureBeyondViewport = true;
+        }
         else if (action.full_page) {
           const metrics = await this.debuggerApi.sendCommand(target, 'Page.getLayoutMetrics', {}) as { cssContentSize?: {x:number;y:number;width:number;height:number} };
           if (metrics.cssContentSize) options.clip = { ...metrics.cssContentSize, scale: 1 };
@@ -109,8 +112,16 @@ export class CdpExecutor {
 
 async function evaluate(api: DebuggerApi, target: chrome.debugger.Debuggee, expression: string): Promise<unknown> {
   const response = await api.sendCommand(target, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-  const result = response as { result?: { value?: unknown }; exceptionDetails?: unknown };
-  if (result.exceptionDetails) throw new BrowserError('browser_failure', 'Page evaluation failed');
+  const result = response as {
+    result?: { value?: unknown };
+    exceptionDetails?: { exception?: { description?: string }; text?: string };
+  };
+  if (result.exceptionDetails) {
+    throw new BrowserError(
+      'browser_failure',
+      result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? 'Page evaluation failed'
+    );
+  }
   return result.result?.value;
 }
 

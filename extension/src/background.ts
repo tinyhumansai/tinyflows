@@ -9,8 +9,6 @@ import { TabManager } from './tab-manager';
 const tabs = new TabManager();
 const executor = new CdpExecutor();
 let relayState: RelayState = 'unpaired';
-const pendingWorkflowTabs = new Set<number>();
-const activeAutomationTabs = new Set<number>();
 const closingWorkflowTabs = new Set<number>();
 const actions = new Map<string, AbortController>();
 let bootPromise: Promise<void> | undefined;
@@ -23,7 +21,6 @@ relay.setBrowserCancelHandler((requestId) => actions.get(requestId)?.abort());
 async function handleBrowserRequest(request: BrowserRequest): Promise<BrowserResponse> {
   const controller = new AbortController();
   actions.set(request.request_id, controller);
-  activeAutomationTabs.add(request.tab_id);
   if (request.action.action === 'close') closingWorkflowTabs.add(request.tab_id);
   notifyRunEvent({ event: 'browser_action_started', protocol_version: PROTOCOL_VERSION, run_id: request.run_id,
     request_id: request.request_id, tab_id: request.tab_id, action: request.action.action });
@@ -40,7 +37,7 @@ async function handleBrowserRequest(request: BrowserRequest): Promise<BrowserRes
     }
     return { status: 'ok', protocol_version: PROTOCOL_VERSION, request_id: request.request_id, result: { data } };
   } catch (cause) {
-    const error = toBrowserError(cause);
+    const error = await toBrowserError(cause, request.tab_id);
     const data = { code: error.code, message: error.message };
     relay.send({ event: 'action_failed', protocol_version: PROTOCOL_VERSION, request_id: request.request_id, error: data });
     notifyRunEvent({ event: 'browser_action_failed', protocol_version: PROTOCOL_VERSION, run_id: request.run_id,
@@ -48,7 +45,6 @@ async function handleBrowserRequest(request: BrowserRequest): Promise<BrowserRes
     return { status: 'error', protocol_version: PROTOCOL_VERSION, request_id: request.request_id, error: data };
   } finally {
     actions.delete(request.request_id);
-    activeAutomationTabs.delete(request.tab_id);
     closingWorkflowTabs.delete(request.tab_id);
   }
 }
@@ -73,24 +69,12 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 chrome.runtime.onStartup.addListener(() => { void bootOnce(); });
 chrome.tabs.onRemoved.addListener((tabId) => {
-  pendingWorkflowTabs.delete(tabId);
   if (tabs.has(tabId)) {
     void tabs.revoke(tabId, false);
     if (!closingWorkflowTabs.has(tabId)) relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: tabId });
   }
 });
-chrome.tabs.onCreated.addListener((tab) => {
-  if (tab.id !== undefined && tab.openerTabId !== undefined && activeAutomationTabs.has(tab.openerTabId)) {
-    pendingWorkflowTabs.add(tab.id);
-  }
-});
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (pendingWorkflowTabs.has(tabId) && changeInfo.url?.startsWith('http')) {
-    pendingWorkflowTabs.delete(tabId);
-    void tabs.share(tabId).then(async () => {
-      if (relayState === 'connected') relay.send(tabSharedEvent(await tabs.announcement(tabId)));
-    }).catch(() => undefined);
-  }
   if (tabs.has(tabId) && changeInfo.groupId !== undefined && !closingWorkflowTabs.has(tabId)) {
     void tabs.assertShared(tabId).catch(() => relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: tabId }));
   }

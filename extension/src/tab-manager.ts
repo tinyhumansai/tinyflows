@@ -83,7 +83,7 @@ export class TabManager {
     return true;
   }
 
-  async assertShared(tabId: number): Promise<SharedTab> {
+  async assertShared(tabId: number): Promise<{ shared: SharedTab; tab: chrome.tabs.Tab }> {
     const record = this.shared.get(tabId);
     if (!record) throw new BrowserError('tab_not_shared', 'The tab was not explicitly shared');
     let tab: chrome.tabs.Tab;
@@ -99,19 +99,18 @@ export class TabManager {
       await this.revoke(tabId, false);
       throw new BrowserError('tab_revoked', 'The TinyFlows group was removed or renamed');
     }
-    return record;
+    return { shared: record, tab };
   }
 
   list(): SharedTab[] { return [...this.shared.values()].sort((a, b) => a.tabId - b.tabId); }
   has(tabId: number): boolean { return this.shared.has(tabId); }
 
   async announcement(tabId: number): Promise<SharedTabAnnouncement> {
-    const shared = await this.assertShared(tabId);
-    const tab = await this.api.tabs.get(tabId);
+    const { shared, tab } = await this.assertShared(tabId);
     return {
       id: tabId,
       window_id: shared.windowId,
-      url: tab.url!,
+      url: tab.url ?? '',
       title: tab.title ?? ''
     };
   }
