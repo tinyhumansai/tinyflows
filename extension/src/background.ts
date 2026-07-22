@@ -9,6 +9,7 @@ import { TabManager } from './tab-manager';
 const tabs = new TabManager();
 const executor = new CdpExecutor();
 let relayState: RelayState = 'unpaired';
+const pendingWorkflowTabs = new Set<number>();
 
 const relay = new RelayClient(handleBrowserRequest, handleRelayState, (event) => {
   void chrome.runtime.sendMessage({ type: 'run.event', event }).catch(() => undefined);
@@ -42,9 +43,21 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 chrome.runtime.onStartup.addListener(() => { void boot(); });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  pendingWorkflowTabs.delete(tabId);
   if (tabs.has(tabId)) { void tabs.revoke(tabId, false); relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: tabId }); }
 });
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.id !== undefined && tab.openerTabId !== undefined && tabs.has(tab.openerTabId)) {
+    pendingWorkflowTabs.add(tab.id);
+  }
+});
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (pendingWorkflowTabs.has(tabId) && changeInfo.url?.startsWith('http')) {
+    pendingWorkflowTabs.delete(tabId);
+    void tabs.share(tabId).then(async () => {
+      if (relayState === 'connected') relay.send(tabSharedEvent(await tabs.announcement(tabId)));
+    }).catch(() => undefined);
+  }
   if (tabs.has(tabId) && changeInfo.groupId !== undefined) {
     void tabs.assertShared(tabId).catch(() => relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: tabId }));
   }
