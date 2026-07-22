@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod browser;
 pub mod caps;
 pub mod catalog;
 pub mod compiler;
