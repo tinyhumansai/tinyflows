@@ -536,4 +536,31 @@ mod tests {
             "r1"
         );
     }
+
+    #[test]
+    fn heartbeat_refreshes_liveness_and_stale_session_fails_actions() {
+        let now = Instant::now();
+        let mut state = connected_state(now);
+        state
+            .begin_action(&request("pending", "run-1", 7, 60_000), now)
+            .unwrap();
+
+        let refreshed = now + Duration::from_secs(20);
+        state.heartbeat("session-1", refreshed).unwrap();
+        assert!(
+            state
+                .disconnect_if_stale(now + Duration::from_secs(40))
+                .is_none()
+        );
+
+        let outcome = state
+            .disconnect_if_stale(now + Duration::from_secs(50))
+            .expect("thirty seconds without a heartbeat is stale");
+        assert!(matches!(
+            &outcome.responses[0],
+            BrowserResponse::Error { error, .. }
+                if error.code == BrowserErrorCode::RelayDisconnected
+        ));
+        assert!(!state.is_connected());
+    }
 }

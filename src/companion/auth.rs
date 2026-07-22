@@ -328,6 +328,53 @@ mod tests {
     }
 
     #[test]
+    fn rejects_wrong_protocol_secret_and_ambiguous_credentials() {
+        let origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+        let wrong_protocol = [
+            "tinyflows.v2",
+            "tinyflows.auth.0123456789abcdef0123456789abcdef",
+        ];
+        assert_eq!(
+            authenticator()
+                .authenticate(&WebSocketHandshake {
+                    origin,
+                    subprotocols: &wrong_protocol,
+                })
+                .unwrap_err(),
+            AuthError::ProtocolMismatch
+        );
+
+        let wrong_secret = [
+            PROTOCOL_SUBPROTOCOL,
+            "tinyflows.auth.ffffffffffffffffffffffffffffffff",
+        ];
+        assert_eq!(
+            authenticator()
+                .authenticate(&WebSocketHandshake {
+                    origin,
+                    subprotocols: &wrong_secret,
+                })
+                .unwrap_err(),
+            AuthError::InvalidAuthentication
+        );
+
+        let ambiguous = [
+            PROTOCOL_SUBPROTOCOL,
+            "tinyflows.auth.0123456789abcdef0123456789abcdef",
+            "tinyflows.auth.ffffffffffffffffffffffffffffffff",
+        ];
+        assert_eq!(
+            authenticator()
+                .authenticate(&WebSocketHandshake {
+                    origin,
+                    subprotocols: &ambiguous,
+                })
+                .unwrap_err(),
+            AuthError::AmbiguousAuthentication
+        );
+    }
+
+    #[test]
     fn secret_store_round_trips_and_rotates() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
