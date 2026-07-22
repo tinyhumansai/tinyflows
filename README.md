@@ -60,6 +60,9 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
   secrets; the crate never sees them.
 - Versioned wire format: graph `schema_version` and per-node `type_version`, with
   a `migrate` framework for load-time upgrades.
+- Optional Chrome workflow companion: a native loopback relay and MV3 extension
+  execute explicit `tool_call` nodes with `slug: "browser"` in user-shared tabs,
+  while every other tool remains with the embedding host's invoker.
 
 ## How it works
 
@@ -246,6 +249,19 @@ cargo build
 cargo test                 # unit + compiler + engine tests (mocks auto-available)
 cargo test --all-features  # also exercises the `mock` capability impls explicitly
 ```
+
+The Chrome extension is a separate local package:
+
+```sh
+cd extension
+npm ci
+npm run verify
+npm run test:e2e
+npm run package
+```
+
+See [Chrome workflow companion](docs/chrome-extension.md) for installation,
+pairing, the browser node contract, and the security boundary.
 
 The crate is `#![forbid(unsafe_code)]` and fully documented
 (`#![warn(missing_docs)]`). The CI gate is:
