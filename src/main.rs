@@ -32,7 +32,7 @@ async fn dispatch(arguments: &[String]) -> Result<(), String> {
         .as_slice()
     {
         ["extension", "path"] => {
-            println!("{}", extension_path().display());
+            println!("{}", extension_path()?.display());
             Ok(())
         }
         ["pair", rest @ ..] => pair(rest),
@@ -170,8 +170,41 @@ fn option_u16(arguments: &[&str], name: &str) -> Result<Option<u16>, String> {
         .transpose()
 }
 
-fn extension_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("extension/dist")
+const EXTENSION_FILES: &[(&str, &[u8])] = &[
+    (
+        "background.js",
+        include_bytes!("../extension/dist/background.js"),
+    ),
+    (
+        "manifest.json",
+        include_bytes!("../extension/dist/manifest.json"),
+    ),
+    ("popup.html", include_bytes!("../extension/dist/popup.html")),
+    ("popup.js", include_bytes!("../extension/dist/popup.js")),
+    (
+        "sidepanel.html",
+        include_bytes!("../extension/dist/sidepanel.html"),
+    ),
+    (
+        "sidepanel.js",
+        include_bytes!("../extension/dist/sidepanel.js"),
+    ),
+    ("ui.css", include_bytes!("../extension/dist/ui.css")),
+];
+
+fn extension_path() -> Result<PathBuf, String> {
+    let directory = default_state_dir()
+        .join("extension")
+        .join(env!("CARGO_PKG_VERSION"));
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    for (name, contents) in EXTENSION_FILES {
+        let destination = directory.join(name);
+        let current = std::fs::read(&destination).ok();
+        if current.as_deref() != Some(*contents) {
+            std::fs::write(&destination, contents).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(directory)
 }
 
 fn default_state_dir() -> PathBuf {

@@ -13,7 +13,7 @@ cd ..
 cargo run -- extension path
 ```
 
-Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the printed `extension/dist` directory. Copy the extension id shown by Chrome, then start the companion:
+Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the printed directory. The CLI materializes its embedded, versioned extension there, so the path remains valid after `cargo install` removes its build sources. Copy the extension id shown by Chrome, then start the companion:
 
 ```bash
 cargo run -- pair

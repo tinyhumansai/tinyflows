@@ -1,5 +1,6 @@
 //! CLI smoke tests for the tinyflows binary.
 
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,18 +27,25 @@ fn binary_prints_product_name() {
 
 #[test]
 fn extension_path_and_pairing_commands_are_scriptable() {
-    let path = Command::new(env!("CARGO_BIN_EXE_tinyflows"))
-        .args(["extension", "path"])
-        .output()
-        .expect("print extension path");
-    assert!(path.status.success());
-    assert!(String::from_utf8_lossy(&path.stdout).ends_with("extension/dist\n"));
-
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
     let state = std::env::temp_dir().join(format!("tinyflows-cli-pair-{unique}"));
+    let path = Command::new(env!("CARGO_BIN_EXE_tinyflows"))
+        .args(["extension", "path"])
+        .env("TINYFLOWS_HOME", &state)
+        .output()
+        .expect("print extension path");
+    assert!(path.status.success());
+    let unpacked = PathBuf::from(String::from_utf8(path.stdout).expect("utf8 path").trim());
+    assert_eq!(
+        unpacked,
+        state.join("extension").join(env!("CARGO_PKG_VERSION"))
+    );
+    assert!(unpacked.join("manifest.json").is_file());
+    assert!(unpacked.join("background.js").is_file());
+
     let paired = Command::new(env!("CARGO_BIN_EXE_tinyflows"))
         .args(["pair", "--state-dir"])
         .arg(&state)

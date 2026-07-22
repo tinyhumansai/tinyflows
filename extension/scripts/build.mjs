@@ -14,7 +14,7 @@ await build({
   format: 'esm',
   platform: 'browser',
   target: 'chrome116',
-  sourcemap: true,
+  sourcemap: false,
   legalComments: 'none'
 });
 await Promise.all([

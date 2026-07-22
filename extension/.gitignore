@@ -1,5 +1,6 @@
 node_modules/
-dist/
+# `dist/` is committed because the Rust CLI embeds and materializes the
+# unpacked extension for cargo-installed binaries.
 artifacts/
 coverage/
 test-results/
