@@ -126,16 +126,11 @@ impl TabRegistry {
     /// Revokes access immediately and returns affected workflow run ids.
     pub fn revoke(&mut self, tab_id: TabId) -> Vec<RunId> {
         self.shared.remove(&tab_id);
-        let affected = self
-            .bindings
+        self.bindings
             .values()
             .filter(|binding| binding.tab_id == tab_id)
             .map(|binding| binding.run_id.clone())
-            .collect::<Vec<_>>();
-        for run_id in &affected {
-            self.bindings.remove(run_id);
-        }
-        affected
+            .collect::<Vec<_>>()
     }
 
     /// Binds a newly started run to one explicitly shared tab.
@@ -222,7 +217,9 @@ mod tests {
             TabRegistryError::TabNotShared
         );
         assert_eq!(
-            registry.share(7, 1, "chrome://settings", "Settings").unwrap_err(),
+            registry
+                .share(7, 1, "chrome://settings", "Settings")
+                .unwrap_err(),
             TabRegistryError::UnsupportedPage
         );
         registry
@@ -260,7 +257,7 @@ mod tests {
         assert!(second_generation > first_generation);
         assert_eq!(
             registry.authorize("run-1", 7).unwrap_err(),
-            TabRegistryError::TabNotShared
+            TabRegistryError::TabRevoked
         );
     }
 }

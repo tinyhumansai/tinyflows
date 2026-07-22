@@ -1,7 +1,7 @@
 //! Pairing-secret persistence and WebSocket upgrade authentication.
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// The WebSocket subprotocol prefix carrying the relay protocol version.
@@ -61,10 +61,7 @@ impl PairingSecret {
     /// Generates a 256-bit secret from operating-system randomness.
     pub fn generate() -> io::Result<Self> {
         let mut bytes = [0_u8; 32];
-        OpenOptions::new()
-            .read(true)
-            .open("/dev/urandom")?
-            .read_exact(&mut bytes)?;
+        getrandom::fill(&mut bytes).map_err(io::Error::other)?;
         let mut encoded = String::with_capacity(bytes.len() * 2);
         for byte in bytes {
             use std::fmt::Write as _;
@@ -180,10 +177,7 @@ pub struct Authenticator {
 impl Authenticator {
     /// Creates an authenticator for a paired Chrome extension id.
     pub fn new(extension_id: &str, secret: PairingSecret) -> io::Result<Self> {
-        if extension_id.len() != 32
-            || !extension_id
-                .bytes()
-                .all(|byte| matches!(byte, b'a'..=b'p'))
+        if extension_id.len() != 32 || !extension_id.bytes().all(|byte| matches!(byte, b'a'..=b'p'))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -299,7 +293,10 @@ mod tests {
 
     #[test]
     fn authenticates_only_exact_origin_protocol_and_secret() {
-        let protocols = [PROTOCOL_SUBPROTOCOL, "tinyflows.auth.0123456789abcdef0123456789abcdef"];
+        let protocols = [
+            PROTOCOL_SUBPROTOCOL,
+            "tinyflows.auth.0123456789abcdef0123456789abcdef",
+        ];
         let result = authenticator().authenticate(&WebSocketHandshake {
             origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
             subprotocols: &protocols,
