@@ -1,0 +1,5 @@
+{
+  "protocol_version": 1,
+  "type": "browser.cancel",
+  "request_id": "run-fixture:1"
+}

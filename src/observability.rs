@@ -110,6 +110,12 @@ pub trait RunObserver: Send + Sync {
         let _ = run_id;
     }
 
+    /// Called once per non-trigger node activation, immediately before its
+    /// first execution attempt.
+    fn on_step_start(&self, node_id: &str) {
+        let _ = node_id;
+    }
+
     /// Called once per non-trigger node activation, as each step finishes.
     fn on_step_finish(&self, step: &ExecutionStep) {
         let _ = step;
@@ -138,6 +144,7 @@ mod tests {
     fn noop_observer_callbacks_are_inert() {
         let observer = NoopObserver;
         observer.on_run_start("run-0");
+        observer.on_step_start("n");
         observer.on_step_finish(&ExecutionStep {
             node_id: "n".to_string(),
             status: StepStatus::Success,

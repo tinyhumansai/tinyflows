@@ -1,0 +1,10 @@
+{
+  "event": "tab_shared",
+  "protocol_version": 1,
+  "tab": {
+    "id": 42,
+    "window_id": 7,
+    "url": "https://example.test/login",
+    "title": "Fixture login"
+  }
+}
