@@ -27,7 +27,7 @@ use crate::caps::Capabilities;
 use crate::compiler::compile;
 use crate::engine::{CancellationToken, run_cancellable_with_observer};
 use crate::model::WorkflowGraph;
-use crate::observability::{ExecutionStep, RunObserver};
+use crate::observability::{ExecutionStep, RunObserver, StepStatus};
 
 use super::{
     Authenticator, CompanionControlRequest, CompanionControlResponse, PROTOCOL_SUBPROTOCOL,
@@ -320,7 +320,12 @@ impl RunObserver for CompanionObserver {
             run_id: self.run_id.clone(),
             node_id: step.node_id.clone(),
             node_kind,
-            output: step.output.clone(),
+            status: match step.status {
+                StepStatus::Success => "success",
+                StepStatus::Error => "error",
+            }
+            .into(),
+            duration_ms: u64::try_from(step.duration_ms).unwrap_or(u64::MAX),
         });
     }
 }

@@ -38,6 +38,8 @@ describe('browser protocol validation', () => {
     expect(isControlResponse({ protocol_version: 1, status: 'workflows', request_id: 'r', workflows: [] })).toBe(true);
     expect(isControlResponse({ protocol_version: 1, status: 'ok', request_id: '', result: null })).toBe(false);
     expect(isRunEvent({ event: 'step_started', protocol_version: 1, run_id: 'r', node_id: 'n', node_kind: 'tool_call' })).toBe(true);
+    expect(isRunEvent({ event: 'step_completed', protocol_version: 1, run_id: 'r', node_id: 'n', node_kind: 'tool_call', status: 'success', duration_ms: 12 })).toBe(true);
+    expect(isRunEvent({ event: 'step_completed', protocol_version: 1, run_id: 'r', node_id: 'n', node_kind: 'tool_call', status: 'success', duration_ms: 12, output: { secret: true } })).toBe(false);
     expect(isRunEvent({ event: 'awaiting_approval', protocol_version: 1, run_id: 'r', pending_approvals: ['gate'] })).toBe(true);
     expect(isRunEvent({ event: 'browser_action_started', protocol_version: 1, run_id: 'r', request_id: 'q', tab_id: 1, action: 'click' })).toBe(true);
     expect(isRunEvent({ event: 'cancelled', protocol_version: 1, run_id: 'r', extra: 1 })).toBe(false);

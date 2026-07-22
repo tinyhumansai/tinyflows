@@ -78,7 +78,7 @@ export type ControlResponse =
 export type RunEvent =
   | { event: 'started'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; tab_id: number }
   | { event: 'step_started'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; node_id: string; node_kind: string }
-  | { event: 'step_completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; node_id: string; node_kind: string; output: unknown }
+  | { event: 'step_completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; node_id: string; node_kind: string; status: 'success' | 'error'; duration_ms: number }
   | { event: 'awaiting_approval'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; pending_approvals: string[] }
   | { event: 'browser_action_started'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; request_id: string; tab_id: number; action: string }
   | { event: 'browser_action_completed'; protocol_version: typeof PROTOCOL_VERSION; run_id: string; request_id: string; output: unknown }
@@ -137,7 +137,9 @@ export function isRunEvent(value: unknown): value is RunEvent {
   switch (value.event) {
     case 'started': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'tab_id']) && Number.isSafeInteger(value.tab_id);
     case 'step_started': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'node_id', 'node_kind']) && isId(value.node_id) && isId(value.node_kind);
-    case 'step_completed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'node_id', 'node_kind', 'output']) && isId(value.node_id) && isId(value.node_kind);
+    case 'step_completed': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'node_id', 'node_kind', 'status', 'duration_ms']) &&
+      isId(value.node_id) && isId(value.node_kind) && (value.status === 'success' || value.status === 'error') &&
+      Number.isSafeInteger(value.duration_ms) && (value.duration_ms as number) >= 0;
     case 'awaiting_approval': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'pending_approvals']) &&
       Array.isArray(value.pending_approvals) && value.pending_approvals.every(isId);
     case 'browser_action_started': return hasExactKeys(value, ['event', 'protocol_version', 'run_id', 'request_id', 'tab_id', 'action']) &&

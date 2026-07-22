@@ -49,8 +49,10 @@ pub enum RunEvent {
         node_id: String,
         /// Node kind shown by the side panel.
         node_kind: String,
-        /// Structured non-secret output.
-        output: Value,
+        /// Stable execution status without host-owned output data.
+        status: String,
+        /// Wall-clock execution duration.
+        duration_ms: u64,
     },
     /// A workflow paused at one or more native approval gates.
     AwaitingApproval {

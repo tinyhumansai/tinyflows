@@ -132,7 +132,7 @@ async function evaluate(api, target, expression) {
   return result.result?.value;
 }
 async function elementPoint(api, target, selector) {
-  const expression = `(() => { const e=document.querySelector(${JSON.stringify(selector)}); if(!e)return null; const r=e.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`;
+  const expression = `(() => { const e=document.querySelector(${JSON.stringify(selector)}); if(!e)return null; e.scrollIntoView({block:"center",inline:"center"}); const r=e.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`;
   const point = await evaluate(api, target, expression);
   if (!point || typeof point.x !== "number" || typeof point.y !== "number") {
     throw new BrowserError("element_not_found", `No element matches ${selector}`);
@@ -265,7 +265,7 @@ function isRunEvent(value) {
     case "step_started":
       return hasExactKeys(value, ["event", "protocol_version", "run_id", "node_id", "node_kind"]) && isId(value.node_id) && isId(value.node_kind);
     case "step_completed":
-      return hasExactKeys(value, ["event", "protocol_version", "run_id", "node_id", "node_kind", "output"]) && isId(value.node_id) && isId(value.node_kind);
+      return hasExactKeys(value, ["event", "protocol_version", "run_id", "node_id", "node_kind", "status", "duration_ms"]) && isId(value.node_id) && isId(value.node_kind) && (value.status === "success" || value.status === "error") && Number.isSafeInteger(value.duration_ms) && value.duration_ms >= 0;
     case "awaiting_approval":
       return hasExactKeys(value, ["event", "protocol_version", "run_id", "pending_approvals"]) && Array.isArray(value.pending_approvals) && value.pending_approvals.every(isId);
     case "browser_action_started":

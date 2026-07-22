@@ -43,6 +43,9 @@ describe('CDP action execution', () => {
     await expect(instance.execute(request({ action: 'close' }))).resolves.toEqual({ closed: true });
     expect(remove).toHaveBeenCalledWith(7);
     expect((sendCommand.mock.calls as unknown[][]).some((call) => call[1] === 'Input.dispatchMouseEvent')).toBe(true);
+    expect((sendCommand.mock.calls as unknown[][]).some((call) =>
+      call[1] === 'Runtime.evaluate' && JSON.stringify(call[2]).includes('scrollIntoView')
+    )).toBe(true);
   });
 
   it('fails with stable errors when an element disappears or an action times out', async () => {
