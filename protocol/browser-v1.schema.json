@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tinyflows.dev/protocol/browser-v1.schema.json",
+  "title": "TinyFlows browser relay protocol v1",
+  "$defs": {
+    "action": {
+      "oneOf": [
+        {"type":"object","additionalProperties":false,"required":["action","url"],"properties":{"action":{"const":"open"},"url":{"type":"string","pattern":"^https?://"}}},
+        {"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"enum":["snapshot","get_title","get_url","close"]}}},
+        {"type":"object","additionalProperties":false,"required":["action","selector"],"properties":{"action":{"enum":["click","hover","is_visible"]},"selector":{"type":"string","minLength":1}}},
+        {"type":"object","additionalProperties":false,"required":["action","selector","value"],"properties":{"action":{"const":"fill"},"selector":{"type":"string","minLength":1},"value":{"type":"string"}}},
+        {"type":"object","additionalProperties":false,"required":["action","text"],"properties":{"action":{"const":"type"},"selector":{"type":"string"},"text":{"type":"string"}}},
+        {"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"const":"get_text"},"selector":{"type":"string"}}},
+        {"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"const":"screenshot"},"selector":{"type":"string"},"full_page":{"type":"boolean"}}},
+        {"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"const":"wait"},"duration_ms":{"type":"integer","minimum":0},"selector":{"type":"string"}}},
+        {"type":"object","additionalProperties":false,"required":["action","key"],"properties":{"action":{"const":"press"},"key":{"type":"string","minLength":1}}},
+        {"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"const":"scroll"},"x":{"type":"integer"},"y":{"type":"integer"}}},
+        {"type":"object","additionalProperties":false,"required":["action","query"],"properties":{"action":{"const":"find"},"query":{"type":"string","minLength":1}}}
+      ]
+    },
+    "error": {
+      "type":"object",
+      "additionalProperties":false,
+      "required":["code","message"],
+      "properties":{
+        "code":{"enum":["tab_not_shared","tab_revoked","relay_disconnected","unsupported_page","action_timeout","element_not_found","invalid_request","protocol_mismatch","cancelled","browser_failure"]},
+        "message":{"type":"string"},
+        "details":{}
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "title":"BrowserRequest",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["protocol_version","request_id","run_id","tab_id","timeout_ms","action"],
+      "properties":{
+        "protocol_version":{"const":1},
+        "request_id":{"type":"string","minLength":1},
+        "run_id":{"type":"string","minLength":1},
+        "tab_id":{"type":"integer","minimum":0},
+        "timeout_ms":{"type":"integer","minimum":1,"maximum":60000},
+        "action":{"$ref":"#/$defs/action"}
+      }
+    },
+    {
+      "title":"BrowserResponseOk",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["status","protocol_version","request_id","result"],
+      "properties":{"status":{"const":"ok"},"protocol_version":{"const":1},"request_id":{"type":"string","minLength":1},"result":{"type":"object","additionalProperties":false,"required":["data"],"properties":{"data":{}}}}
+    },
+    {
+      "title":"BrowserResponseError",
+      "type":"object",
+      "additionalProperties":false,
+      "required":["status","protocol_version","request_id","error"],
+      "properties":{"status":{"const":"error"},"protocol_version":{"const":1},"request_id":{"type":"string","minLength":1},"error":{"$ref":"#/$defs/error"}}
+    }
+  ]
+}

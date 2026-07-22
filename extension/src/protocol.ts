@@ -81,8 +81,8 @@ export function isBrowserRequest(value: unknown): value is BrowserRequest {
   if (!isRecordWithKeys(value, ['protocol_version', 'request_id', 'run_id', 'tab_id', 'timeout_ms', 'action'])) return false;
   return value.protocol_version === PROTOCOL_VERSION && isId(value.request_id) && isId(value.run_id) &&
     Number.isSafeInteger(value.tab_id) && (value.tab_id as number) >= 0 &&
-    Number.isSafeInteger(value.timeout_ms) && (value.timeout_ms as number) >= 100 &&
-    (value.timeout_ms as number) <= 120_000 && isBrowserAction(value.action);
+    Number.isSafeInteger(value.timeout_ms) && (value.timeout_ms as number) >= 1 &&
+    (value.timeout_ms as number) <= 60_000 && isBrowserAction(value.action);
 }
 
 export function isBrowserAction(value: unknown): value is BrowserAction {

@@ -1,0 +1,10 @@
+{
+  "status": "ok",
+  "protocol_version": 1,
+  "request_id": "run-fixture:1",
+  "result": {
+    "data": {
+      "filled": true
+    }
+  }
+}

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { isBrowserAction, isBrowserRequest, isControlResponse, isRunEvent, tabSharedEvent } from '../src/protocol';
 
@@ -24,7 +25,8 @@ describe('browser protocol validation', () => {
   it('rejects wrong versions, unknown fields, invalid bounds, and malformed actions', () => {
     expect(isBrowserRequest({ ...base, protocol_version: 2 })).toBe(false);
     expect(isBrowserRequest({ ...base, extra: true })).toBe(false);
-    expect(isBrowserRequest({ ...base, timeout_ms: 1 })).toBe(false);
+    expect(isBrowserRequest({ ...base, timeout_ms: 0 })).toBe(false);
+    expect(isBrowserRequest({ ...base, timeout_ms: 60_001 })).toBe(false);
     expect(isBrowserRequest({ ...base, action: { action: 'click' } })).toBe(false);
     expect(isBrowserAction({ action: 'snapshot', surprise: true })).toBe(false);
     expect(isBrowserAction({ action: 'unknown' })).toBe(false);
@@ -43,5 +45,11 @@ describe('browser protocol validation', () => {
       event: 'tab_shared', protocol_version: 1,
       tab: { id: 9, window_id: 2, url: 'https://example.com', title: 'Example' }
     });
+  });
+
+  it('accepts the same canonical repository fixture as Rust', () => {
+    const fixtureUrl = new URL('../../protocol/fixtures/browser-request.v1.json', import.meta.url);
+    const fixture: unknown = JSON.parse(readFileSync(fixtureUrl, 'utf8'));
+    expect(isBrowserRequest(fixture)).toBe(true);
   });
 });

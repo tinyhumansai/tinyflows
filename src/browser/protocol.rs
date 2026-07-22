@@ -383,4 +383,21 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn canonical_repository_fixtures_decode_as_rust_contracts() {
+        let request: BrowserRequest = serde_json::from_str(include_str!(
+            "../../protocol/fixtures/browser-request.v1.json"
+        ))
+        .unwrap();
+        let response: BrowserResponse = serde_json::from_str(include_str!(
+            "../../protocol/fixtures/browser-response.v1.json"
+        ))
+        .unwrap();
+        assert_eq!(request.request_id, response.request_id());
+        assert_eq!(request.action, BrowserAction::Fill {
+            selector: "#email".into(),
+            value: "person@example.com".into(),
+        });
+    }
 }
