@@ -32,6 +32,8 @@ describe('authenticated relay', () => {
     sockets[0]?.open(); expect(states).toContain('connected');
     sockets[0]?.message({ protocol_version: 1, request_id: 'r', run_id: 'x', tab_id: 1, timeout_ms: 1000, action: { action: 'get_title' } });
     await vi.waitFor(() => expect(sockets[0]?.sent.some((item) => JSON.parse(item).status === 'ok')).toBe(true));
+    relay.send({ event: 'tab_shared', protocol_version: 1, tab: { id: 1, window_id: 2, url: 'https://example.com', title: 'Example' } });
+    expect(JSON.parse(sockets[0]!.sent.at(-1)!)).toMatchObject({ event: 'tab_shared', tab: { id: 1 } });
     relay.stop();
   });
 

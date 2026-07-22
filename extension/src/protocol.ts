@@ -46,6 +46,16 @@ export type BrowserEvent =
   | { event: 'tab_revoked'; protocol_version: typeof PROTOCOL_VERSION; tab_id: number }
   | { event: 'relay_disconnected'; protocol_version: typeof PROTOCOL_VERSION };
 
+export interface TabSharedEvent {
+  event: 'tab_shared';
+  protocol_version: typeof PROTOCOL_VERSION;
+  tab: { id: number; window_id: number; url: string; title: string };
+}
+
+export function tabSharedEvent(tab: TabSharedEvent['tab']): TabSharedEvent {
+  return { event: 'tab_shared', protocol_version: PROTOCOL_VERSION, tab };
+}
+
 export type ControlRequest =
   | { method: 'workflow.list'; protocol_version: typeof PROTOCOL_VERSION; request_id: string }
   | { method: 'workflow.start'; protocol_version: typeof PROTOCOL_VERSION; request_id: string; workflow_id: string; tab_id: number; input: unknown }

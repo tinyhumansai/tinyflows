@@ -1,6 +1,6 @@
 import { CdpExecutor } from './cdp';
 import { BrowserError, toBrowserError } from './errors';
-import { PROTOCOL_VERSION } from './protocol';
+import { PROTOCOL_VERSION, tabSharedEvent } from './protocol';
 import type { BrowserRequest, BrowserResponse } from './protocol';
 import { RelayClient } from './relay';
 import type { RelayState } from './relay';
@@ -33,6 +33,7 @@ function handleRelayState(state: RelayState): void {
   relayState = state;
   const badge = state === 'connected' ? 'connected' : state === 'failed' ? 'failed' : 'reconnecting';
   void tabs.markAll(badge);
+  if (state === 'connected') void announceAllSharedTabs();
   void chrome.runtime.sendMessage({ type: 'relay.state', state }).catch(() => undefined);
 }
 
@@ -70,7 +71,11 @@ async function handleUiMessage(message: unknown): Promise<unknown> {
     case 'state': return { ok: true, relayState, tabs: tabs.list(), config: await relay.getConfig() };
     case 'tab.toggle': {
       if (!Number.isInteger(item.tabId)) throw new Error('Missing tab id');
-      return { ok: true, shared: await tabs.toggle(item.tabId as number) };
+      const tabId = item.tabId as number;
+      const shared = await tabs.toggle(tabId);
+      if (shared && relayState === 'connected') relay.send(tabSharedEvent(await tabs.announcement(tabId)));
+      else if (!shared) relay.send({ event: 'tab_revoked', protocol_version: PROTOCOL_VERSION, tab_id: tabId });
+      return { ok: true, shared };
     }
     case 'relay.configure':
       await relay.configure({ url: String(item.url ?? ''), pairingToken: String(item.pairingToken ?? '') });
@@ -79,6 +84,13 @@ async function handleUiMessage(message: unknown): Promise<unknown> {
     case 'workflow.start': return { ok: true, result: await relay.request('workflow.start', { workflow_id: item.workflowId, tab_id: item.tabId }) };
     case 'workflow.cancel': return { ok: true, result: await relay.request('workflow.cancel', { run_id: item.runId }) };
     default: throw new Error('Unknown UI request');
+  }
+}
+
+async function announceAllSharedTabs(): Promise<void> {
+  for (const { tabId } of tabs.list()) {
+    try { relay.send(tabSharedEvent(await tabs.announcement(tabId))); }
+    catch { /* assertShared revokes stale attachment metadata */ }
   }
 }
 

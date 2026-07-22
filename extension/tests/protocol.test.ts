@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isBrowserAction, isBrowserRequest, isControlResponse, isRunEvent } from '../src/protocol';
+import { isBrowserAction, isBrowserRequest, isControlResponse, isRunEvent, tabSharedEvent } from '../src/protocol';
 
 const base = {
   protocol_version: 1, request_id: 'req-1', run_id: 'run-1', tab_id: 4, timeout_ms: 1000,
@@ -36,5 +36,12 @@ describe('browser protocol validation', () => {
     expect(isControlResponse({ protocol_version: 1, status: 'ok', request_id: '', result: null })).toBe(false);
     expect(isRunEvent({ event: 'step_started', run_id: 'r', node_id: 'n', node_kind: 'tool_call' })).toBe(true);
     expect(isRunEvent({ event: 'cancelled', run_id: 'r', extra: 1 })).toBe(false);
+  });
+
+  it('builds the strict canonical shared-tab announcement', () => {
+    expect(tabSharedEvent({ id: 9, window_id: 2, url: 'https://example.com', title: 'Example' })).toEqual({
+      event: 'tab_shared', protocol_version: 1,
+      tab: { id: 9, window_id: 2, url: 'https://example.com', title: 'Example' }
+    });
   });
 });

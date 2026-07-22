@@ -3,10 +3,10 @@ import { GROUP_TITLE, TabManager } from '../src/tab-manager';
 
 function api(tabOverrides: Record<string, unknown> = {}) {
   let stored: Record<string, unknown> = {};
-  const tab = { id: 5, windowId: 1, groupId: -1, url: 'https://example.com', ...tabOverrides };
+  const tab = { id: 5, windowId: 1, groupId: -1, url: 'https://example.com', title: 'Example', ...tabOverrides };
   const mock = {
     tabs: {
-      get: vi.fn(async () => tab), group: vi.fn(async () => { tab.groupId = 9; return 9; }),
+      get: vi.fn(async () => tab), group: vi.fn(async (options: {groupId?:number}) => { tab.groupId = options.groupId ?? 9; return tab.groupId; }),
       ungroup: vi.fn(async () => { tab.groupId = -1; })
     },
     tabGroups: {
@@ -54,6 +54,7 @@ describe('explicit tab sharing', () => {
     await expect(manager.toggle(5)).resolves.toBe(true);
     expect(fixture.mock.tabs.group).toHaveBeenCalledWith({ groupId: 12, tabIds: [5] });
     await manager.markAll('reconnecting');
+    await expect(manager.announcement(5)).resolves.toEqual({ id: 5, window_id: 1, url: 'https://example.com', title: 'Example' });
     await expect(manager.toggle(5)).resolves.toBe(false);
   });
 

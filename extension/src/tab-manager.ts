@@ -5,6 +5,7 @@ export const GROUP_TITLE = 'TinyFlows shared tabs';
 
 export type BadgeState = 'connected' | 'reconnecting' | 'failed' | 'idle';
 export interface SharedTab { tabId: number; groupId: number; windowId: number; attachedAt: number }
+export interface SharedTabAnnouncement { id: number; window_id: number; url: string; title: string }
 
 type ChromeApi = Pick<typeof chrome, 'tabs' | 'tabGroups' | 'debugger' | 'storage' | 'action'>;
 
@@ -103,6 +104,17 @@ export class TabManager {
 
   list(): SharedTab[] { return [...this.shared.values()].sort((a, b) => a.tabId - b.tabId); }
   has(tabId: number): boolean { return this.shared.has(tabId); }
+
+  async announcement(tabId: number): Promise<SharedTabAnnouncement> {
+    const shared = await this.assertShared(tabId);
+    const tab = await this.api.tabs.get(tabId);
+    return {
+      id: tabId,
+      window_id: shared.windowId,
+      url: tab.url!,
+      title: tab.title ?? ''
+    };
+  }
 
   async markAll(state: BadgeState): Promise<void> {
     await Promise.all(this.list().map(({ tabId }) => this.setBadge(tabId, state)));
