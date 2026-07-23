@@ -89,7 +89,7 @@ jobs:
         run: npm run package
 
       - name: Upload release archive
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: tinyflows-chrome-extension
           path: |
@@ -98,7 +98,7 @@ jobs:
 
       - name: Upload Playwright traces on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: chrome-extension-playwright-traces
           path: extension/test-results/
