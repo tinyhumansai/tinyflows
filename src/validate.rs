@@ -137,6 +137,128 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
         }
     }
 
+    // `memory` node config checks, including THE hard security invariant: a
+    // `remember`/`forget` operation may never target `scope: "user"` — the
+    // caller's durable, cross-flow memory. Rejecting this structurally, at the
+    // door, means a workflow (or an LLM authoring one) can never plant or erase
+    // durable facts about the user by way of a `remember`/`forget` node; the
+    // only scope those two operations may write through is `"flow"`.
+    for node in &graph.nodes {
+        if node.kind != NodeKind::Memory {
+            continue;
+        }
+
+        let operation = node.config.get("operation").and_then(Value::as_str);
+        let Some(operation) = operation else {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: "memory node requires `operation` (recall|search|flavour|people|\
+                         remember|forget)"
+                    .to_string(),
+            });
+            continue;
+        };
+        if !matches!(
+            operation,
+            "recall" | "search" | "flavour" | "people" | "remember" | "forget"
+        ) {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: format!(
+                    "memory node has unknown operation {operation:?} (expected one of \
+                     recall|search|flavour|people|remember|forget)"
+                ),
+            });
+            continue;
+        }
+
+        let scope = node.config.get("scope").and_then(Value::as_str);
+
+        // THE hard invariant (see the block comment above): reject before any
+        // other config check, so it can never be masked by a different error.
+        if matches!(operation, "remember" | "forget") && scope == Some("user") {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: format!(
+                    "memory node operation {operation:?} may not target scope \"user\" — \
+                     remember/forget may only write scope \"flow\"; the user's cross-flow \
+                     memory is read-only from a workflow"
+                ),
+            });
+        }
+
+        if let Some(scope) = scope {
+            if !matches!(scope, "user" | "flow" | "flows") {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!(
+                        "memory node has unknown scope {scope:?} (expected \
+                         user|flow|flows)"
+                    ),
+                });
+            }
+        }
+
+        // `scope` is required for recall/remember/forget (not search/flavour/
+        // people — see the catalog contract for the exact per-operation table).
+        if matches!(operation, "recall" | "remember" | "forget") && scope.is_none() {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: format!("memory node operation {operation:?} requires `scope`"),
+            });
+        }
+
+        if matches!(operation, "recall" | "search") {
+            let has_query = node
+                .config
+                .get("query")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            if !has_query {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!("memory node operation {operation:?} requires `query`"),
+                });
+            }
+        }
+
+        if operation == "flavour" {
+            let has_flavour = node
+                .config
+                .get("flavour")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            if !has_flavour {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: "memory node operation \"flavour\" requires `flavour` (slug)"
+                        .to_string(),
+                });
+            }
+        }
+
+        if matches!(operation, "remember" | "forget") {
+            let has_key = node
+                .config
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            if !has_key {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!("memory node operation {operation:?} requires `key`"),
+                });
+            }
+        }
+
+        if operation == "remember" && node.config.get("value").is_none() {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: "memory node operation \"remember\" requires `value`".to_string(),
+            });
+        }
+    }
+
     // A `condition` node's outgoing edges must emit on `from_port` "true" or
     // "false" — routing is keyed EXCLUSIVELY on `from_port` (see
     // `engine::outgoing_by_port` / `handler_routing`), so any other value
@@ -361,6 +483,227 @@ mod tests {
             validate(&graph),
             Err(ValidationError::InvalidNodeConfig { .. })
         ));
+    }
+
+    fn memory_node(id: &str, config: serde_json::Value) -> Node {
+        let mut n = node(id, NodeKind::Memory);
+        n.config = config;
+        n
+    }
+
+    fn graph_with_memory_node(config: serde_json::Value) -> WorkflowGraph {
+        WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), memory_node("mem", config)],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "mem".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    // --- the hard invariant: remember/forget may never target scope "user" ---
+
+    #[test]
+    fn memory_rejects_remember_user_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "user", "key": "k", "value": 1
+        }));
+        let err = validate(&graph).expect_err("remember·user must be rejected");
+        match err {
+            ValidationError::InvalidNodeConfig { node, reason } => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("\"user\""), "reason: {reason}");
+                assert!(reason.contains("remember"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_rejects_forget_user_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "user", "key": "k"
+        }));
+        let err = validate(&graph).expect_err("forget·user must be rejected");
+        match err {
+            ValidationError::InvalidNodeConfig { node, reason } => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("\"user\""), "reason: {reason}");
+                assert!(reason.contains("forget"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_accepts_remember_flow_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "flow", "key": "k", "value": { "v": 1 }
+        }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn memory_accepts_forget_flow_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "flow", "key": "k"
+        }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn memory_rejects_unknown_scope_value() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "recall", "scope": "everyone", "query": "x"
+        }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+    }
+
+    // --- required-field checks per operation ---
+
+    #[test]
+    fn memory_recall_accepts_user_and_flows_scope() {
+        // Only remember/forget are scope-restricted; reads may target any
+        // declared scope, including the read-only ones.
+        for scope in ["user", "flow", "flows"] {
+            let graph = graph_with_memory_node(serde_json::json!({
+                "operation": "recall", "scope": scope, "query": "x"
+            }));
+            assert_eq!(validate(&graph), Ok(()), "scope {scope} should be valid for recall");
+        }
+    }
+
+    #[test]
+    fn memory_requires_operation() {
+        let graph = graph_with_memory_node(serde_json::json!({ "scope": "flow" }));
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("operation"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_rejects_unknown_operation() {
+        let graph = graph_with_memory_node(serde_json::json!({ "operation": "levitate" }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn memory_recall_requires_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "recall", "query": "x"
+        }));
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("scope"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_recall_requires_query() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "recall", "scope": "flow"
+        }));
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("query"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_search_requires_query_but_not_scope() {
+        let missing_query = graph_with_memory_node(serde_json::json!({ "operation": "search" }));
+        assert!(matches!(
+            validate(&missing_query),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+
+        let no_scope_ok = graph_with_memory_node(serde_json::json!({
+            "operation": "search", "query": "x"
+        }));
+        assert_eq!(validate(&no_scope_ok), Ok(()));
+    }
+
+    #[test]
+    fn memory_flavour_requires_flavour_slug() {
+        let graph = graph_with_memory_node(serde_json::json!({ "operation": "flavour" }));
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("flavour"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+        let ok = graph_with_memory_node(serde_json::json!({
+            "operation": "flavour", "flavour": "email-tone"
+        }));
+        assert_eq!(validate(&ok), Ok(()));
+    }
+
+    #[test]
+    fn memory_people_requires_nothing() {
+        // `people` has no required `scope`/`query` — an empty config is valid.
+        let graph = graph_with_memory_node(serde_json::json!({ "operation": "people" }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn memory_remember_requires_key_and_value() {
+        let missing_both = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "flow"
+        }));
+        match validate(&missing_both) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("key"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig (key), got {other:?}"),
+        }
+
+        let missing_value = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "flow", "key": "k"
+        }));
+        match validate(&missing_value) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("value"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig (value), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_forget_requires_key_but_not_value() {
+        let missing_key = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "flow"
+        }));
+        assert!(matches!(
+            validate(&missing_key),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+
+        let ok = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "flow", "key": "k"
+        }));
+        assert_eq!(validate(&ok), Ok(()));
     }
 
     fn tool_node(id: &str, config: serde_json::Value) -> Node {

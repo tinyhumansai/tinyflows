@@ -44,6 +44,12 @@ pub enum NodeKind {
     OutputParser,
     /// Runs another workflow as a nested sub-graph.
     SubWorkflow,
+    /// Reads or writes host-managed memory via the injected
+    /// [`MemoryProvider`](crate::caps::MemoryProvider) capability: `recall` /
+    /// `search` / `flavour` / `people` for reads, `remember` / `forget` for
+    /// writes. Additive kind — see [`crate::validate`] for the hard invariant
+    /// that a `remember`/`forget` operation may never target `scope: "user"`.
+    Memory,
 }
 
 /// How a [`NodeKind::Trigger`] node is fired.
@@ -99,6 +105,7 @@ mod tests {
         assert_wire(&NodeKind::Transform, "transform");
         assert_wire(&NodeKind::OutputParser, "output_parser");
         assert_wire(&NodeKind::SubWorkflow, "sub_workflow");
+        assert_wire(&NodeKind::Memory, "memory");
     }
 
     #[test]

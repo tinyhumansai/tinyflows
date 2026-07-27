@@ -35,8 +35,8 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 
 - Full node catalog implemented and tested — control-flow (`condition`,
   `switch`, `merge`, `split_out`, `transform`) and capability-backed (`agent`,
-  `tool_call`, `http_request`, `code`, `output_parser`, `sub_workflow`), plus the
-  `trigger` entry node.
+  `tool_call`, `http_request`, `code`, `output_parser`, `sub_workflow`,
+  `memory`), plus the `trigger` entry node.
 
 **Reliability**
 
@@ -189,6 +189,7 @@ done
 | `code`          | Runs sandboxed user code (JavaScript or Python).                                             |
 | `output_parser` | Parses / validates an upstream agent's output into a structured shape.                       |
 | `sub_workflow`  | Runs another workflow as a nested sub-graph and returns its output.                          |
+| `memory`        | Reads/writes host-managed memory (recall/search/flavour/people/remember/forget).             |
 | `condition`     | Two-way IF; emits on the `true` or `false` port.                                             |
 | `switch`        | Multi-way branch keyed by an expression result.                                              |
 | `merge`         | Fan-in barrier that combines multiple inputs; waits for all wired predecessors.              |

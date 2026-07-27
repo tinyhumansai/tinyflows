@@ -269,6 +269,7 @@ pub(crate) fn executor_for(kind: &NodeKind) -> Box<dyn NodeExecutor> {
         NodeKind::Code => Box::new(integration::CodeNode),
         NodeKind::OutputParser => Box::new(integration::OutputParserNode),
         NodeKind::SubWorkflow => Box::new(integration::SubWorkflowNode),
+        NodeKind::Memory => Box::new(integration::MemoryNode),
         NodeKind::Condition => Box::new(control_flow::ConditionNode),
         NodeKind::Switch => Box::new(control_flow::SwitchNode),
         NodeKind::Merge => Box::new(control_flow::MergeNode),
@@ -288,8 +289,8 @@ mod tests {
     /// Every [`NodeKind`] variant, so the coverage below stays exhaustive.
     fn all_kinds() -> Vec<NodeKind> {
         use NodeKind::{
-            Agent, Code, Condition, HttpRequest, Merge, OutputParser, SplitOut, SubWorkflow,
-            Switch, ToolCall, Transform, Trigger,
+            Agent, Code, Condition, HttpRequest, Memory, Merge, OutputParser, SplitOut,
+            SubWorkflow, Switch, ToolCall, Transform, Trigger,
         };
         vec![
             Trigger,
@@ -304,6 +305,7 @@ mod tests {
             Transform,
             OutputParser,
             SubWorkflow,
+            Memory,
         ]
     }
 
@@ -314,6 +316,10 @@ mod tests {
             NodeKind::SubWorkflow => json!({
                 "workflow": { "nodes": [{ "id": "ct", "kind": "trigger", "name": "ct" }], "edges": [] }
             }),
+            // `people` needs no `scope`/`query`, so it runs against the
+            // default mock capabilities (which wire a `MemoryProvider`) with
+            // the minimal config every other kind gets via `Value::Null`.
+            NodeKind::Memory => json!({ "operation": "people" }),
             _ => Value::Null,
         }
     }

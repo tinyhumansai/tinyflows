@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 /// The node kinds, in the canonical order used wherever the DSL is enumerated
 /// (matches [`NodeKind`](crate::model::NodeKind)'s serde discriminators).
-pub const NODE_KINDS: [&str; 12] = [
+pub const NODE_KINDS: [&str; 13] = [
     "trigger",
     "agent",
     "tool_call",
@@ -35,6 +35,7 @@ pub const NODE_KINDS: [&str; 12] = [
     "transform",
     "output_parser",
     "sub_workflow",
+    "memory",
 ];
 
 /// One config field a node of a given kind reads at run time.
@@ -162,7 +163,7 @@ pub fn all_contracts() -> Vec<NodeKindContract> {
         .collect()
 }
 
-/// The contract for one node kind, or `None` if `kind` is not one of the 12.
+/// The contract for one node kind, or `None` if `kind` is not one of the 13.
 pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
     let c = match kind {
         "trigger" => NodeKindContract {
@@ -467,6 +468,81 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                     .to_string(),
             ],
         },
+        "memory" => NodeKindContract {
+            kind: "memory".to_string(),
+            summary: "Reads or writes host-managed memory via the MemoryProvider capability."
+                .to_string(),
+            description: "config.operation selects recall / search (query lookups), flavour \
+                (a named ask/persona/style profile by slug), people (a people lookup), or \
+                remember / forget (writes). What memory actually contains, how recall ranks \
+                results, and what a flavour/people entry looks like are host concerns — the \
+                engine only shapes the call and envelopes the response."
+                .to_string(),
+            config_fields: vec![
+                ConfigField::required(
+                    "operation",
+                    "enum",
+                    "Which memory action this node performs.",
+                )
+                .with_enum(&["recall", "search", "flavour", "people", "remember", "forget"]),
+                ConfigField::optional(
+                    "scope",
+                    "enum",
+                    "Required for recall / remember / forget. Host-defined: \"user\" (the \
+                     caller's durable, cross-flow memory — READ-ONLY from a workflow), \"flow\" \
+                     (this flow's own memory — the only scope remember/forget may target), or \
+                     \"flows\" (cross-flow read access — read-only).",
+                )
+                .with_enum(&["user", "flow", "flows"]),
+                ConfigField::optional(
+                    "query",
+                    "\"=expr\"",
+                    "Required for recall / search (optional for people). The lookup query.",
+                ),
+                ConfigField::optional(
+                    "flavour",
+                    "string",
+                    "Required for the flavour operation: the ask/persona/style slug to look up, \
+                     e.g. \"email-tone\".",
+                ),
+                ConfigField::optional(
+                    "key",
+                    "\"=expr\"",
+                    "Required for remember / forget: the memory key to write or delete.",
+                ),
+                ConfigField::optional(
+                    "value",
+                    "\"=expr\"",
+                    "Required for remember: the value to persist under key.",
+                ),
+                ConfigField::optional(
+                    "limit",
+                    "number",
+                    "Optional cap on the number of results for recall / search.",
+                ),
+                ConfigField::optional(
+                    "min_score",
+                    "number",
+                    "Optional relevance-score floor for recall / search results.",
+                ),
+            ],
+            ports: PortSpec::linear(),
+            example: json!({
+                "id": "check_seen", "kind": "memory", "name": "Already published?",
+                "config": { "operation": "recall", "scope": "flow", "query": "=item.title" }
+            }),
+            notes: vec![
+                "HARD SECURITY RULE: a remember/forget node with scope \"user\" is a hard reject \
+                 at validate time — writes may only target scope \"flow\". This is enforced \
+                 structurally so an author (or an LLM authoring a graph) cannot plant or erase \
+                 durable facts about the user via workflow content."
+                    .to_string(),
+                "Default execution is per_item (like tool_call), so a split_out fan-out runs one \
+                 memory call per item — set execution: \"once\" to run a single call against the \
+                 first item instead."
+                    .to_string(),
+            ],
+        },
         _ => return None,
     };
     Some(c)
@@ -499,7 +575,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(all_contracts().len(), 12);
+        assert_eq!(all_contracts().len(), 13);
     }
 
     #[test]
@@ -523,6 +599,53 @@ mod tests {
     fn unknown_kind_has_no_contract() {
         assert!(contract_for("not_a_kind").is_none());
         assert!(contract_for("").is_none());
+    }
+
+    #[test]
+    fn node_kinds_has_13_entries_including_memory() {
+        assert_eq!(NODE_KINDS.len(), 13);
+        assert!(NODE_KINDS.contains(&"memory"));
+        // "memory" is the 13th (last) entry — added at the end per the
+        // sequenced-last design rationale.
+        assert_eq!(NODE_KINDS[12], "memory");
+    }
+
+    #[test]
+    fn memory_contract_documents_the_six_operations_and_scope_enum() {
+        let c = contract_for("memory").expect("memory contract exists");
+        let operation_field = c
+            .config_fields
+            .iter()
+            .find(|f| f.name == "operation")
+            .expect("memory contract declares `operation`");
+        assert!(operation_field.required);
+        assert_eq!(
+            operation_field.enum_values,
+            Some(
+                vec!["recall", "search", "flavour", "people", "remember", "forget"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            )
+        );
+        let scope_field = c
+            .config_fields
+            .iter()
+            .find(|f| f.name == "scope")
+            .expect("memory contract declares `scope`");
+        assert_eq!(
+            scope_field.enum_values,
+            Some(
+                vec!["user", "flow", "flows"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            )
+        );
+        assert!(
+            c.notes.iter().any(|n| n.contains("HARD SECURITY RULE")),
+            "memory contract must document the user-scope write rejection"
+        );
     }
 
     #[test]
