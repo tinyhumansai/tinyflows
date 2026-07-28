@@ -321,7 +321,10 @@ mod tests {
         assert_eq!(out["scope"], "flow");
         assert_eq!(out["query"], "budget");
         let results = out["results"].as_array().expect("results array");
-        assert!(!results.is_empty(), "mock recall should return shaped results");
+        assert!(
+            !results.is_empty(),
+            "mock recall should return shaped results"
+        );
         assert!(results[0].get("text").is_some());
     }
 
@@ -339,7 +342,10 @@ mod tests {
         let out = memory.people(Some("cyrus")).await.unwrap();
         assert_eq!(out["query"], "cyrus");
         let people = out["people"].as_array().expect("people array");
-        assert!(!people.is_empty(), "mock people should return a shaped list");
+        assert!(
+            !people.is_empty(),
+            "mock people should return a shaped list"
+        );
 
         let out_no_query = memory.people(None).await.unwrap();
         assert!(out_no_query["query"].is_null());
@@ -348,7 +354,10 @@ mod tests {
     #[tokio::test]
     async fn mock_memory_remember_and_forget_are_ok() {
         let memory = MockMemory;
-        memory.remember("flow", "k", json!({ "v": 1 })).await.unwrap();
+        memory
+            .remember("flow", "k", json!({ "v": 1 }))
+            .await
+            .unwrap();
         memory.forget("flow", "k").await.unwrap();
     }
 

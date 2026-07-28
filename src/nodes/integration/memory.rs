@@ -64,9 +64,12 @@ async fn call_provider(ctx: &NodeContext<'_>, cfg: &Value) -> Result<Value> {
         )
     })?;
 
-    let operation = cfg.get("operation").and_then(Value::as_str).ok_or_else(|| {
-        EngineError::Capability("memory node: missing `operation` in config".to_string())
-    })?;
+    let operation = cfg
+        .get("operation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            EngineError::Capability("memory node: missing `operation` in config".to_string())
+        })?;
     let scope = cfg.get("scope").and_then(Value::as_str).unwrap_or("");
 
     tracing::debug!(
@@ -89,7 +92,10 @@ async fn call_provider(ctx: &NodeContext<'_>, cfg: &Value) -> Result<Value> {
                 "{LOG_PREFIX} resolved query, calling provider.recall"
             );
             let mut opts = serde_json::Map::new();
-            opts.insert("operation".to_string(), Value::String(operation.to_string()));
+            opts.insert(
+                "operation".to_string(),
+                Value::String(operation.to_string()),
+            );
             if let Some(limit) = cfg.get("limit") {
                 opts.insert("limit".to_string(), limit.clone());
             }
@@ -122,7 +128,9 @@ async fn call_provider(ctx: &NodeContext<'_>, cfg: &Value) -> Result<Value> {
         }
         "remember" => {
             let key = cfg.get("key").and_then(Value::as_str).ok_or_else(|| {
-                EngineError::Capability("memory node: `remember` operation requires `key`".to_string())
+                EngineError::Capability(
+                    "memory node: `remember` operation requires `key`".to_string(),
+                )
             })?;
             let value = cfg.get("value").cloned().ok_or_else(|| {
                 EngineError::Capability(
@@ -139,7 +147,9 @@ async fn call_provider(ctx: &NodeContext<'_>, cfg: &Value) -> Result<Value> {
         }
         "forget" => {
             let key = cfg.get("key").and_then(Value::as_str).ok_or_else(|| {
-                EngineError::Capability("memory node: `forget` operation requires `key`".to_string())
+                EngineError::Capability(
+                    "memory node: `forget` operation requires `key`".to_string(),
+                )
             })?;
             tracing::debug!(
                 node = %ctx.node.id,
@@ -291,9 +301,7 @@ mod tests {
             out.output["nodes"]["n"]["items"][0]["json"]["json"]["slug"],
             "email-tone"
         );
-        assert!(
-            out.output["nodes"]["n"]["items"][0]["json"]["json"]["traits"].is_object()
-        );
+        assert!(out.output["nodes"]["n"]["items"][0]["json"]["json"]["traits"].is_object());
     }
 
     #[tokio::test]

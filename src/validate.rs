@@ -575,7 +575,11 @@ mod tests {
             let graph = graph_with_memory_node(serde_json::json!({
                 "operation": "recall", "scope": scope, "query": "x"
             }));
-            assert_eq!(validate(&graph), Ok(()), "scope {scope} should be valid for recall");
+            assert_eq!(
+                validate(&graph),
+                Ok(()),
+                "scope {scope} should be valid for recall"
+            );
         }
     }
 

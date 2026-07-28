@@ -484,7 +484,9 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                     "enum",
                     "Which memory action this node performs.",
                 )
-                .with_enum(&["recall", "search", "flavour", "people", "remember", "forget"]),
+                .with_enum(&[
+                    "recall", "search", "flavour", "people", "remember", "forget",
+                ]),
                 ConfigField::optional(
                     "scope",
                     "enum",
@@ -622,10 +624,12 @@ mod tests {
         assert_eq!(
             operation_field.enum_values,
             Some(
-                vec!["recall", "search", "flavour", "people", "remember", "forget"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
+                vec![
+                    "recall", "search", "flavour", "people", "remember", "forget"
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
             )
         );
         let scope_field = c
