@@ -176,13 +176,24 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
 
         // THE hard invariant (see the block comment above): reject before any
         // other config check, so it can never be masked by a different error.
-        if matches!(operation, "remember" | "forget") && scope == Some("user") {
+        // remember/forget may write ONLY scope "flow". BOTH read-only scopes are
+        // rejected here — "user" (the user's durable memory) and "flows"
+        // (cross-flow read). This gate is unbypassable precisely because `scope`
+        // is validated as a literal enum (below): an "=expr" binding resolves at
+        // runtime and is never one of user|flow|flows, so it fails the enum
+        // check and can never smuggle a write past this into
+        // provider.remember/forget. If a future change makes `scope` bindable,
+        // this invariant reopens — keep the enum check.
+        if matches!(operation, "remember" | "forget")
+            && matches!(scope, Some("user") | Some("flows"))
+        {
+            let bad = scope.unwrap_or_default();
             errors.push(ValidationError::InvalidNodeConfig {
                 node: node.id.clone(),
                 reason: format!(
-                    "memory node operation {operation:?} may not target scope \"user\" — \
-                     remember/forget may only write scope \"flow\"; the user's cross-flow \
-                     memory is read-only from a workflow"
+                    "memory node operation {operation:?} may not target scope {bad:?} — \
+                     remember/forget may only write scope \"flow\"; scopes \"user\" and \
+                     \"flows\" are read-only from a workflow"
                 ),
             });
         }
@@ -532,6 +543,40 @@ mod tests {
             ValidationError::InvalidNodeConfig { node, reason } => {
                 assert_eq!(node, "mem");
                 assert!(reason.contains("\"user\""), "reason: {reason}");
+                assert!(reason.contains("forget"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_rejects_remember_flows_scope() {
+        // "flows" is a read-only cross-flow scope — a write to it must be
+        // rejected at validate time, not just backstopped by the host adapter.
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "flows", "key": "k", "value": 1
+        }));
+        let err = validate(&graph).expect_err("remember·flows must be rejected");
+        match err {
+            ValidationError::InvalidNodeConfig { node, reason } => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("\"flows\""), "reason: {reason}");
+                assert!(reason.contains("remember"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_rejects_forget_flows_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "flows", "key": "k"
+        }));
+        let err = validate(&graph).expect_err("forget·flows must be rejected");
+        match err {
+            ValidationError::InvalidNodeConfig { node, reason } => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("\"flows\""), "reason: {reason}");
                 assert!(reason.contains("forget"), "reason: {reason}");
             }
             other => panic!("expected InvalidNodeConfig, got {other:?}"),

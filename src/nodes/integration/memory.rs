@@ -127,6 +127,16 @@ async fn call_provider(ctx: &NodeContext<'_>, cfg: &Value) -> Result<Value> {
             provider.people(query).await?
         }
         "remember" => {
+            // Defense-in-depth (the validator already rejects non-"flow" writes,
+            // but this executor may be driven directly): writes go ONLY to
+            // scope "flow". An absent scope (defaulted to "") or a read-only
+            // scope ("user"/"flows") is a hard error, never a silent write to
+            // the wrong place.
+            if scope != "flow" {
+                return Err(EngineError::Capability(format!(
+                    "memory node: `remember` may only write scope \"flow\", got {scope:?}"
+                )));
+            }
             let key = cfg.get("key").and_then(Value::as_str).ok_or_else(|| {
                 EngineError::Capability(
                     "memory node: `remember` operation requires `key`".to_string(),
@@ -146,6 +156,12 @@ async fn call_provider(ctx: &NodeContext<'_>, cfg: &Value) -> Result<Value> {
             serde_json::json!({ "ok": true, "operation": "remember", "key": key })
         }
         "forget" => {
+            // Same flow-only write invariant as `remember` (see above).
+            if scope != "flow" {
+                return Err(EngineError::Capability(format!(
+                    "memory node: `forget` may only write scope \"flow\", got {scope:?}"
+                )));
+            }
             let key = cfg.get("key").and_then(Value::as_str).ok_or_else(|| {
                 EngineError::Capability(
                     "memory node: `forget` operation requires `key`".to_string(),
@@ -489,6 +505,49 @@ mod tests {
             matches!(err, EngineError::Capability(ref m) if m.contains("key")),
             "expected a capability error mentioning `key`, got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn write_to_non_flow_scope_is_a_capability_error_even_when_driven_directly() {
+        // The validator rejects non-"flow" writes, but the executor is the last
+        // line of defense when driven directly (bypassing validate). A
+        // remember/forget against "flows" (read-only) or an absent scope must
+        // hard-error, never silently write to the wrong place.
+        for (op, cfg) in [
+            (
+                "remember",
+                json!({ "operation": "remember", "scope": "flows", "key": "k", "value": 1 }),
+            ),
+            (
+                "forget",
+                json!({ "operation": "forget", "scope": "flows", "key": "k" }),
+            ),
+            // absent scope defaults to "" — also not "flow" — and must error.
+            (
+                "remember",
+                json!({ "operation": "remember", "key": "k", "value": 1 }),
+            ),
+        ] {
+            let node = memory_node(cfg);
+            let input = vec![];
+            let caps = mock_capabilities();
+            let run_meta = Value::Null;
+            let ctx = NodeContext {
+                node: &node,
+                input: &input,
+                run: &run_meta,
+                nodes: &Value::Null,
+                caps: &caps,
+            };
+            let err = MemoryNode
+                .execute(ctx)
+                .await
+                .expect_err("non-flow write must error");
+            assert!(
+                matches!(err, EngineError::Capability(ref m) if m.contains("flow") && m.contains(op)),
+                "expected a capability error mentioning `flow` and `{op}`, got: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]
