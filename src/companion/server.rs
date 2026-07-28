@@ -31,7 +31,8 @@ use crate::observability::{ExecutionStep, RunObserver, StepStatus};
 
 use super::{
     Authenticator, CompanionControlRequest, CompanionControlResponse, PROTOCOL_SUBPROTOCOL,
-    PairingSecret, RelayPolicy, RelayState, RunEvent, TabId, WebSocketHandshake, WorkflowSummary,
+    PairingSecret, RelayPolicy, RelayState, RunEvent, SharedTab, TabId, WebSocketHandshake,
+    WorkflowSummary,
 };
 
 /// Configuration for the native Chrome companion.
@@ -136,6 +137,70 @@ impl CompanionServer {
     /// Lists valid workflow JSON files from the configured directory.
     pub fn workflows(&self) -> Result<Vec<WorkflowSummary>, CompanionServerError> {
         list_workflows(&self.inner.workflows_dir)
+    }
+
+    /// Returns a browser relay handle usable by an **external** workflow runner
+    /// (an embedding host that drives its own engine rather than calling
+    /// [`start_workflow`](Self::start_workflow)). The returned handle shares this
+    /// server's live WebSocket session and pending-response map, so wrapping it in
+    /// a [`RoutingToolInvoker`](crate::browser::RoutingToolInvoker) lets a host
+    /// route `slug:"browser"` tool calls to the paired extension.
+    ///
+    /// The handle is always valid; if no extension is currently connected each
+    /// `execute` fails closed with `relay_disconnected`.
+    pub fn browser_relay(&self) -> Arc<dyn BrowserRelay> {
+        Arc::new(SocketRelay {
+            inner: self.inner.clone(),
+        })
+    }
+
+    /// Whether a paired extension currently holds an authenticated relay session.
+    /// External hosts use this to gate author-time / run-time browser readiness.
+    pub fn is_extension_connected(&self) -> bool {
+        self.inner
+            .relay
+            .lock()
+            .map(|relay| relay.is_connected())
+            .unwrap_or(false)
+    }
+
+    /// Snapshot of the tabs the user has explicitly shared with the companion.
+    /// Empty when no extension is connected or nothing is shared.
+    pub fn shared_tabs(&self) -> Vec<SharedTab> {
+        self.inner
+            .relay
+            .lock()
+            .map(|relay| relay.tabs().list().into_iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Binds a workflow run to an explicitly-shared tab so an **external**
+    /// runner's `slug:"browser"` calls (dispatched through the handle from
+    /// [`browser_relay`](Self::browser_relay)) are authorized against that tab.
+    /// This mirrors what [`start_workflow`](Self::start_workflow) does
+    /// internally for native runs — an embedding host must call this before
+    /// executing a graph that contains browser nodes, or every browser action
+    /// fails with `tab_not_shared`.
+    pub fn bind_run(
+        &self,
+        run_id: impl Into<String>,
+        tab_id: TabId,
+    ) -> Result<(), CompanionServerError> {
+        self.inner
+            .relay
+            .lock()
+            .map_err(|_| lock_error())?
+            .tabs_mut()
+            .bind_run(run_id.into(), tab_id)
+            .map_err(super::RelayError::from)?;
+        Ok(())
+    }
+
+    /// Releases a run→tab binding after an external run settles. Idempotent.
+    pub fn unbind_run(&self, run_id: &str) {
+        if let Ok(mut relay) = self.inner.relay.lock() {
+            relay.tabs_mut().unbind_run(run_id);
+        }
     }
 
     /// Starts a native run bound to one explicit shared tab.
