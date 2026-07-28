@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- Versioned browser action contracts plus run/tab-bound `ChromeToolInvoker` and
+  composable `RoutingToolInvoker` support for explicit `slug: "browser"` nodes.
+- An authenticated loopback companion with pairing-secret rotation, explicit
+  shared-tab/run binding, action correlation, timeouts, heartbeats, workflow
+  listing/start/cancel controls, and native CLI commands.
+- A locally bundled MV3 Chrome extension with debugger-based browser actions,
+  visible tab-group consent, popup pairing, a workflow side panel, unit tests,
+  Playwright coverage, and deterministic release packaging.
 
 ## [0.3.0] - YYYY-MM-DD
 

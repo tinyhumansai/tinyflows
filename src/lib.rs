@@ -19,8 +19,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Browser automation protocol, action validation, and tool routing.
+pub mod browser;
 pub mod caps;
 pub mod catalog;
+/// Native companion pairing, tab authorization, relay, and control lifecycle.
+pub mod companion;
 pub mod compiler;
 pub mod data;
 pub mod engine;

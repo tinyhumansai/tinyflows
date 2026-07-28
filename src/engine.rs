@@ -514,6 +514,21 @@ pub async fn run_cancellable(
     token: CancellationToken,
 ) -> Result<RunOutcome> {
     let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
+    run_cancellable_with_observer(workflow, input, capabilities, token, &observer).await
+}
+
+/// Like [`run_cancellable`], while also reporting lifecycle and step records to
+/// `observer` as they settle.
+///
+/// # Errors
+/// Same as [`run_cancellable`].
+pub async fn run_cancellable_with_observer(
+    workflow: &CompiledWorkflow,
+    input: Value,
+    capabilities: &Capabilities,
+    token: CancellationToken,
+    observer: &Arc<dyn RunObserver>,
+) -> Result<RunOutcome> {
     let checkpointer: Arc<dyn Checkpointer<Value>> =
         Arc::new(InMemoryCheckpointer::<Value>::default());
     let thread_id = default_thread_id(workflow)?;
@@ -521,7 +536,7 @@ pub async fn run_cancellable(
         workflow,
         input,
         capabilities,
-        &observer,
+        observer,
         checkpointer,
         thread_id,
         None,
@@ -907,6 +922,7 @@ fn build_graph(
                 // is observed promptly instead of after the whole delay elapses.
                 const BACKOFF_POLL_MS: u64 = 25;
 
+                observer.on_step_start(&node.id);
                 let mut output = None;
                 let mut last_err: Option<EngineError> = None;
                 let started = Instant::now();
