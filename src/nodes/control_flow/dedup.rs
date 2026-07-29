@@ -87,6 +87,41 @@
 //! one; deduped-out items are simply absent from `main`. A host that wants
 //! observability into what was dropped reads the debug log
 //! (`[dedup] key already seen — dropping item`) or diffs input against output.
+//!
+//! # Key canonicalization
+//!
+//! `config.key` should resolve to a stable scalar id (issue number, message id,
+//! url). A non-string scalar (`Number`/`Bool`) is canonicalized via its JSON
+//! text so it still dedupes deterministically. An array/object also resolves to
+//! its (deterministic) JSON text, but using a whole structure as a dedup key is
+//! almost always an authoring mistake — prefer a scalar id. `resolve_key` does
+//! not reject structured keys (they are deterministic, so a hard error would be
+//! more surprising than useful), but authors should treat a structured key as a
+//! smell.
+//!
+//! # Concurrency and the scope of the exactly-once guarantee
+//!
+//! `StateStore` exposes only `load`/`store` — there is **no** compare-and-swap
+//! or atomic read-modify-write. The `tentative` write here (and the host's
+//! `committed` union after the run) is therefore a `load` → merge → `store`
+//! that is **not** safe against *two runs of the same flow overlapping in
+//! time*: two concurrent `load`s can each miss the other's not-yet-stored keys,
+//! and the later `store` wins (lost update).
+//!
+//! The exactly-once guarantee holds under the normal assumption that a given
+//! saved flow has **at most one active run at a time** (the usual case: a
+//! scheduled or singly-triggered flow). When two runs of the *same* flow truly
+//! overlap, the failure is bounded and in the **safe direction**: a lost
+//! tentative/committed key can only cause an item to be processed **again** on
+//! a later run (an occasional duplicate — *under*-dedup), never to be wrongly
+//! dropped (*over*-dedup). No item is ever silently lost.
+//!
+//! Closing this window fully requires an atomic `StateStore` primitive
+//! (compare-and-swap or a per-key serialized update), which is a deliberate
+//! **deferred** engine change — not added here because the current failure mode
+//! is rare and benign. A host can already narrow the durable half of the race
+//! by serializing its post-run `committed` update per flow id (the OpenHuman
+//! `DedupCommitSubscriber` does exactly this).
 
 use std::collections::HashSet;
 
