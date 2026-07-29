@@ -50,6 +50,13 @@ pub enum NodeKind {
     /// writes. Additive kind — see [`crate::validate`] for the hard invariant
     /// that a `remember`/`forget` operation may never target `scope: "user"`.
     Memory,
+    /// Commit-on-success exactly-once **filter** half: drops an item whose
+    /// resolved `config.key` was already committed by a prior successful run,
+    /// and otherwise passes it through while recording the key as *tentative*
+    /// (pending the host's commit on run success). See
+    /// [`crate::nodes::control_flow::dedup`] for the full `StateStore` key
+    /// contract this kind depends on.
+    Dedup,
 }
 
 /// How a [`NodeKind::Trigger`] node is fired.
@@ -106,6 +113,7 @@ mod tests {
         assert_wire(&NodeKind::OutputParser, "output_parser");
         assert_wire(&NodeKind::SubWorkflow, "sub_workflow");
         assert_wire(&NodeKind::Memory, "memory");
+        assert_wire(&NodeKind::Dedup, "dedup");
     }
 
     #[test]

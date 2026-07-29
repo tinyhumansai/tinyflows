@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 /// The node kinds, in the canonical order used wherever the DSL is enumerated
 /// (matches [`NodeKind`](crate::model::NodeKind)'s serde discriminators).
-pub const NODE_KINDS: [&str; 13] = [
+pub const NODE_KINDS: [&str; 14] = [
     "trigger",
     "agent",
     "tool_call",
@@ -36,6 +36,7 @@ pub const NODE_KINDS: [&str; 13] = [
     "output_parser",
     "sub_workflow",
     "memory",
+    "dedup",
 ];
 
 /// One config field a node of a given kind reads at run time.
@@ -545,6 +546,46 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                     .to_string(),
             ],
         },
+        "dedup" => NodeKindContract {
+            kind: "dedup".to_string(),
+            summary: "Commit-on-success exactly-once filter: drops items whose key was already \
+                      committed."
+                .to_string(),
+            description: "config.key is an \"=\"-expression resolved per item (e.g. \
+                \"=item.id\"). An item whose resolved key is already in the host's COMMITTED set \
+                (a prior successful run) is dropped; an unseen key passes the item through and \
+                records the key in the TENTATIVE set. This node never commits — the host commits \
+                tentative keys into committed when the run succeeds, and releases (discards) \
+                tentative keys when the run fails, via `StateStore`. Pairs with a host-side \
+                commit-on-success subscriber; see the engine's `dedup` module docs for the exact \
+                StateStore key layout."
+                .to_string(),
+            config_fields: vec![ConfigField::required(
+                "key",
+                "\"=expr\"",
+                "The per-item dedup key expression, e.g. \"=item.id\". A key that resolves to \
+                 null, missing, or an empty string fails OPEN: the item passes through and is \
+                 NOT recorded (never silently dropped for a missing key).",
+            )],
+            ports: PortSpec::linear(),
+            example: json!({
+                "id": "once_only", "kind": "dedup", "name": "Skip already-published",
+                "config": { "key": "=item.id" }
+            }),
+            notes: vec![
+                "This node only FILTERS and stages tentative keys — it never writes to the \
+                 committed set itself. A workflow author does not need to (and cannot) commit \
+                 keys directly; the host commits/releases tentative keys based on overall run \
+                 outcome."
+                    .to_string(),
+                "A null/missing/empty resolved key always passes through unrecorded (fail-open) \
+                 rather than being treated as a match or a hard error."
+                    .to_string(),
+                "Within a single run, two input items that resolve to the SAME key: only the \
+                 first passes; later duplicates are dropped, matching the committed-key rule."
+                    .to_string(),
+            ],
+        },
         _ => return None,
     };
     Some(c)
@@ -577,7 +618,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(all_contracts().len(), 13);
+        assert_eq!(all_contracts().len(), 14);
     }
 
     #[test]
@@ -604,12 +645,14 @@ mod tests {
     }
 
     #[test]
-    fn node_kinds_has_13_entries_including_memory() {
-        assert_eq!(NODE_KINDS.len(), 13);
+    fn node_kinds_has_14_entries_including_memory_and_dedup() {
+        assert_eq!(NODE_KINDS.len(), 14);
         assert!(NODE_KINDS.contains(&"memory"));
-        // "memory" is the 13th (last) entry — added at the end per the
-        // sequenced-last design rationale.
+        assert!(NODE_KINDS.contains(&"dedup"));
+        // "memory" is the 13th and "dedup" the 14th (last) entry — each added
+        // at the end per the sequenced-last design rationale.
         assert_eq!(NODE_KINDS[12], "memory");
+        assert_eq!(NODE_KINDS[13], "dedup");
     }
 
     #[test]
@@ -650,6 +693,23 @@ mod tests {
             c.notes.iter().any(|n| n.contains("HARD SECURITY RULE")),
             "memory contract must document the user-scope write rejection"
         );
+    }
+
+    #[test]
+    fn dedup_contract_requires_key_and_documents_fail_open_behavior() {
+        let c = contract_for("dedup").expect("dedup contract exists");
+        let key_field = c
+            .config_fields
+            .iter()
+            .find(|f| f.name == "key")
+            .expect("dedup contract declares `key`");
+        assert!(key_field.required);
+        assert_eq!(key_field.value_type, "\"=expr\"");
+        assert!(
+            c.notes.iter().any(|n| n.contains("fail-open")),
+            "dedup contract must document the null-key fail-open behavior"
+        );
+        assert_eq!(c.ports, PortSpec::linear());
     }
 
     #[test]

@@ -275,6 +275,7 @@ pub(crate) fn executor_for(kind: &NodeKind) -> Box<dyn NodeExecutor> {
         NodeKind::Merge => Box::new(control_flow::MergeNode),
         NodeKind::SplitOut => Box::new(control_flow::SplitOutNode),
         NodeKind::Transform => Box::new(control_flow::TransformNode),
+        NodeKind::Dedup => Box::new(control_flow::DedupNode),
     }
 }
 
@@ -289,7 +290,7 @@ mod tests {
     /// Every [`NodeKind`] variant, so the coverage below stays exhaustive.
     fn all_kinds() -> Vec<NodeKind> {
         use NodeKind::{
-            Agent, Code, Condition, HttpRequest, Memory, Merge, OutputParser, SplitOut,
+            Agent, Code, Condition, Dedup, HttpRequest, Memory, Merge, OutputParser, SplitOut,
             SubWorkflow, Switch, ToolCall, Transform, Trigger,
         };
         vec![
@@ -306,6 +307,7 @@ mod tests {
             OutputParser,
             SubWorkflow,
             Memory,
+            Dedup,
         ]
     }
 

@@ -270,6 +270,30 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
         }
     }
 
+    // `dedup` node config checks: `key` (the per-item "=expr" dedup key) is the
+    // only config field, and it is required — a dedup node with no `key` can
+    // never resolve anything to compare, which is always an authoring mistake
+    // (as opposed to a `key` that *resolves* to null at run time, which is the
+    // intentional, per-item fail-open path the executor handles).
+    for node in &graph.nodes {
+        if node.kind != NodeKind::Dedup {
+            continue;
+        }
+        let has_key = node
+            .config
+            .get("key")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if !has_key {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: "dedup node requires `key` (an \"=expr\" resolved per item, e.g. \
+                         \"=item.id\")"
+                    .to_string(),
+            });
+        }
+    }
+
     // A `condition` node's outgoing edges must emit on `from_port` "true" or
     // "false" — routing is keyed EXCLUSIVELY on `from_port` (see
     // `engine::outgoing_by_port` / `handler_routing`), so any other value
@@ -753,6 +777,63 @@ mod tests {
             "operation": "forget", "scope": "flow", "key": "k"
         }));
         assert_eq!(validate(&ok), Ok(()));
+    }
+
+    fn dedup_node(id: &str, config: serde_json::Value) -> Node {
+        let mut n = node(id, NodeKind::Dedup);
+        n.config = config;
+        n
+    }
+
+    fn graph_with_dedup_node(config: serde_json::Value) -> WorkflowGraph {
+        WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), dedup_node("dd", config)],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "dd".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dedup_accepts_a_key_expression() {
+        let graph = graph_with_dedup_node(serde_json::json!({ "key": "=item.id" }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn dedup_rejects_missing_key() {
+        let graph = graph_with_dedup_node(serde_json::Value::Null);
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "dd");
+                assert!(reason.contains("key"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dedup_rejects_empty_key() {
+        let graph = graph_with_dedup_node(serde_json::json!({ "key": "" }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn dedup_rejects_non_string_key() {
+        // `key` is a literal "=expr" string in config — a non-string value
+        // (e.g. authored as a bare number) is just as much a missing key.
+        let graph = graph_with_dedup_node(serde_json::json!({ "key": 1 }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
     }
 
     fn tool_node(id: &str, config: serde_json::Value) -> Node {
