@@ -80,6 +80,7 @@ async fn start_companion(arguments: &[&str]) -> Result<(), String> {
         pairing_secret: secret,
         workflows_dir,
         capabilities: standalone_capabilities(),
+        run_host: None,
     })
     .map_err(|error| error.to_string())?;
     eprintln!("TinyFlows companion listening on {}", server.bind_addr());
