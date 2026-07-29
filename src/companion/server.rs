@@ -45,9 +45,15 @@ pub struct CompanionServerConfig {
     /// Host-local pairing secret required in a WebSocket subprotocol.
     pub pairing_secret: PairingSecret,
     /// Directory containing workflow JSON files exposed to the side panel.
+    /// Ignored for listing/running when `run_host` is set.
     pub workflows_dir: PathBuf,
     /// Host capabilities used for every non-browser effect.
     pub capabilities: Capabilities,
+    /// Optional embedding-host seam. When set, workflow listing + execution
+    /// (over both the WS control channel and the HTTP native endpoints) delegate
+    /// to the host instead of `workflows_dir` + [`CompanionServer::start_workflow`].
+    /// `None` preserves the built-in standalone behaviour.
+    pub run_host: Option<Arc<dyn super::CompanionRunHost>>,
 }
 
 /// Errors produced by companion configuration, I/O, or workflow startup.
@@ -78,6 +84,7 @@ struct ServerInner {
     pending: tokio::sync::Mutex<HashMap<String, PendingSender>>,
     workflows_dir: PathBuf,
     capabilities: Capabilities,
+    run_host: Option<Arc<dyn super::CompanionRunHost>>,
     runs: Mutex<HashMap<String, CancellationToken>>,
     next_session: AtomicU64,
     next_run: AtomicU64,
@@ -106,6 +113,7 @@ impl CompanionServer {
                 pending: tokio::sync::Mutex::new(HashMap::new()),
                 workflows_dir: config.workflows_dir,
                 capabilities: config.capabilities,
+                run_host: config.run_host,
                 runs: Mutex::new(HashMap::new()),
                 next_session: AtomicU64::new(0),
                 next_run: AtomicU64::new(0),
@@ -137,6 +145,41 @@ impl CompanionServer {
     /// Lists valid workflow JSON files from the configured directory.
     pub fn workflows(&self) -> Result<Vec<WorkflowSummary>, CompanionServerError> {
         list_workflows(&self.inner.workflows_dir)
+    }
+
+    /// Lists workflows via the configured [`CompanionRunHost`](super::CompanionRunHost)
+    /// if present, else from `workflows_dir`. Used by both request paths.
+    async fn dispatch_list_workflows(&self) -> Result<Vec<WorkflowSummary>, String> {
+        match &self.inner.run_host {
+            Some(host) => host.list_workflows().await,
+            None => self.workflows().map_err(|error| error.to_string()),
+        }
+    }
+
+    /// Starts a run via the run host if present, else via the built-in
+    /// [`start_workflow`](Self::start_workflow). Returns the run id.
+    async fn dispatch_start_run(
+        &self,
+        workflow_id: &str,
+        tab_id: TabId,
+        input: Value,
+    ) -> Result<String, String> {
+        match &self.inner.run_host {
+            Some(host) => host.start_run(workflow_id, tab_id, input).await,
+            None => self
+                .start_workflow(workflow_id, tab_id, input)
+                .await
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    /// Cancels a run via the run host if present, else via the built-in
+    /// [`cancel_workflow`](Self::cancel_workflow).
+    async fn dispatch_cancel_run(&self, run_id: &str) -> bool {
+        match &self.inner.run_host {
+            Some(host) => host.cancel_run(run_id).await,
+            None => self.cancel_workflow(run_id).await,
+        }
     }
 
     /// Returns a browser relay handle usable by an **external** workflow runner
@@ -538,7 +581,7 @@ async fn native_workflows(State(server): State<CompanionServer>, headers: Header
     if !native_authorized(&server, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match server.workflows() {
+    match server.dispatch_list_workflows().await {
         Ok(workflows) => Json(json!({
             "protocol_version":BROWSER_PROTOCOL_VERSION,
             "workflows":workflows
@@ -546,7 +589,7 @@ async fn native_workflows(State(server): State<CompanionServer>, headers: Header
         .into_response(),
         Err(error) => (
             StatusCode::BAD_REQUEST,
-            Json(json!({"code":"workflow_list_failed","message":error.to_string()})),
+            Json(json!({"code":"workflow_list_failed","message":error})),
         )
             .into_response(),
     }
@@ -561,7 +604,7 @@ async fn native_run(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match server
-        .start_workflow(&request.workflow_id, request.tab_id, request.input)
+        .dispatch_start_run(&request.workflow_id, request.tab_id, request.input)
         .await
     {
         Ok(run_id) => Json(json!({
@@ -571,7 +614,7 @@ async fn native_run(
         .into_response(),
         Err(error) => (
             StatusCode::BAD_REQUEST,
-            Json(json!({"code":"workflow_start_failed","message":error.to_string()})),
+            Json(json!({"code":"workflow_start_failed","message":error})),
         )
             .into_response(),
     }
@@ -801,26 +844,28 @@ async fn handle_control(
         );
     }
     match request {
-        CompanionControlRequest::WorkflowList { .. } => match server.workflows() {
-            Ok(workflows) => CompanionControlResponse::Workflows {
-                protocol_version: BROWSER_PROTOCOL_VERSION,
-                request_id,
-                workflows,
-            },
-            Err(error) => control_error(request_id, "workflow_list_failed", &error.to_string()),
-        },
+        CompanionControlRequest::WorkflowList { .. } => {
+            match server.dispatch_list_workflows().await {
+                Ok(workflows) => CompanionControlResponse::Workflows {
+                    protocol_version: BROWSER_PROTOCOL_VERSION,
+                    request_id,
+                    workflows,
+                },
+                Err(error) => control_error(request_id, "workflow_list_failed", &error),
+            }
+        }
         CompanionControlRequest::WorkflowStart {
             workflow_id,
             tab_id,
             input,
             ..
-        } => match server.start_workflow(&workflow_id, tab_id, input).await {
+        } => match server.dispatch_start_run(&workflow_id, tab_id, input).await {
             Ok(run_id) => control_ok(request_id, json!({"run_id":run_id})),
-            Err(error) => control_error(request_id, "workflow_start_failed", &error.to_string()),
+            Err(error) => control_error(request_id, "workflow_start_failed", &error),
         },
         CompanionControlRequest::WorkflowCancel { run_id, .. } => control_ok(
             request_id,
-            json!({"cancelled":server.cancel_workflow(&run_id).await}),
+            json!({"cancelled":server.dispatch_cancel_run(&run_id).await}),
         ),
         CompanionControlRequest::RunSubscribe { run_id, .. } => {
             control_ok(request_id, json!({"subscribed":run_id}))

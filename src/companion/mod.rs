@@ -7,6 +7,7 @@
 
 mod auth;
 mod control;
+mod host;
 mod relay;
 mod server;
 mod tabs;
@@ -16,6 +17,7 @@ pub use auth::{
     PairingSecret, SecretStore, WebSocketHandshake,
 };
 pub use control::{CompanionControlRequest, CompanionControlResponse, RunEvent, WorkflowSummary};
+pub use host::CompanionRunHost;
 pub use relay::{DisconnectOutcome, PendingAction, RelayError, RelayPolicy, RelayState, SessionId};
 pub use server::{CompanionServer, CompanionServerConfig, CompanionServerError};
 pub use tabs::{RunBinding, RunId, SharedTab, TabId, TabRegistry, TabRegistryError};
