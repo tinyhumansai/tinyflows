@@ -30,6 +30,31 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 - Linear execution, conditional routing on output ports, **parallel fan-out**
   (concurrent successors sharing a port), and a **merge fan-in barrier** (a node
   runs only once all its predecessors finish).
+- **Per-item fan-out** — a single node multiplying an array of input into N
+  concurrent units of work, array in and array out. Where graph fan-out fixes
+  the width when the graph is authored, this width is data-driven:
+
+  ```jsonc
+  // one agent turn per topic, at most 8 at a time
+  { "kind": "agent", "config": {
+      "execution": "per_item",   // map over the input array
+      "concurrency": 8,          // 1 = sequential (default), n = bounded, 0/"all" = unbounded
+      "prompt": "Research =item.name"
+  } }
+
+  // ...or one whole child workflow per item — the multiplier
+  { "kind": "sub_workflow", "config": {
+      "execution": "per_item", "concurrency": 4, "workflow_id": "deep_dive"
+  } }
+  ```
+
+  Results always come back in **input order** with `paired_item` set, so a
+  fan-out never reorders data. `on_item_error` decides what a failing item does
+  to the batch — `collect` (the default when fanning out) marks that item
+  `{ error, failed: true }` and keeps the rest, `fail_fast` (the default when
+  sequential) hands the error to the node's `on_error` / retry policy, and
+  `skip` drops it. Supported on `agent`, `tool_call`, `http_request`, `memory`,
+  and `sub_workflow`.
 
 **Nodes**
 
