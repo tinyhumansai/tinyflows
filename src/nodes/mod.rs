@@ -57,7 +57,12 @@ pub struct NodeContext<'a> {
 ///   `=.nodes["fetch_recipient"].items[0].email` — including non-adjacent
 ///   (grandparent) nodes and specific predecessors of a fan-in node. Node
 ///   **id** is the addressing key (stable across renames); names are not
-///   indexed.
+///   indexed;
+/// - `inputs` — the workflow's resolved declared inputs, keyed by name (see
+///   [`crate::model::WorkflowInput`]), so a config field reads
+///   `=inputs.repo`. One entry per declaration with defaults already applied,
+///   so a binding to a declared name is never *absent* — at worst it is the
+///   explicit `null` of an optional input nobody supplied.
 #[must_use]
 pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
     let item = ctx
@@ -80,6 +85,12 @@ pub(crate) fn expr_scope_for(ctx: &NodeContext, item: Value) -> Value {
         "items": items,
         "run": ctx.run,
         "nodes": nodes_scope(ctx.nodes),
+        // Lifted out of `run` rather than carried separately on `NodeContext`:
+        // the engine seeds the resolved declared inputs at `run.inputs`, and
+        // this promotes them to a top-level key so authors write the short
+        // `=inputs.<name>` while jq programs walking `run` still find them.
+        // `Null` when the run predates inputs or the graph declares none.
+        "inputs": ctx.run.get("inputs").cloned().unwrap_or(Value::Null),
     })
 }
 

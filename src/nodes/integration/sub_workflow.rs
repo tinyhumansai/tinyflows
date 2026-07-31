@@ -44,6 +44,24 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 /// The depth guard below is per child run, so a fan-out widens a run without
 /// deepening it — N siblings at depth d+1, never d+N.
 ///
+/// ## Passing the child's declared inputs
+///
+/// An optional `inputs` config object supplies values for the child's declared
+/// [`WorkflowInput`](crate::model::WorkflowInput)s. Each field is resolved
+/// against the parent's expression scope, so a parent can forward its own
+/// inputs or an upstream node's output:
+///
+/// ```json
+/// {
+///   "workflow_id": "review-and-fix",
+///   "inputs": { "repo": "=inputs.repo", "depth": 2 }
+/// }
+/// ```
+///
+/// The child validates what arrives against its own declarations, so a parent
+/// that omits a required child input fails the same way a top-level caller
+/// would — before the child executes anything.
+///
 /// ## Cycle / depth handling
 ///
 /// Every nested `sub_workflow` run (inline or by id) increments a
@@ -85,6 +103,35 @@ fn reject_self_reference(child: &WorkflowGraph, workflow_id: &str) -> Result<()>
         )));
     }
     Ok(())
+}
+
+/// Builds the values passed to the child's declared inputs from this node's
+/// `inputs` config object.
+///
+/// Each field's value is resolved against the **parent's** scope, so a parent
+/// can forward its own inputs (`"repo": "=inputs.repo"`), an upstream node's
+/// output (`"=nodes.fetch.item.url"`), or a literal. The child then validates
+/// what arrives against its own declarations, exactly as a top-level caller
+/// would — a parent that forgets a required child input fails loudly.
+///
+/// An absent or non-object `inputs` config yields an empty map, so a
+/// `sub_workflow` node authored before inputs existed keeps working against a
+/// child that declares none.
+fn child_inputs(config: &Value, scope: &Value) -> Result<serde_json::Map<String, Value>> {
+    let Some(declared) = config.get("inputs") else {
+        return Ok(serde_json::Map::new());
+    };
+    let Some(fields) = declared.as_object() else {
+        return Err(EngineError::Capability(
+            "sub_workflow node: `inputs` must be an object mapping the child's declared input \
+             names to values"
+                .to_string(),
+        ));
+    };
+    Ok(fields
+        .iter()
+        .map(|(name, value)| (name.clone(), crate::expr::resolve(value, scope)))
+        .collect())
 }
 
 #[async_trait]
@@ -190,12 +237,17 @@ async fn run_child(
     }
 
     let compiled = crate::compiler::compile(&child)?;
-    let input =
+    let trigger =
         serde_json::to_value(child_input).map_err(|e| EngineError::Capability(e.to_string()))?;
+    // Resolved against the same `scope` as `workflow_id`, so a `per_item` run
+    // forwards values derived from *its* element (`"=item.repo"`) rather than
+    // from the batch — the whole point of resolving inputs in here rather than
+    // once at the call site.
+    let child_inputs = child_inputs(&ctx.node.config, scope)?;
     // Box the recursive engine call so the async future type stays sized.
     let outcome = Box::pin(crate::engine::run_sub_workflow(
         &compiled,
-        input,
+        crate::engine::RunInput::new(trigger).with_inputs(child_inputs),
         ctx.caps,
         child_depth,
     ))

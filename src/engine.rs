@@ -4,8 +4,11 @@
 //! [`WorkflowGraph`](crate::model::WorkflowGraph) — capturing the run's host
 //! [`Capabilities`] in each node handler — then drives it and returns the final
 //! run state. State is a [`serde_json::Value`] laid out as
-//! `{ "run": { "trigger": … }, "nodes": { "<id>": { "items": [ … ] } } }`;
-//! a merge reducer folds each node's item output into that map.
+//! `{ "run": { "trigger": …, "inputs": { … } }, "nodes": { "<id>": { "items": [ … ] } } }`;
+//! a merge reducer folds each node's item output into that map. `run.trigger` is
+//! the free-form payload that fired the run; `run.inputs` is the workflow's
+//! resolved declared inputs (see [`RunInput`]), which node config addresses as
+//! `=inputs.<name>`.
 //!
 //! Lowering covers the **linear** path (one successor per node), **conditional
 //! branching** (successors on distinct ports), **parallel fan-out** (several
@@ -95,6 +98,67 @@ impl CancellationToken {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// What a caller hands a run: the trigger payload plus values for the
+/// workflow's declared inputs.
+///
+/// The two are deliberately separate channels. The **trigger payload** is
+/// whatever fired the run — a webhook body, a chat message, an empty object for
+/// a manual start — and is free-form by nature. **Inputs** are the workflow's
+/// declared, typed parameters (see [`crate::model::WorkflowInput`]); they are
+/// validated against the graph's declarations before anything executes.
+///
+/// Every entry point takes `impl Into<RunInput>`, and [`Value`] converts, so a
+/// caller with no declared inputs passes a bare payload exactly as before:
+///
+/// ```
+/// use tinyflows::engine::RunInput;
+/// use serde_json::json;
+///
+/// // Trigger payload only — the historical form.
+/// let plain: RunInput = json!({"from": "webhook"}).into();
+/// assert!(plain.inputs.is_empty());
+///
+/// // With declared input values.
+/// let mut values = serde_json::Map::new();
+/// values.insert("repo".into(), json!("acme/api"));
+/// let parameterized = RunInput::new(json!({})).with_inputs(values);
+/// assert_eq!(parameterized.inputs["repo"], json!("acme/api"));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct RunInput {
+    /// The trigger payload, seeded as the trigger node's item and `run.trigger`.
+    pub trigger: Value,
+    /// Caller-supplied values for the workflow's declared inputs, by name.
+    /// Validated by [`crate::model::resolve_inputs`] before the run starts.
+    pub inputs: Map<String, Value>,
+}
+
+impl RunInput {
+    /// A run carrying only a trigger payload and no declared-input values.
+    #[must_use]
+    pub fn new(trigger: Value) -> Self {
+        Self {
+            trigger,
+            inputs: Map::new(),
+        }
+    }
+
+    /// Attaches values for the workflow's declared inputs.
+    #[must_use]
+    pub fn with_inputs(mut self, inputs: Map<String, Value>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+}
+
+impl From<Value> for RunInput {
+    /// Treats a bare JSON value as a trigger payload with no declared inputs —
+    /// what every caller meant before inputs existed.
+    fn from(trigger: Value) -> Self {
+        Self::new(trigger)
     }
 }
 
@@ -447,7 +511,7 @@ fn error_item(node_id: &str, e: &EngineError) -> Item {
 /// not yet implemented surfaces its `Unimplemented` error here.
 pub async fn run(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
 ) -> Result<RunOutcome> {
     run_with_observer(
@@ -470,7 +534,7 @@ pub async fn run(
 /// Same as [`run`].
 pub async fn run_with_observer(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
 ) -> Result<RunOutcome> {
@@ -509,7 +573,7 @@ pub async fn run_with_observer(
 /// Same as [`run`].
 pub async fn run_cancellable(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     token: CancellationToken,
 ) -> Result<RunOutcome> {
@@ -524,7 +588,7 @@ pub async fn run_cancellable(
 /// Same as [`run_cancellable`].
 pub async fn run_cancellable_with_observer(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     token: CancellationToken,
     observer: &Arc<dyn RunObserver>,
@@ -570,7 +634,7 @@ pub const MAX_SUB_WORKFLOW_DEPTH: u64 = 8;
 /// Same as [`run`].
 pub(crate) async fn run_sub_workflow(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     depth: u64,
 ) -> Result<RunOutcome> {
@@ -1316,7 +1380,7 @@ fn default_thread_id(workflow: &CompiledWorkflow) -> Result<String> {
 #[allow(clippy::too_many_arguments)]
 async fn build_and_run(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
     checkpointer: Arc<dyn Checkpointer<Value>>,
@@ -1325,6 +1389,14 @@ async fn build_and_run(
     run_meta_overlay: Option<Value>,
     token: CancellationToken,
 ) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome, GraphRunIds)> {
+    // Declared inputs are resolved FIRST — before the run id is minted, before
+    // the observer is told a run started, and before any graph is built. A
+    // caller that gets an `Input` error can therefore be certain nothing ran and
+    // nothing was observed, which is what lets a host reject a bad call without
+    // recording a phantom run.
+    let RunInput { trigger, inputs } = input.into();
+    let resolved_inputs = crate::model::resolve_inputs(&workflow.graph.inputs, &inputs)?;
+
     // Process-local, monotonic run id — no time/random source.
     let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
     observer.on_run_start(&run_id);
@@ -1347,9 +1419,13 @@ async fn build_and_run(
         token.clone(),
     )?;
 
-    let seed_items = items_update(&trigger_id, &[Item::new(input.clone())], None)
+    let seed_items = items_update(&trigger_id, &[Item::new(trigger.clone())], None)
         .map_err(|e| EngineError::Capability(e.to_string()))?;
-    let mut initial = json!({ "run": { "trigger": input } });
+    // `run.inputs` holds the resolved declared inputs — one entry per
+    // declaration, defaults already applied. `expr_scope_for` lifts it to the
+    // top-level `inputs` scope key, so node config addresses it as
+    // `=inputs.<name>` (and jq programs walking `run` still see it too).
+    let mut initial = json!({ "run": { "trigger": trigger, "inputs": resolved_inputs } });
     merge(&mut initial, seed_items);
     // Optional run-level metadata overlaid onto `run` before the run starts —
     // e.g. the `sub_workflow_depth` counter a nested `sub_workflow` run threads
@@ -1441,15 +1517,33 @@ async fn build_and_run(
 /// execution of the resumed run fails.
 pub async fn resume(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     newly_approved: Vec<String>,
     capabilities: &Capabilities,
 ) -> Result<RunOutcome> {
-    // Union `newly_approved` into `input["approvals"]`: start from any existing
-    // approvals array (ignoring non-string entries), then append each newly
-    // approved id that is not already present. Reading defensively — a missing or
-    // non-array `approvals` simply yields an empty starting set, never a panic.
-    let mut approvals: Vec<String> = input
+    run(
+        workflow,
+        merge_approvals(input, newly_approved),
+        capabilities,
+    )
+    .await
+}
+
+/// Unions `newly_approved` into the run input's `trigger["approvals"]`, leaving
+/// the declared-input values untouched.
+///
+/// Reads defensively: a missing or non-array `approvals` yields an empty
+/// starting set, and a non-object trigger (which carries no fields to preserve)
+/// is replaced by a fresh object holding just the merged approvals. Declared
+/// inputs ride along unchanged — a resume re-runs the *same* parameterized
+/// workflow, so dropping them would silently change what it does.
+fn merge_approvals(input: impl Into<RunInput>, newly_approved: Vec<String>) -> RunInput {
+    let RunInput {
+        mut trigger,
+        inputs,
+    } = input.into();
+
+    let mut approvals: Vec<String> = trigger
         .get("approvals")
         .and_then(Value::as_array)
         .map(|existing| {
@@ -1466,16 +1560,13 @@ pub async fn resume(
         }
     }
 
-    let mut merged_input = input;
-    if let Value::Object(map) = &mut merged_input {
+    if let Value::Object(map) = &mut trigger {
         map.insert("approvals".to_string(), json!(approvals));
     } else {
-        // A non-object input carries no fields to preserve, so replace it with a
-        // fresh object holding just the merged approvals.
-        merged_input = json!({ "approvals": approvals });
+        trigger = json!({ "approvals": approvals });
     }
 
-    run(workflow, merged_input, capabilities).await
+    RunInput { trigger, inputs }
 }
 
 /// Like [`resume`], but observes `token`: cancelling it winds the resumed run
@@ -1487,36 +1578,18 @@ pub async fn resume(
 /// Same as [`resume`].
 pub async fn resume_cancellable(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     newly_approved: Vec<String>,
     capabilities: &Capabilities,
     token: CancellationToken,
 ) -> Result<RunOutcome> {
-    let mut approvals: Vec<String> = input
-        .get("approvals")
-        .and_then(Value::as_array)
-        .map(|existing| {
-            existing
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    for id in newly_approved {
-        if !approvals.contains(&id) {
-            approvals.push(id);
-        }
-    }
-
-    let mut merged_input = input;
-    if let Value::Object(map) = &mut merged_input {
-        map.insert("approvals".to_string(), json!(approvals));
-    } else {
-        merged_input = json!({ "approvals": approvals });
-    }
-
-    run_cancellable(workflow, merged_input, capabilities, token).await
+    run_cancellable(
+        workflow,
+        merge_approvals(input, newly_approved),
+        capabilities,
+        token,
+    )
+    .await
 }
 
 /// A live, resumable workflow run.
@@ -1601,7 +1674,7 @@ impl ResumableRun {
 /// Same as [`run`].
 pub async fn run_resumable(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
 ) -> Result<ResumableRun> {
     let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
@@ -1654,7 +1727,7 @@ pub async fn run_resumable(
 /// execution (including any node executor error) fails.
 pub async fn run_with_checkpointer(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
@@ -1740,7 +1813,7 @@ pub async fn resume_with_checkpointer(
 /// Same as [`run_with_checkpointer`].
 pub async fn run_with_checkpointer_journaled(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
@@ -1775,7 +1848,7 @@ pub async fn run_with_checkpointer_journaled(
 /// Same as [`run_with_checkpointer_journaled`].
 pub async fn run_with_checkpointer_journaled_observed(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
