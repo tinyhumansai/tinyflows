@@ -588,7 +588,79 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
         },
         _ => return None,
     };
-    Some(c)
+    Some(with_fan_out_fields(c))
+}
+
+/// The node kinds that map over their input, and whether they do so by default.
+///
+/// `true` means the kind is `per_item` unless told otherwise, so its fan-out
+/// knobs apply without an explicit `execution`.
+const FAN_OUT_KINDS: [(&str, bool); 5] = [
+    ("agent", false),
+    ("tool_call", true),
+    ("http_request", true),
+    ("memory", true),
+    ("sub_workflow", false),
+];
+
+/// Appends the shared per-item fan-out contract (`execution`, `concurrency`,
+/// `on_item_error`) to the kinds that support it.
+///
+/// These three keys behave identically on every mapping kind, so they are
+/// described once here rather than copied into five contracts that would then
+/// drift. Kinds that cannot map over their input are returned untouched — and
+/// [`crate::validate`] rejects the keys there, so the contract and the validator
+/// agree on exactly which kinds fan out.
+fn with_fan_out_fields(mut c: NodeKindContract) -> NodeKindContract {
+    let Some((_, per_item_by_default)) = FAN_OUT_KINDS.iter().find(|(k, _)| *k == c.kind) else {
+        return c;
+    };
+    let default_mode = if *per_item_by_default {
+        "per_item"
+    } else {
+        "once"
+    };
+
+    c.config_fields.push(
+        ConfigField::optional(
+            "execution",
+            "enum",
+            &format!(
+                "Whether this node runs once for the whole input array or once per input item. \
+                 Defaults to \"{default_mode}\" for this kind."
+            ),
+        )
+        .with_enum(&["once", "per_item"]),
+    );
+    c.config_fields.push(ConfigField::optional(
+        "concurrency",
+        "integer | \"all\"",
+        "With execution \"per_item\", how many items run at a time: 1 (the default) is strictly \
+         sequential, n runs at most n at once, and 0 or \"all\" runs every item at once. This is \
+         the fan-out dial — use it to turn an array of work into parallel work. Ignored (and \
+         rejected by validation) unless the node runs per item.",
+    ));
+    c.config_fields.push(
+        ConfigField::optional(
+            "on_item_error",
+            "enum",
+            "What a failing item does to the batch. Defaults to \"collect\" when the node fans \
+             out (concurrency other than 1) and \"fail_fast\" when it runs sequentially. \
+             \"collect\" emits an error item — {json:{error,failed:true}} — in that item's slot so \
+             the node still returns one output per input and a downstream condition can branch on \
+             =item.json.failed. \"fail_fast\" fails the node on the first error in input order, \
+             handing it to the node's on_error/retry policy. \"skip\" drops failed items, so the \
+             output array may be shorter than the input.",
+        )
+        .with_enum(&["collect", "fail_fast", "skip"]),
+    );
+
+    c.notes.push(
+        "Output items are always returned in INPUT order with paired_item set, however the \
+         concurrency is set — a fan-out never reorders data."
+            .to_string(),
+    );
+    c
 }
 
 #[cfg(test)]
@@ -725,5 +797,64 @@ mod tests {
             let back: NodeKindContract = serde_json::from_value(json).unwrap();
             assert_eq!(c, back);
         }
+    }
+}
+
+#[cfg(test)]
+mod fan_out_contract_tests {
+    use super::*;
+
+    #[test]
+    fn every_mapping_kind_advertises_the_fan_out_knobs() {
+        for (kind, _) in FAN_OUT_KINDS {
+            let c = contract_for(kind).expect("contract");
+            for field in ["execution", "concurrency", "on_item_error"] {
+                assert!(
+                    c.config_fields.iter().any(|f| f.name == field),
+                    "{kind} should advertise `{field}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kinds_that_cannot_map_do_not_advertise_them() {
+        // The contract and the validator must agree on which kinds fan out;
+        // advertising a key that validation rejects would be worse than silence.
+        for kind in [
+            "trigger",
+            "condition",
+            "switch",
+            "merge",
+            "transform",
+            "code",
+        ] {
+            let c = contract_for(kind).expect("contract");
+            assert!(
+                !c.config_fields.iter().any(|f| f.name == "concurrency"),
+                "{kind} must not advertise `concurrency`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_execution_default_is_stated_per_kind() {
+        let doc = |kind: &str| {
+            contract_for(kind)
+                .expect("contract")
+                .config_fields
+                .iter()
+                .find(|f| f.name == "execution")
+                .expect("execution field")
+                .description
+                .clone()
+        };
+        // An author needs to know that `agent` must opt in but `tool_call` need not.
+        assert!(doc("agent").contains("\"once\""), "{}", doc("agent"));
+        assert!(
+            doc("tool_call").contains("\"per_item\""),
+            "{}",
+            doc("tool_call")
+        );
     }
 }
