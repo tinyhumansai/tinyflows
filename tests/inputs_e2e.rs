@@ -314,3 +314,60 @@ async fn a_parent_that_omits_a_required_child_input_fails() {
         "the error should name the missing child input, got: {err}"
     );
 }
+
+#[tokio::test]
+async fn a_jq_program_must_address_inputs_with_a_leading_dot() {
+    // `inputs` is the one scope key that collides with a jq builtin (jq's own
+    // `inputs` reads further program inputs). A simple dotted path is walked
+    // directly and is fine; anything jq compiles needs the leading dot, and
+    // getting it wrong yields nothing rather than erroring — which is exactly
+    // why this is pinned rather than left to a doc comment.
+    let graph = WorkflowGraph {
+        name: "jq-inputs".to_string(),
+        inputs: vec![WorkflowInput::new("repo", InputType::String).required()],
+        nodes: vec![
+            trigger("t", TriggerKind::Manual),
+            node(
+                "shape",
+                NodeKind::Transform,
+                json!({ "set": {
+                    // The fast dotted path: no jq compilation, so bare `inputs`
+                    // resolves against the scope.
+                    "direct": "=inputs.repo",
+                    // A real jq program, addressed correctly.
+                    "dotted": "=\"repo: \" + .inputs.repo",
+                    // The same program with the collision. Kept in the test on
+                    // purpose: if a future change makes this resolve, the doc
+                    // warning is stale and should be removed with it.
+                    "bare": "=\"repo: \" + inputs.repo",
+                } }),
+            ),
+        ],
+        edges: vec![edge("t", "shape")],
+        ..Default::default()
+    };
+    let compiled = compile(&graph).expect("compile");
+    let caps = mock_capabilities();
+
+    let outcome = run(
+        &compiled,
+        RunInput::new(json!({})).with_inputs(values(&[("repo", json!("acme/api"))])),
+        &caps,
+    )
+    .await
+    .expect("run");
+
+    let shaped = &outcome.output["nodes"]["shape"]["items"][0]["json"];
+    assert_eq!(shaped["direct"], json!("acme/api"), "dotted-path fast form");
+    assert_eq!(
+        shaped["dotted"],
+        json!("repo: acme/api"),
+        "a jq program addressing `.inputs`"
+    );
+    assert_eq!(
+        shaped["bare"],
+        json!(null),
+        "bare `inputs` in a jq program hits jq's builtin and yields nothing — \
+         the reason authors are told to write `.inputs.<name>` there"
+    );
+}

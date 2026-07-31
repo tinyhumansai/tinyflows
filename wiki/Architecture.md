@@ -80,8 +80,16 @@ type mismatches, and undeclared keys are all rejected; declared inputs the
 caller omits fall back to their `default`, or to `null` when optional.
 
 Resolved values land at `run.inputs` and are lifted to the top-level `inputs`
-expression scope, so node config reads them as `=inputs.repo`. Keep the two
-channels distinct:
+expression scope, so node config reads them as `=inputs.repo`.
+
+> **Inside a real jq program, write `.inputs.<name>`.** `=inputs.repo` works
+> because a simple dotted path is walked directly rather than compiled. Anything
+> jq compiles — a concatenation, a conditional, a pipe — resolves bare `inputs`
+> as jq's own `inputs` builtin and silently yields nothing. So
+> `="Review " + .inputs.repo` is right and `="Review " + inputs.repo` is not.
+> `inputs` is the only scope key that collides with a jq builtin.
+
+Keep the two channels distinct:
 
 | | `run.trigger` | `inputs` |
 |---|---|---|

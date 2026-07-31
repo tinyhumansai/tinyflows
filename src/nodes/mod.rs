@@ -63,6 +63,16 @@ pub struct NodeContext<'a> {
 ///   `=inputs.repo`. One entry per declaration with defaults already applied,
 ///   so a binding to a declared name is never *absent* — at worst it is the
 ///   explicit `null` of an optional input nobody supplied.
+///
+///   **Write `.inputs.<name>` inside a real jq program.** `=inputs.repo` works
+///   because a simple dotted path is walked directly, never compiled. Anything
+///   jq actually compiles — a concatenation, a conditional, a pipe — resolves
+///   bare `inputs` as jq's own `inputs` *builtin* (which reads further program
+///   inputs) rather than this scope key, and the expression quietly yields
+///   nothing instead of erroring. The leading dot forces the object lookup:
+///   `="Review " + .inputs.repo` is right, `="Review " + inputs.repo` is not.
+///   No other scope key has this problem; `inputs` is the one name jq already
+///   uses.
 #[must_use]
 pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
     let item = ctx
