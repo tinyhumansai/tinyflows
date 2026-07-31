@@ -28,12 +28,14 @@ impl NodeExecutor for TransformNode {
         for (index, item) in ctx.input.iter().enumerate() {
             // `item` is this loop's current item; `items` exposes the full input
             // batch; `nodes` addresses any completed upstream node by id.
-            let scope = serde_json::json!({
-                "item": item.json.clone(),
-                "items": items.clone(),
-                "run": ctx.run,
-                "nodes": nodes.clone(),
-            });
+            // Built through the shared constructor so this node can never drift
+            // out of sync with the scope every other node sees.
+            let scope = crate::nodes::build_expr_scope(
+                item.json.clone(),
+                items.clone(),
+                ctx.run,
+                nodes.clone(),
+            );
             let mut json = item.json.clone();
             if let Some(set) = &set {
                 if !json.is_object() {

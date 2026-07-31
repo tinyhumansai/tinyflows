@@ -206,6 +206,12 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
             notes: vec![
                 "Exactly ONE trigger node per graph — zero or multiple is a hard reject."
                     .to_string(),
+                "A workflow's typed PARAMETERS are NOT declared here. They live in the graph's \
+                 top-level `inputs` array (name/type/required/default/description), are validated \
+                 before the run starts, and are read from any node as \"=inputs.<name>\". The \
+                 trigger payload — free-form, whatever fired the run — stays at \
+                 \"=run.trigger.<path>\"."
+                    .to_string(),
             ],
         },
         "agent" => NodeKindContract {
@@ -458,14 +464,24 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                     "string",
                     "The id of a saved workflow to run as the child. Provide this OR workflow.",
                 ),
+                ConfigField::optional(
+                    "inputs",
+                    "object",
+                    "Values for the child's declared workflow inputs, by name. Each value is \
+                     resolved against THIS node's scope, so a parent can forward its own inputs \
+                     (\"=inputs.repo\") or an upstream node's output.",
+                ),
             ],
             ports: PortSpec::linear(),
             example: json!({
                 "id": "sub", "kind": "sub_workflow", "name": "Enrich",
-                "config": { "workflow_id": "flow-123" }
+                "config": { "workflow_id": "flow-123", "inputs": { "repo": "=inputs.repo" } }
             }),
             notes: vec![
                 "Exactly one of workflow / workflow_id — having both or neither is a hard reject."
+                    .to_string(),
+                "The child validates config.inputs against its OWN declarations, so omitting a \
+                 required child input fails before the child executes anything."
                     .to_string(),
             ],
         },

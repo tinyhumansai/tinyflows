@@ -102,6 +102,19 @@ pub enum GraphOp {
         /// The new canvas position.
         position: Position,
     },
+    /// Replace the workflow's declared inputs wholesale.
+    ///
+    /// A whole-list replace rather than per-input add/remove/update ops: the
+    /// list is short, order is meaningful (it drives the order a host prompts
+    /// for values), and a rename is otherwise two ops that must not be
+    /// interleaved with anything else. Never fails structurally — the resulting
+    /// declarations are checked by [`crate::validate::validate_all`], which
+    /// reports duplicate names, unaddressable names, and self-contradictory
+    /// defaults.
+    SetWorkflowInputs {
+        /// The complete new set of declared inputs (empty clears them).
+        inputs: Vec<crate::model::WorkflowInput>,
+    },
 }
 
 impl GraphOp {
@@ -116,6 +129,7 @@ impl GraphOp {
             Self::AddEdge { .. } => "add_edge",
             Self::RemoveEdge { .. } => "remove_edge",
             Self::SetNodePosition { .. } => "set_node_position",
+            Self::SetWorkflowInputs { .. } => "set_workflow_inputs",
         }
     }
 }
@@ -307,6 +321,9 @@ fn apply_one(graph: &mut WorkflowGraph, op: &GraphOp) -> Result<(), GraphOpError
                 node_index(graph, id).ok_or_else(|| GraphOpErrorKind::NodeNotFound(id.clone()))?;
             graph.nodes[idx].position = Some(*position);
         }
+        GraphOp::SetWorkflowInputs { inputs } => {
+            graph.inputs = inputs.clone();
+        }
     }
     Ok(())
 }
@@ -366,6 +383,58 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn set_workflow_inputs_replaces_the_whole_list() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let mut base = base();
+        base.inputs = vec![WorkflowInput::new("stale", InputType::String)];
+
+        let g = apply_ops(
+            &base,
+            &[GraphOp::SetWorkflowInputs {
+                inputs: vec![
+                    WorkflowInput::new("repo", InputType::String).required(),
+                    WorkflowInput::new("depth", InputType::Number).with_default(json!(3)),
+                ],
+            }],
+        )
+        .unwrap();
+
+        let names: Vec<&str> = g.inputs.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["repo", "depth"], "replaced, not merged");
+        assert_eq!(g.nodes.len(), base.nodes.len(), "nodes are untouched");
+    }
+
+    #[test]
+    fn set_workflow_inputs_can_clear_declarations() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let mut base = base();
+        base.inputs = vec![WorkflowInput::new("repo", InputType::String)];
+
+        let g = apply_ops(&base, &[GraphOp::SetWorkflowInputs { inputs: vec![] }]).unwrap();
+        assert!(g.inputs.is_empty());
+    }
+
+    #[test]
+    fn set_workflow_inputs_round_trips_through_its_serde_tag() {
+        let op: GraphOp = serde_json::from_str(
+            r#"{"op":"set_workflow_inputs","inputs":[{"name":"repo","required":true}]}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(op.name(), "set_workflow_inputs");
+        match &op {
+            GraphOp::SetWorkflowInputs { inputs } => {
+                assert_eq!(inputs.len(), 1);
+                assert!(inputs[0].required);
+            }
+            other => panic!("expected set_workflow_inputs, got {other:?}"),
+        }
+        let back: GraphOp = serde_json::from_value(serde_json::to_value(&op).unwrap()).unwrap();
+        assert_eq!(back, op);
     }
 
     #[test]

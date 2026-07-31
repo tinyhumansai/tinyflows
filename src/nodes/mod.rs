@@ -80,17 +80,33 @@ pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
 #[must_use]
 pub(crate) fn expr_scope_for(ctx: &NodeContext, item: Value) -> Value {
     let items: Vec<Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
+    build_expr_scope(item, items, ctx.run, nodes_scope(ctx.nodes))
+}
+
+/// THE single constructor for an expression scope — every `=`-expression in the
+/// crate is evaluated against an object built here.
+///
+/// Takes an already-projected `nodes` scope so a per-item loop can project it
+/// once and reuse it across the batch (see the `transform` node), while callers
+/// with a [`NodeContext`] go through [`expr_scope`] / [`expr_scope_for`].
+///
+/// Keeping this in one place is load-bearing, not tidiness: a node that
+/// hand-rolls the object silently loses whatever key it was written before, and
+/// the binding fails as a quiet `null` rather than an error. Add a key here and
+/// every node sees it.
+#[must_use]
+pub(crate) fn build_expr_scope(item: Value, items: Vec<Value>, run: &Value, nodes: Value) -> Value {
     serde_json::json!({
         "item": item,
         "items": items,
-        "run": ctx.run,
-        "nodes": nodes_scope(ctx.nodes),
+        "run": run,
+        "nodes": nodes,
         // Lifted out of `run` rather than carried separately on `NodeContext`:
         // the engine seeds the resolved declared inputs at `run.inputs`, and
         // this promotes them to a top-level key so authors write the short
         // `=inputs.<name>` while jq programs walking `run` still find them.
         // `Null` when the run predates inputs or the graph declares none.
-        "inputs": ctx.run.get("inputs").cloned().unwrap_or(Value::Null),
+        "inputs": run.get("inputs").cloned().unwrap_or(Value::Null),
     })
 }
 
