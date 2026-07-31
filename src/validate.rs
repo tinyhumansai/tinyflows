@@ -7,6 +7,16 @@ use serde_json::Value;
 use crate::error::ValidationError;
 use crate::model::{NodeKind, WorkflowGraph};
 
+/// The node kind's wire discriminator (`tool_call`, `sub_workflow`, …) for use
+/// in error messages, so a validation error names the kind the way the graph
+/// JSON spells it rather than in Rust's `PascalCase`.
+fn kind_name(kind: &NodeKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{kind:?}"))
+}
+
 /// Validates a workflow graph's structure.
 ///
 /// Currently checks: unique node ids, exactly one trigger node, that every edge
@@ -132,6 +142,98 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
                     reason: "sub_workflow requires exactly one of `workflow` (inline) or \
                              `workflow_id` (reference)"
                         .to_string(),
+                });
+            }
+        }
+    }
+
+    // Per-item fan-out config (`execution` / `concurrency` / `on_item_error`).
+    // These select the execution strategy, so an unrecognized value cannot be
+    // caught at run time without silently changing behaviour — a bad
+    // `concurrency` would quietly stay sequential and a bad `on_item_error`
+    // would quietly pick a default. Reject them here, where the message can name
+    // the node.
+    for node in &graph.nodes {
+        let fans_out = matches!(
+            node.kind,
+            NodeKind::Agent
+                | NodeKind::ToolCall
+                | NodeKind::HttpRequest
+                | NodeKind::Memory
+                | NodeKind::SubWorkflow
+        );
+
+        if let Some(execution) = node.config.get("execution") {
+            match execution.as_str() {
+                Some("once" | "per_item") if fans_out => {}
+                Some("once" | "per_item") => {
+                    errors.push(ValidationError::InvalidNodeConfig {
+                        node: node.id.clone(),
+                        reason: format!(
+                            "`execution` is not supported on a {} node (only agent, tool_call, \
+                             http_request, memory, and sub_workflow map over their input)",
+                            kind_name(&node.kind)
+                        ),
+                    });
+                }
+                _ => {
+                    errors.push(ValidationError::InvalidNodeConfig {
+                        node: node.id.clone(),
+                        reason: format!(
+                            "unknown `execution` value {execution} (expected \"once\" or \
+                             \"per_item\")"
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Whether this node actually maps over its input, accounting for the
+        // per-kind default: `tool_call` / `http_request` / `memory` are per-item
+        // unless told otherwise; `agent` / `sub_workflow` are not.
+        let per_item = match node.config.get("execution").and_then(Value::as_str) {
+            Some("per_item") => true,
+            Some("once") => false,
+            _ => matches!(
+                node.kind,
+                NodeKind::ToolCall | NodeKind::HttpRequest | NodeKind::Memory
+            ),
+        };
+
+        for key in ["concurrency", "on_item_error"] {
+            let Some(value) = node.config.get(key) else {
+                continue;
+            };
+            // A fan-out knob on a node that runs once is a no-op, and a silent
+            // no-op reads as "I asked for parallelism and got none".
+            if !per_item {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!(
+                        "`{key}` has no effect without `execution: \"per_item\"` on a {} node",
+                        kind_name(&node.kind)
+                    ),
+                });
+                continue;
+            }
+            let ok = match key {
+                "concurrency" => {
+                    matches!(
+                        value,
+                        Value::Number(n) if n.as_u64().is_some(),
+                    ) || value.as_str() == Some("all")
+                }
+                _ => matches!(value.as_str(), Some("collect" | "fail_fast" | "skip")),
+            };
+            if !ok {
+                let expected = if key == "concurrency" {
+                    "a non-negative integer or \"all\""
+                } else {
+                    "\"collect\", \"fail_fast\", or \"skip\""
+                };
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!("`{key}` must be {expected}, got {value}"),
                 });
             }
         }
@@ -1274,6 +1376,148 @@ mod tests {
         assert_eq!(
             ValidationError::MultipleTriggers(vec!["a".to_string()]).node_id(),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod fanout_tests {
+    use super::{validate, validate_all};
+    use crate::error::ValidationError;
+    use crate::model::{Node, NodeKind, WorkflowGraph};
+    use serde_json::{Value, json};
+
+    /// A trigger plus one configured node of `kind` — the smallest graph that
+    /// exercises a per-kind config check.
+    fn graph(kind: NodeKind, config: Value) -> WorkflowGraph {
+        let mk = |id: &str, kind: NodeKind, config: Value| Node {
+            id: id.to_string(),
+            kind,
+            type_version: 1,
+            name: id.to_string(),
+            config,
+            ports: Vec::new(),
+            position: None,
+        };
+        WorkflowGraph {
+            nodes: vec![
+                mk("t", NodeKind::Trigger, Value::Null),
+                mk("n", kind, config),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// The `reason` of the single `InvalidNodeConfig` error, or a panic.
+    fn reason(kind: NodeKind, config: Value) -> String {
+        match validate_all(&graph(kind, config))
+            .into_iter()
+            .find(|e| matches!(e, ValidationError::InvalidNodeConfig { .. }))
+        {
+            Some(ValidationError::InvalidNodeConfig { reason, .. }) => reason,
+            other => panic!("expected an InvalidNodeConfig error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_valid_fan_out_passes() {
+        assert_eq!(
+            validate(&graph(
+                NodeKind::Agent,
+                json!({ "execution": "per_item", "concurrency": 8, "on_item_error": "collect" })
+            )),
+            Ok(())
+        );
+        // `"all"` and `0` are both legal spellings of unbounded.
+        for c in [json!("all"), json!(0)] {
+            assert_eq!(
+                validate(&graph(
+                    NodeKind::ToolCall,
+                    json!({ "execution": "per_item", "concurrency": c })
+                )),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn per_item_default_kinds_may_carry_fan_out_config_without_declaring_execution() {
+        // tool_call / http_request / memory are per-item by default, so the
+        // knobs apply without an explicit `execution`.
+        for kind in [NodeKind::ToolCall, NodeKind::HttpRequest] {
+            assert_eq!(
+                validate(&graph(kind.clone(), json!({ "concurrency": 4 }))),
+                Ok(()),
+                "{kind:?} is per-item by default"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrency_on_a_once_node_is_rejected_rather_than_silently_ignored() {
+        // `agent` defaults to `once`, so this author asked for parallelism and
+        // would otherwise have got none, with no signal at all.
+        let reason = reason(NodeKind::Agent, json!({ "concurrency": 8 }));
+        assert!(
+            reason.contains("no effect") && reason.contains("per_item"),
+            "expected a no-effect explanation, got: {reason}"
+        );
+
+        // Explicitly opting out is the same story.
+        let reason = reason_of(
+            NodeKind::ToolCall,
+            json!({ "execution": "once", "concurrency": 8 }),
+        );
+        assert!(reason.contains("no effect"), "got: {reason}");
+    }
+
+    fn reason_of(kind: NodeKind, config: Value) -> String {
+        reason(kind, config)
+    }
+
+    #[test]
+    fn a_malformed_concurrency_is_rejected() {
+        for bad in [json!("lots"), json!(-1), json!(1.5), json!(true)] {
+            let reason = reason(
+                NodeKind::ToolCall,
+                json!({ "execution": "per_item", "concurrency": bad }),
+            );
+            assert!(
+                reason.contains("concurrency"),
+                "expected a concurrency error for {bad}, got: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_item_error_policy_is_rejected() {
+        let reason = reason(
+            NodeKind::ToolCall,
+            json!({ "execution": "per_item", "on_item_error": "explode" }),
+        );
+        assert!(
+            reason.contains("on_item_error") && reason.contains("collect"),
+            "expected the allowed policies to be listed, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_execution_value_is_rejected() {
+        let reason = reason(NodeKind::Agent, json!({ "execution": "parallel" }));
+        assert!(
+            reason.contains("execution") && reason.contains("per_item"),
+            "expected the allowed modes to be listed, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn execution_on_a_kind_that_cannot_map_is_rejected() {
+        // A `transform` node does not map over its input; accepting `execution`
+        // there would imply a fan-out that never happens.
+        let reason = reason(NodeKind::Transform, json!({ "execution": "per_item" }));
+        assert!(
+            reason.contains("not supported") && reason.contains("transform"),
+            "expected the kind to be named in its wire spelling, got: {reason}"
         );
     }
 }
