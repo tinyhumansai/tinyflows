@@ -43,15 +43,20 @@ impl NodeExecutor for ToolCallNode {
         if per_item {
             // Map over the input: re-resolve config against each item (so
             // `=item.x` binds to the current item) and invoke once per item.
-            let mut items = Vec::with_capacity(ctx.input.len());
-            let mut diagnostics = Vec::new();
-            for (index, input_item) in ctx.input.iter().enumerate() {
-                let (cfg, diags) =
-                    crate::nodes::resolve_config_traced_for_item(&ctx, input_item.json.clone());
-                let result = invoke(&ctx, &cfg).await?;
-                items.push(Item::new(envelope::wrap(result)).paired_with(index));
-                diagnostics.extend(diags);
-            }
+            // `config.concurrency` decides how many of those invocations are in
+            // flight at once (default 1 — sequential, as before).
+            let opts = crate::nodes::map::map_options(&ctx.node.config, &ctx.node.id);
+            let ctx = &ctx;
+            let (items, diagnostics) =
+                crate::nodes::map::map_items(ctx.input.len(), opts, move |index| async move {
+                    let (cfg, diags) = crate::nodes::resolve_config_traced_for_item(
+                        ctx,
+                        ctx.input[index].json.clone(),
+                    );
+                    let result = invoke(ctx, &cfg).await?;
+                    Ok((Item::new(envelope::wrap(result)), diags))
+                })
+                .await?;
             Ok(NodeOutput::main(items).with_diagnostics(diagnostics))
         } else {
             // Single invocation against the first-item scope (or empty input).

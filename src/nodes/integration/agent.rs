@@ -59,15 +59,21 @@ impl NodeExecutor for AgentNode {
                 && !ctx.input.is_empty();
 
         if per_item {
-            let mut items = Vec::with_capacity(ctx.input.len());
-            let mut diagnostics = Vec::new();
-            for (index, input_item) in ctx.input.iter().enumerate() {
-                let (cfg, diags) =
-                    crate::nodes::resolve_config_traced_for_item(&ctx, input_item.json.clone());
-                let item = run_turn(&ctx, &cfg).await?;
-                items.push(item.paired_with(index));
-                diagnostics.extend(diags);
-            }
+            // Fan out: `config.concurrency` decides how many turns run at once
+            // (default 1 — sequential, as this node has always behaved), and
+            // `config.on_item_error` what a failing turn does to the batch.
+            let opts = crate::nodes::map::map_options(&ctx.node.config, &ctx.node.id);
+            let ctx = &ctx;
+            let (items, diagnostics) =
+                crate::nodes::map::map_items(ctx.input.len(), opts, move |index| async move {
+                    let (cfg, diags) = crate::nodes::resolve_config_traced_for_item(
+                        ctx,
+                        ctx.input[index].json.clone(),
+                    );
+                    let item = run_turn(ctx, &cfg).await?;
+                    Ok((item, diags))
+                })
+                .await?;
             return Ok(NodeOutput::main(items).with_diagnostics(diagnostics));
         }
 

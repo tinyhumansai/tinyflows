@@ -34,15 +34,20 @@ impl NodeExecutor for HttpRequestNode {
             && !ctx.input.is_empty();
 
         if per_item {
-            let mut items = Vec::with_capacity(ctx.input.len());
-            let mut diagnostics = Vec::new();
-            for (index, input_item) in ctx.input.iter().enumerate() {
-                let (cfg, diags) =
-                    crate::nodes::resolve_config_traced_for_item(&ctx, input_item.json.clone());
-                let response = request(&ctx, &cfg).await?;
-                items.push(Item::new(envelope::wrap(response)).paired_with(index));
-                diagnostics.extend(diags);
-            }
+            // `config.concurrency` decides how many requests are in flight at
+            // once (default 1 — sequential, as before).
+            let opts = crate::nodes::map::map_options(&ctx.node.config, &ctx.node.id);
+            let ctx = &ctx;
+            let (items, diagnostics) =
+                crate::nodes::map::map_items(ctx.input.len(), opts, move |index| async move {
+                    let (cfg, diags) = crate::nodes::resolve_config_traced_for_item(
+                        ctx,
+                        ctx.input[index].json.clone(),
+                    );
+                    let response = request(ctx, &cfg).await?;
+                    Ok((Item::new(envelope::wrap(response)), diags))
+                })
+                .await?;
             Ok(NodeOutput::main(items).with_diagnostics(diagnostics))
         } else {
             let (cfg, diagnostics) = crate::nodes::resolve_config_traced(&ctx);
