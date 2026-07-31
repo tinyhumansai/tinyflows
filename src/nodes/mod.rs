@@ -8,6 +8,7 @@
 
 pub mod control_flow;
 pub mod integration;
+pub(crate) mod map;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -91,6 +92,11 @@ pub(crate) fn expr_scope_for(ctx: &NodeContext, item: Value) -> Value {
 ///   `paired_item`). This is the n8n-style default for `tool_call` /
 ///   `http_request`, so a fan-out (`split_out` → node) actually runs per element
 ///   instead of silently dropping all but the first.
+///
+/// `PerItem` says *that* the node maps over its input; [`map`] says **how many
+/// items run at a time** (`config.concurrency`) and what a failing item does to
+/// the batch (`config.on_item_error`). Concurrency defaults to `1`, so a node
+/// that does not opt in keeps the sequential ordering and timing it always had.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutionMode {
     /// Single invocation against the first item.
