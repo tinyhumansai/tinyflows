@@ -62,6 +62,18 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 /// that omits a required child input fails the same way a top-level caller
 /// would — before the child executes anything.
 ///
+/// Under `execution: "per_item"` the fields are resolved against **the current
+/// element**, exactly like `workflow_id` is, so each child in a fan-out gets
+/// values derived from its own item:
+///
+/// ```json
+/// {
+///   "workflow_id": "review-and-fix",
+///   "execution": "per_item",
+///   "inputs": { "repo": "=item.name" }
+/// }
+/// ```
+///
 /// ## Cycle / depth handling
 ///
 /// Every nested `sub_workflow` run (inline or by id) increments a

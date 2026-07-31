@@ -469,7 +469,9 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                     "object",
                     "Values for the child's declared workflow inputs, by name. Each value is \
                      resolved against THIS node's scope, so a parent can forward its own inputs \
-                     (\"=inputs.repo\") or an upstream node's output.",
+                     (\"=inputs.repo\") or an upstream node's output. Under \
+                     execution=\"per_item\" the scope is the current element, so each child in a \
+                     fan-out gets values from its own item (\"=item.name\").",
                 ),
             ],
             ports: PortSpec::linear(),

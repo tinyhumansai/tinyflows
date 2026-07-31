@@ -371,3 +371,77 @@ async fn a_jq_program_must_address_inputs_with_a_leading_dot() {
          the reason authors are told to write `.inputs.<name>` there"
     );
 }
+
+#[tokio::test]
+async fn a_per_item_sub_workflow_forwards_inputs_derived_from_its_own_element() {
+    // The `inputs` map is resolved inside `run_child`, against the same scope
+    // as `workflow_id`. For a `per_item` fan-out that scope is the *current
+    // element*, so each child receives values derived from its own item rather
+    // than from the batch — resolving once at the call site would give every
+    // child the first element's values.
+    let child = WorkflowGraph {
+        name: "child".to_string(),
+        inputs: vec![WorkflowInput::new("repo", InputType::String).required()],
+        nodes: vec![
+            trigger("ct", TriggerKind::Manual),
+            node(
+                "echo",
+                NodeKind::Transform,
+                json!({ "set": { "child_repo": "=inputs.repo" } }),
+            ),
+        ],
+        edges: vec![edge("ct", "echo")],
+        ..Default::default()
+    };
+    let caps =
+        mock_capabilities_with_resolver(MockWorkflowResolver::default().with("child-1", child));
+
+    let parent = WorkflowGraph {
+        name: "parent".to_string(),
+        nodes: vec![
+            trigger("t", TriggerKind::Manual),
+            // Fan the trigger payload's array out into one item per element…
+            node("fan", NodeKind::SplitOut, json!({ "path": "repos" })),
+            // …and run the child once per element, each with its own `repo`.
+            node(
+                "sub",
+                NodeKind::SubWorkflow,
+                json!({
+                    "workflow_id": "child-1",
+                    "execution": "per_item",
+                    "inputs": { "repo": "=item.name" }
+                }),
+            ),
+        ],
+        edges: vec![edge("t", "fan"), edge("fan", "sub")],
+        ..Default::default()
+    };
+    let compiled = compile(&parent).expect("compile parent");
+
+    let outcome = run(
+        &compiled,
+        json!({ "repos": [{ "name": "acme/api" }, { "name": "acme/web" }] }),
+        &caps,
+    )
+    .await
+    .expect("run parent");
+
+    let children = outcome.output["nodes"]["sub"]["items"]
+        .as_array()
+        .expect("one output item per element");
+    assert_eq!(children.len(), 2, "both elements should have run");
+
+    let seen: Vec<&str> = children
+        .iter()
+        .map(|item| {
+            item["json"]["nodes"]["echo"]["items"][0]["json"]["child_repo"]
+                .as_str()
+                .unwrap_or("<unresolved>")
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec!["acme/api", "acme/web"],
+        "each child should have received its own element's value"
+    );
+}
