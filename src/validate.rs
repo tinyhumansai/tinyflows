@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::error::ValidationError;
-use crate::model::{NodeKind, WorkflowGraph};
+use crate::model::{NodeKind, WorkflowGraph, is_valid_input_name};
 
 /// The node kind's wire discriminator (`tool_call`, `sub_workflow`, …) for use
 /// in error messages, so a validation error names the kind the way the graph
@@ -20,10 +20,11 @@ fn kind_name(kind: &NodeKind) -> String {
 /// Validates a workflow graph's structure.
 ///
 /// Currently checks: unique node ids, exactly one trigger node, that every edge
-/// references existing nodes, no duplicate edges, and per-node `on_error` policy
-/// sanity (a known value, and an `error` edge when the policy is `route`).
-/// Cycle-legality and per-kind configuration checks are completed in stages
-/// A1–A2.
+/// references existing nodes, no duplicate edges, per-node `on_error` policy
+/// sanity (a known value, and an `error` edge when the policy is `route`), and
+/// declared-input sanity (addressable, unique names; defaults that match their
+/// declared type). Cycle-legality and per-kind configuration checks are
+/// completed in stages A1–A2.
 ///
 /// # Errors
 /// Returns the first [`ValidationError`] encountered. For a full list of every
@@ -42,9 +43,9 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
 ///
 /// Returns an empty `Vec` for a valid graph. The checks are ordered
 /// deterministically (duplicate ids → trigger count → edge integrity →
-/// `on_error` policy → per-kind config → condition routing), and every error is
-/// self-contained (no check can panic on a graph that failed an earlier one),
-/// so accumulating is safe. The first element is identical to what
+/// `on_error` policy → per-kind config → condition routing → declared inputs),
+/// and every error is self-contained (no check can panic on a graph that failed
+/// an earlier one), so accumulating is safe. The first element is identical to what
 /// [`validate`] returns, preserving the historical single-error contract.
 ///
 /// This is what a host should surface to an author or agent: fixing five
@@ -422,6 +423,35 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
         }
     }
 
+    // Declared-input checks. These are author-time mistakes that would otherwise
+    // surface as a confusing runtime `null`: a name that `=inputs.<name>` cannot
+    // address, two declarations racing for the same key, a default the input's
+    // own type would reject, or `required` alongside a default (which makes the
+    // requirement unreachable — a default always supplies a value).
+    let mut seen_inputs = HashSet::new();
+    for input in &graph.inputs {
+        if !is_valid_input_name(&input.name) {
+            errors.push(ValidationError::InvalidInputName(input.name.clone()));
+        }
+        if !seen_inputs.insert(input.name.as_str()) {
+            errors.push(ValidationError::DuplicateInputName(input.name.clone()));
+        }
+        match &input.default {
+            Some(default) if !input.ty.accepts(default) => {
+                errors.push(ValidationError::InputDefaultTypeMismatch {
+                    name: input.name.clone(),
+                    expected: input.ty.as_str(),
+                });
+            }
+            Some(_) if input.required => {
+                errors.push(ValidationError::RequiredInputWithDefault(
+                    input.name.clone(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
     errors
 }
 
@@ -440,6 +470,108 @@ mod tests {
             ports: Vec::new(),
             position: None,
         }
+    }
+
+    /// A graph with one trigger and no edges — the minimum that passes every
+    /// structural check, so an inputs test sees only inputs errors.
+    fn graph_with_inputs(inputs: Vec<crate::model::WorkflowInput>) -> WorkflowGraph {
+        WorkflowGraph {
+            inputs,
+            nodes: vec![node("t", NodeKind::Trigger)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn accepts_declared_inputs() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("repo", InputType::String).required(),
+            WorkflowInput::new("depth", InputType::Number).with_default(serde_json::json!(3)),
+            WorkflowInput::new("payload", InputType::Json),
+        ]);
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn rejects_duplicate_input_names() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("repo", InputType::String),
+            WorkflowInput::new("repo", InputType::Number),
+        ]);
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::DuplicateInputName("repo".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_input_names_expressions_could_not_address() {
+        use crate::model::{InputType, WorkflowInput};
+
+        for bad in ["repo-url", "2fa", "", "repo.url"] {
+            let graph = graph_with_inputs(vec![WorkflowInput::new(bad, InputType::String)]);
+            assert_eq!(
+                validate(&graph),
+                Err(ValidationError::InvalidInputName(bad.to_string())),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_default_that_violates_its_own_type() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("depth", InputType::Number).with_default(serde_json::json!("3")),
+        ]);
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::InputDefaultTypeMismatch {
+                name: "depth".to_string(),
+                expected: "number",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_required_input_with_a_default() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("repo", InputType::String)
+                .required()
+                .with_default(serde_json::json!("acme/api")),
+        ]);
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::RequiredInputWithDefault(
+                "repo".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn collects_every_input_error_in_one_pass() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("repo-url", InputType::String),
+            WorkflowInput::new("depth", InputType::Number).with_default(serde_json::json!("3")),
+            WorkflowInput::new("depth", InputType::Number),
+        ]);
+        let errors = validate_all(&graph);
+        assert_eq!(errors.len(), 3, "got {errors:?}");
+        assert!(errors.contains(&ValidationError::InvalidInputName("repo-url".to_string())));
+        assert!(errors.contains(&ValidationError::InputDefaultTypeMismatch {
+            name: "depth".to_string(),
+            expected: "number",
+        }));
+        assert!(errors.contains(&ValidationError::DuplicateInputName("depth".to_string())));
     }
 
     #[test]

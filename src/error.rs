@@ -99,6 +99,35 @@ pub enum ValidationError {
         /// The edge's actual (invalid) `from_port` value.
         from_port: String,
     },
+
+    /// Two declared inputs share the same name, so one would shadow the other
+    /// in the `inputs` expression scope.
+    #[error("duplicate workflow input name: {0}")]
+    DuplicateInputName(String),
+
+    /// A declared input's name is not a plain identifier, so `=inputs.<name>`
+    /// could not address it without jq quoting.
+    #[error(
+        "invalid workflow input name {0:?} — names must match [A-Za-z_][A-Za-z0-9_]* so \
+         `=inputs.<name>` can address them"
+    )]
+    InvalidInputName(String),
+
+    /// A declared input's `default` does not satisfy its own declared type, so
+    /// an omitted value would inject a wrongly-typed one.
+    #[error("workflow input {name:?} has a default that is not of its declared type {expected}")]
+    InputDefaultTypeMismatch {
+        /// The offending input's name.
+        name: String,
+        /// The declared type's wire name.
+        expected: &'static str,
+    },
+
+    /// A declared input is both `required` and has a `default`. The default
+    /// always supplies a value, so the requirement could never fire — one of
+    /// the two is a mistake.
+    #[error("workflow input {0:?} is both required and has a default; a default makes it optional")]
+    RequiredInputWithDefault(String),
 }
 
 impl ValidationError {
@@ -121,15 +150,21 @@ impl ValidationError {
             Self::InvalidOnError { .. } => "invalid_on_error",
             Self::SchemaVersionTooNew { .. } => "schema_version_too_new",
             Self::InvalidConditionRouting { .. } => "invalid_condition_routing",
+            Self::DuplicateInputName(_) => "duplicate_input_name",
+            Self::InvalidInputName(_) => "invalid_input_name",
+            Self::InputDefaultTypeMismatch { .. } => "input_default_type_mismatch",
+            Self::RequiredInputWithDefault(_) => "required_input_with_default",
         }
     }
 
     /// The node id this error is anchored to, when it is node-specific.
     ///
     /// Returns `None` for graph-wide errors (`MissingTrigger`,
-    /// `SchemaVersionTooNew`) and for `MultipleTriggers` (which carries many
-    /// ids in its payload rather than a single anchor). Lets a host attach the
-    /// error to the right node in a structured validation report.
+    /// `SchemaVersionTooNew`), for `MultipleTriggers` (which carries many ids in
+    /// its payload rather than a single anchor), and for the declared-input
+    /// errors (anchored to an input, not a node — see [`Self::input_name`]).
+    /// Lets a host attach the error to the right node in a structured
+    /// validation report.
     pub fn node_id(&self) -> Option<&str> {
         match self {
             Self::UnknownNode(id)
@@ -140,9 +175,28 @@ impl ValidationError {
             | Self::InvalidOnError { node, .. }
             | Self::InvalidConditionRouting { node, .. } => Some(node),
             Self::DuplicateEdge { from_node, .. } => Some(from_node),
-            Self::MissingTrigger | Self::MultipleTriggers(_) | Self::SchemaVersionTooNew { .. } => {
-                None
-            }
+            Self::MissingTrigger
+            | Self::MultipleTriggers(_)
+            | Self::SchemaVersionTooNew { .. }
+            | Self::DuplicateInputName(_)
+            | Self::InvalidInputName(_)
+            | Self::InputDefaultTypeMismatch { .. }
+            | Self::RequiredInputWithDefault(_) => None,
+        }
+    }
+
+    /// The declared input this error is anchored to, when it is input-specific.
+    ///
+    /// The counterpart to [`Self::node_id`]: lets a host attach the error to the
+    /// right field of an inputs editor. Returns `None` for every node-anchored
+    /// and graph-wide error.
+    pub fn input_name(&self) -> Option<&str> {
+        match self {
+            Self::DuplicateInputName(name)
+            | Self::InvalidInputName(name)
+            | Self::RequiredInputWithDefault(name) => Some(name),
+            Self::InputDefaultTypeMismatch { name, .. } => Some(name),
+            _ => None,
         }
     }
 }
@@ -153,6 +207,13 @@ pub enum EngineError {
     /// The workflow graph failed validation before compilation.
     #[error("validation failed: {0}")]
     Validation(#[from] ValidationError),
+
+    /// The values supplied for the workflow's declared inputs were rejected.
+    ///
+    /// Raised before any node executes and before the run is recorded, so a
+    /// caller that gets this can be certain nothing ran.
+    #[error("input error: {0}")]
+    Input(#[from] crate::model::InputError),
 
     /// A feature required by the graph is not yet implemented in this stage.
     #[error("not yet implemented: {0}")]
@@ -244,6 +305,40 @@ mod tests {
     }
 
     #[test]
+    fn declared_input_validation_error_display_and_anchors() {
+        let dup = ValidationError::DuplicateInputName("repo".to_string());
+        assert_eq!(dup.to_string(), "duplicate workflow input name: repo");
+        assert_eq!(dup.code(), "duplicate_input_name");
+        assert_eq!(dup.input_name(), Some("repo"));
+        assert_eq!(dup.node_id(), None);
+
+        assert_eq!(
+            ValidationError::InvalidInputName("repo-url".to_string()).to_string(),
+            "invalid workflow input name \"repo-url\" — names must match \
+             [A-Za-z_][A-Za-z0-9_]* so `=inputs.<name>` can address them"
+        );
+        assert_eq!(
+            ValidationError::InputDefaultTypeMismatch {
+                name: "depth".to_string(),
+                expected: "number",
+            }
+            .to_string(),
+            "workflow input \"depth\" has a default that is not of its declared type number"
+        );
+        assert_eq!(
+            ValidationError::RequiredInputWithDefault("repo".to_string()).to_string(),
+            "workflow input \"repo\" is both required and has a default; \
+             a default makes it optional"
+        );
+
+        // Node-anchored errors are not input-anchored, and vice versa.
+        assert_eq!(
+            ValidationError::UnknownNode("ghost".to_string()).input_name(),
+            None
+        );
+    }
+
+    #[test]
     fn engine_error_display() {
         assert_eq!(
             EngineError::Unimplemented("checkpoint replay").to_string(),
@@ -257,6 +352,19 @@ mod tests {
             EngineError::Validation(ValidationError::MissingTrigger).to_string(),
             "validation failed: workflow has no trigger node"
         );
+        assert_eq!(
+            EngineError::Input(crate::model::InputError::Missing("repo".to_string())).to_string(),
+            "input error: workflow input \"repo\" is required but was not supplied"
+        );
+    }
+
+    #[test]
+    fn input_error_lifts_into_engine_error() {
+        let engine: EngineError = crate::model::InputError::Unknown("reop".to_string()).into();
+        match engine {
+            EngineError::Input(inner) => assert_eq!(inner.input_name(), "reop"),
+            other => panic!("expected lifted input error, got {other:?}"),
+        }
     }
 
     #[test]
