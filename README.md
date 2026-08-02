@@ -35,7 +35,8 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 
 - Full node catalog implemented and tested — control-flow (`condition`,
   `switch`, `merge`, `split_out`, `transform`) and capability-backed (`agent`,
-  `tool_call`, `http_request`, `code`, `output_parser`, `sub_workflow`), plus the
+  `tool_call`, `http_request`, `code`, `shell`, `output_parser`, `sub_workflow`),
+  plus the
   `trigger` entry node.
 
 **Reliability**
@@ -54,7 +55,7 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 **Extensibility**
 
 - Host-injected capability traits: `LlmProvider`, `ToolInvoker`, `HttpClient`,
-  `CodeRunner`, and `StateStore`. Deterministic in-memory mocks ship behind the
+  `CodeRunner`, `ShellRunner`, and `StateStore`. Deterministic in-memory mocks ship behind the
   `mock` cargo feature (`caps::mock::mock_capabilities()`).
 - Opaque `connection_ref` credential references — the host resolves them to real
   secrets; the crate never sees them.
@@ -187,6 +188,7 @@ done
 | `tool_call`     | Invokes one specific integration action deterministically (no LLM).                          |
 | `http_request`  | Performs an outbound HTTP request.                                                           |
 | `code`          | Runs sandboxed user code (JavaScript or Python).                                             |
+| `shell`         | Runs a shell script, inline or from a script file, with a working directory and environment. |
 | `output_parser` | Parses / validates an upstream agent's output into a structured shape.                       |
 | `sub_workflow`  | Runs another workflow as a nested sub-graph and returns its output.                          |
 | `condition`     | Two-way IF; emits on the `true` or `false` port.                                             |

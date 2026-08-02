@@ -22,12 +22,13 @@ use serde_json::{Value, json};
 
 /// The node kinds, in the canonical order used wherever the DSL is enumerated
 /// (matches [`NodeKind`](crate::model::NodeKind)'s serde discriminators).
-pub const NODE_KINDS: [&str; 12] = [
+pub const NODE_KINDS: [&str; 13] = [
     "trigger",
     "agent",
     "tool_call",
     "http_request",
     "code",
+    "shell",
     "condition",
     "switch",
     "merge",
@@ -162,7 +163,7 @@ pub fn all_contracts() -> Vec<NodeKindContract> {
         .collect()
 }
 
-/// The contract for one node kind, or `None` if `kind` is not one of the 12.
+/// The contract for one node kind, or `None` if `kind` is not catalogued.
 pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
     let c = match kind {
         "trigger" => NodeKindContract {
@@ -327,6 +328,61 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                 "config": { "language": "javascript", "source": "return { total: item.a + item.b };" }
             }),
             notes: vec![],
+        },
+        "shell" => NodeKindContract {
+            kind: "shell".to_string(),
+            summary: "Run a shell script — inline, or an external script file.".to_string(),
+            description: "Runs config.source (an inline script) or config.script_path (a script \
+                file) through the host's ShellRunner capability, with an optional working \
+                directory and environment. The script reads the node's input items as JSON from \
+                the file named by its first argument. A non-zero exit fails the step; a \
+                successful run emits one item of { exit_code, stdout, stderr, stdout_json }, \
+                where stdout_json is the parsed stdout when it was JSON and null otherwise. \
+                Whether shell steps run at all, which paths config.script_path and config.cwd may \
+                reach, and what environment a script inherits are the host's decisions."
+                .to_string(),
+            config_fields: vec![
+                ConfigField::optional(
+                    "source",
+                    "string",
+                    "An inline script. Required unless script_path is set; the two are mutually exclusive.",
+                ),
+                ConfigField::optional(
+                    "script_path",
+                    "string",
+                    "A path to an external script file, resolved and access-checked by the host. Required unless source is set.",
+                ),
+                ConfigField::optional("interpreter", "enum", "The shell runtime; defaults to sh.")
+                    .with_enum(&["sh", "bash"]),
+                ConfigField::optional(
+                    "cwd",
+                    "string",
+                    "The working directory to run in, subject to the host's own path policy.",
+                ),
+                ConfigField::optional(
+                    "env",
+                    "object",
+                    "Environment variables as a flat name/value map of strings.",
+                ),
+            ],
+            ports: PortSpec::linear(),
+            example: json!({
+                "id": "build", "kind": "shell", "name": "Build",
+                "config": {
+                    "interpreter": "bash",
+                    "cwd": "/srv/project",
+                    "env": { "PROFILE": "release" },
+                    "source": "set -euo pipefail\ncargo build --release\nprintf '{\"built\":true}'"
+                }
+            }),
+            notes: vec![
+                "The first argument to the script is a JSON file holding the node's input items."
+                    .to_string(),
+                "A non-zero exit status fails the step; stderr is quoted in the error.".to_string(),
+                "Prefer config.source: an inline script stays reviewable with the workflow, where \
+                 a script_path is only as trustworthy as the file it names."
+                    .to_string(),
+            ],
         },
         "condition" => NodeKindContract {
             kind: "condition".to_string(),
@@ -499,7 +555,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(all_contracts().len(), 12);
+        assert_eq!(all_contracts().len(), 13);
     }
 
     #[test]

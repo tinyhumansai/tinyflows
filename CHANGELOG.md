@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- A `shell` node kind that runs a shell script — inline via `config.source` or
+  from a file via `config.script_path` — with an optional `interpreter`
+  (`sh`/`bash`), `cwd`, and `env`. A non-zero exit fails the step; a successful
+  run emits `{ exit_code, stdout, stderr, stdout_json }`.
+- A `ShellRunner` capability trait (`caps::shell`) and the optional
+  `Capabilities::shell` slot behind it. The engine never resolves a script path,
+  chooses an environment, or spawns a process: it hands the host a validated
+  `ShellRequest` and the host decides what is reachable. `None` refuses `shell`
+  nodes with a capability error.
+
+### Changed
+
+- **Breaking:** `Capabilities` gained a `shell` field. Hosts constructing the
+  struct literally add `shell: None` (or their own runner).
 
 ## [0.3.0] - YYYY-MM-DD
 

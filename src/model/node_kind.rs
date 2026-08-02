@@ -30,6 +30,9 @@ pub enum NodeKind {
     HttpRequest,
     /// Executes sandboxed user code (JavaScript or Python).
     Code,
+    /// Executes an inline POSIX-compatible shell script through the host's
+    /// explicitly configured code capability.
+    Shell,
     /// Two-way conditional branch, emitting on the `true` or `false` port.
     Condition,
     /// Multi-way branch keyed by an expression result.
@@ -92,6 +95,7 @@ mod tests {
         assert_wire(&NodeKind::ToolCall, "tool_call");
         assert_wire(&NodeKind::HttpRequest, "http_request");
         assert_wire(&NodeKind::Code, "code");
+        assert_wire(&NodeKind::Shell, "shell");
         assert_wire(&NodeKind::Condition, "condition");
         assert_wire(&NodeKind::Switch, "switch");
         assert_wire(&NodeKind::Merge, "merge");

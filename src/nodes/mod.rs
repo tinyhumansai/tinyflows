@@ -267,6 +267,7 @@ pub(crate) fn executor_for(kind: &NodeKind) -> Box<dyn NodeExecutor> {
         NodeKind::ToolCall => Box::new(integration::ToolCallNode),
         NodeKind::HttpRequest => Box::new(integration::HttpRequestNode),
         NodeKind::Code => Box::new(integration::CodeNode),
+        NodeKind::Shell => Box::new(integration::ShellNode),
         NodeKind::OutputParser => Box::new(integration::OutputParserNode),
         NodeKind::SubWorkflow => Box::new(integration::SubWorkflowNode),
         NodeKind::Condition => Box::new(control_flow::ConditionNode),
@@ -288,7 +289,7 @@ mod tests {
     /// Every [`NodeKind`] variant, so the coverage below stays exhaustive.
     fn all_kinds() -> Vec<NodeKind> {
         use NodeKind::{
-            Agent, Code, Condition, HttpRequest, Merge, OutputParser, SplitOut, SubWorkflow,
+            Agent, Code, Condition, HttpRequest, Merge, OutputParser, Shell, SplitOut, SubWorkflow,
             Switch, ToolCall, Transform, Trigger,
         };
         vec![
@@ -297,6 +298,7 @@ mod tests {
             ToolCall,
             HttpRequest,
             Code,
+            Shell,
             Condition,
             Switch,
             Merge,
@@ -311,6 +313,7 @@ mod tests {
     fn config_for(kind: &NodeKind) -> Value {
         match kind {
             NodeKind::ToolCall => json!({ "slug": "demo" }),
+            NodeKind::Shell => json!({ "source": "printf ok" }),
             NodeKind::SubWorkflow => json!({
                 "workflow": { "nodes": [{ "id": "ct", "kind": "trigger", "name": "ct" }], "edges": [] }
             }),
