@@ -143,18 +143,18 @@ fn tail(text: &str, limit: usize) -> String {
 #[async_trait]
 impl NodeExecutor for ShellNode {
     async fn execute(&self, ctx: NodeContext<'_>) -> Result<NodeOutput> {
-        let config = &ctx.node.config;
         let runner = ctx.caps.shell.as_ref().ok_or_else(|| {
             EngineError::Capability(
                 "shell: this host has no shell capability, so `shell` nodes cannot run".to_string(),
             )
         })?;
+        let (config, diagnostics) = crate::nodes::resolve_config_traced(&ctx);
 
         let request = ShellRequest {
-            interpreter: interpreter_of(config)?,
-            script: script_of(config)?,
-            cwd: cwd_of(config)?,
-            env: env_of(config)?,
+            interpreter: interpreter_of(&config)?,
+            script: script_of(&config)?,
+            cwd: cwd_of(&config)?,
+            env: env_of(&config)?,
             input: serde_json::to_value(ctx.input)
                 .map_err(|err| EngineError::Capability(err.to_string()))?,
         };
@@ -180,7 +180,8 @@ impl NodeExecutor for ShellNode {
             "stdout": outcome.stdout,
             "stderr": outcome.stderr,
             "stdout_json": stdout_json,
-        }))]))
+        }))])
+        .with_diagnostics(diagnostics))
     }
 }
 

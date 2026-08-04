@@ -27,7 +27,12 @@ async fn execute_with(caps: Capabilities, config: Value) -> Result<NodeOutput> {
     ShellNode
         .execute(NodeContext {
             node: &node,
-            input: &[Item::new(json!({ "seed": 1 }))],
+            input: &[Item::new(json!({
+                "seed": 1,
+                "script": "printf resolved",
+                "cwd": "/srv/resolved",
+                "profile": "debug",
+            }))],
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
@@ -127,6 +132,27 @@ async fn interpreter_cwd_and_env_are_forwarded() {
     assert!(stderr.contains("bash"), "interpreter missing: {stderr}");
     assert!(stderr.contains("cwd=/srv/build"), "cwd missing: {stderr}");
     assert!(stderr.contains("\"PROFILE\":\"release\""), "env: {stderr}");
+}
+
+#[tokio::test]
+async fn script_cwd_and_env_expressions_are_resolved() {
+    let output = execute(json!({
+        "source": "=item.script",
+        "cwd": "=item.cwd",
+        "env": { "PROFILE": "=item.profile" },
+        "unused": "=item.missing",
+    }))
+    .await
+    .expect("expression-backed shell config is runnable");
+
+    let item = &output.items[0].json;
+    assert_eq!(item["stdout"], "printf resolved");
+    let stderr = item["stderr"].as_str().expect("stderr");
+    assert!(stderr.contains("cwd=/srv/resolved"), "cwd: {stderr}");
+    assert!(stderr.contains("\"PROFILE\":\"debug\""), "env: {stderr}");
+    assert_eq!(output.diagnostics.len(), 1);
+    assert_eq!(output.diagnostics[0].location, "unused");
+    assert_eq!(output.diagnostics[0].expression, "=item.missing");
 }
 
 #[tokio::test]
