@@ -133,6 +133,18 @@ async fn the_default_policy_fails_the_run_at_the_cap() {
 }
 
 #[tokio::test]
+async fn the_default_cap_reaches_its_structured_limit() {
+    let err = run_guarded(&loop_graph(json!({})))
+        .await
+        .expect_err("the implicit cap should stop the loop before the graph step limit");
+
+    assert!(matches!(
+        err,
+        EngineError::LoopLimit { ref node, limit } if node == "l" && limit == 25
+    ));
+}
+
+#[tokio::test]
 async fn a_falsey_condition_exits_before_the_cap_is_reached() {
     // The condition never holds, so the loop leaves on `done` immediately and
     // the body never runs at all.
@@ -270,11 +282,10 @@ async fn a_fan_in_joined_before_the_loop_head_iterates() {
     assert!(!outcome.output["nodes"]["out"].is_null());
 }
 
-/// A `merge` *inside* the loop body is the other shape that cannot iterate: its
-/// barrier waits for every predecessor, and on the second pass only the looping
-/// arm arrives.
+/// A single-input `merge` inside the loop body is a passthrough, not a fan-in
+/// barrier, so it can iterate normally.
 #[tokio::test]
-async fn a_merge_inside_the_loop_body_is_refused() {
+async fn a_single_input_merge_inside_the_loop_body_iterates() {
     let graph = WorkflowGraph {
         name: "merge_in_body".to_string(),
         nodes: vec![
@@ -296,13 +307,10 @@ async fn a_merge_inside_the_loop_body_is_refused() {
         ..Default::default()
     };
 
-    let errors = tinyflows::validate::validate_all(&graph);
-    assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::IllegalCycle(id) if id == "m")),
-        "a merge on the cycle should be refused, got: {errors:?}"
-    );
+    assert!(tinyflows::validate::validate_all(&graph).is_empty());
+    let outcome = run_guarded(&graph).await.expect("the loop should finish");
+    assert_eq!(outcome.output["nodes"]["l"]["iteration"], 2);
+    assert!(!outcome.output["nodes"]["out"].is_null());
 }
 
 /// An unbounded cycle — no `loop` node counting passes and no

@@ -241,9 +241,27 @@ fn merge(base: &mut Value, update: Value) {
 /// no-op, while preventing an untaken conditional branch (e.g. a `condition` that
 /// took `"true"`) from leaking its data into a fan-in wired to a different port.
 fn collect_input(state: &Value, incoming: &[(String, String)]) -> Vec<Item> {
+    collect_input_since(state, incoming, None)
+}
+
+/// Collects matching inputs, optionally ignoring predecessor slots older than
+/// `min_step`. Loop re-entry uses this to avoid replaying an alternate return
+/// arm whose slot was written by an earlier iteration.
+fn collect_input_since(
+    state: &Value,
+    incoming: &[(String, String)],
+    min_step: Option<u64>,
+) -> Vec<Item> {
     let mut items = Vec::new();
     for (pred, from_port) in incoming {
         let slot = state.get("nodes").and_then(|nodes| nodes.get(pred));
+        if min_step.is_some_and(|minimum| {
+            slot.and_then(|slot| slot.get("_activation_step"))
+                .and_then(Value::as_u64)
+                .is_none_or(|step| step < minimum)
+        }) {
+            continue;
+        }
         // The port this predecessor actually emitted on (defaulting to `"main"`),
         // compared against the port the edge draws from (also `"main"` by
         // default). A mismatch means this edge's branch was not taken.
@@ -266,6 +284,20 @@ fn collect_input(state: &Value, incoming: &[(String, String)]) -> Vec<Item> {
         }
     }
     items
+}
+
+/// Records the super-step that produced a node slot. This private marker lets
+/// a loop head distinguish the return edge that activated it from stale slots
+/// left by alternate return arms in earlier iterations.
+fn stamp_activation_step(update: &mut Value, node_id: &str, step: usize) {
+    if let Some(slot) = update
+        .get_mut("nodes")
+        .and_then(Value::as_object_mut)
+        .and_then(|nodes| nodes.get_mut(node_id))
+        .and_then(Value::as_object_mut)
+    {
+        slot.insert("_activation_step".to_string(), json!(step));
+    }
 }
 
 /// How a node's handler drives its successors once it has produced an update.
@@ -903,6 +935,29 @@ fn build_graph(
         .set_reducer(MergeReducer);
     if let Some(limit) = recursion_limit {
         builder = builder.with_recursion_limit(limit as usize);
+    } else {
+        // tinyagents defaults to 50 super-steps, which is too small for the
+        // advertised default loop cap once the head and body activations are
+        // counted. A declared loop already has its own finite cap, so derive a
+        // conservative graph budget that lets that structured limit win.
+        let loop_budget: u64 = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Loop)
+            .map(|node| {
+                node.config
+                    .get("max_iterations")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(crate::nodes::control_flow::DEFAULT_MAX_ITERATIONS)
+                    .saturating_add(1)
+            })
+            .sum();
+        if loop_budget > 0 {
+            let derived = loop_budget
+                .saturating_mul(graph.nodes.len() as u64)
+                .saturating_add(graph.nodes.len() as u64);
+            builder = builder.with_recursion_limit(derived.min(usize::MAX as u64) as usize);
+        }
     }
     // NOTE: `node_timeout` is intentionally NOT wired via
     // `builder.with_node_timeout(..)`. That tinyagents knob wraps a node
@@ -992,7 +1047,9 @@ fn build_graph(
                 // port-command node drives only the successors of the port it
                 // emitted on (`port`, defaulting to `main`); everything else emits
                 // a plain update and follows its static/conditional edge.
-                let emit = |update: Value, port: Option<&str>| match &routing {
+                let emit = |mut update: Value, port: Option<&str>| {
+                    stamp_activation_step(&mut update, &node.id, ctx.step);
+                    match &routing {
                     HandlerRouting::Plain => NodeResult::Update(update),
                     HandlerRouting::FanOut(targets) => {
                         NodeResult::Command(Command::goto(targets.clone()).with_update(update))
@@ -1006,6 +1063,7 @@ fn build_graph(
                             .unwrap_or_default();
                         NodeResult::Command(Command::goto(targets).with_update(update))
                     }
+                    }
                 };
 
                 // Cooperative cancellation, checked at the node boundary before
@@ -1018,7 +1076,9 @@ fn build_graph(
                 // starting further node work. The engine reports it as cancelled.
                 if token.is_cancelled() {
                     tracing::info!(node = %node.id, "run cancelled; skipping node work");
-                    return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                    let mut update = items_update(&node.id, &[], None)?;
+                    stamp_activation_step(&mut update, &node.id, ctx.step);
+                    return Ok(NodeResult::Update(update));
                 }
 
                 if is_trigger {
@@ -1127,10 +1187,17 @@ fn build_graph(
                         .get("nodes")
                         .and_then(|nodes| nodes.get(&node.id))
                         .is_some_and(|slot| !slot.is_null());
-                let input = collect_input(
-                    &state,
-                    if re_entry { &back_incoming } else { &incoming },
-                );
+                let input = if re_entry {
+                    let latest_step = back_incoming
+                        .iter()
+                        .filter_map(|(pred, _)| {
+                            state["nodes"][pred]["_activation_step"].as_u64()
+                        })
+                        .max();
+                    collect_input_since(&state, &back_incoming, latest_step)
+                } else {
+                    collect_input(&state, &incoming)
+                };
                 let run_meta = state.get("run").cloned().unwrap_or(Value::Null);
                 // Every completed node's output slot, keyed by id. Handed to the
                 // executor so `=`-expressions can address any upstream node
@@ -2269,6 +2336,7 @@ async fn resume_with_checkpointer_inner(
     // `resume` loads the state persisted under `thread_id`. Node handlers fire
     // `observer.on_step_finish` for every node that runs after the interrupt
     // boundary, so a host observer sees the resumed steps live.
+    let terminal_error: Arc<Mutex<Option<EngineError>>> = Arc::new(Mutex::new(None));
     let (compiled, _trigger_id) = build_graph(
         workflow,
         capabilities,
@@ -2277,7 +2345,7 @@ async fn resume_with_checkpointer_inner(
         checkpointer,
         journal,
         CancellationToken::new(),
-        &Arc::new(Mutex::new(None)),
+        &terminal_error,
     )?;
 
     // Approvals recorded for downstream visibility. On resume the interrupted
@@ -2305,8 +2373,17 @@ async fn resume_with_checkpointer_inner(
             thread_id,
             Command::resume(resume_value).with_update(approvals_update),
         )
-        .await
-        .map_err(|e| EngineError::Capability(e.to_string()))?;
+        .await;
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            let structured = terminal_error
+                .lock()
+                .expect("terminal error mutex poisoned")
+                .take();
+            return Err(structured.unwrap_or_else(|| EngineError::Capability(error.to_string())));
+        }
+    };
 
     let pending_approvals: Vec<String> = execution
         .interrupts
@@ -2355,6 +2432,33 @@ mod tests {
     fn default_route_update_explicitly_clears_a_previous_port() {
         let update = items_update("worker", &[], None).expect("serialize update");
         assert_eq!(update["nodes"]["worker"]["port"], Value::Null);
+    }
+
+    #[test]
+    fn loop_reentry_ignores_stale_alternate_return_slots() {
+        let state = json!({
+            "nodes": {
+                "old_arm": {
+                    "items": [{ "json": { "arm": "old" } }],
+                    "port": null,
+                    "_activation_step": 4
+                },
+                "current_arm": {
+                    "items": [{ "json": { "arm": "current" } }],
+                    "port": null,
+                    "_activation_step": 8
+                }
+            }
+        });
+        let incoming = vec![
+            ("old_arm".to_string(), "main".to_string()),
+            ("current_arm".to_string(), "main".to_string()),
+        ];
+
+        let items = collect_input_since(&state, &incoming, Some(8));
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].json["arm"], "current");
     }
 
     #[tokio::test]
@@ -4118,6 +4222,53 @@ mod tests {
             result.is_err(),
             "denying a gate with no error port must fail the run"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_resume_preserves_a_loop_limit_error() {
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let mut loop_node = node("loop", NodeKind::Loop);
+        loop_node.config = json!({ "max_iterations": 1 });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                loop_node,
+                node("work", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "gate"),
+                edge("gate", "loop"),
+                port_edge("loop", "body", "work"),
+                edge("work", "loop"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+        let paused =
+            run_with_checkpointer(&compiled, json!({}), &caps, cp.clone(), "thread-loop-limit")
+                .await
+                .expect("pause at approval gate");
+        assert_eq!(paused.pending_approvals, vec!["gate".to_string()]);
+
+        let caps = mock_capabilities();
+        let error = resume_with_checkpointer(
+            &compiled,
+            &caps,
+            cp,
+            "thread-loop-limit",
+            vec!["gate".to_string()],
+        )
+        .await
+        .expect_err("the resumed loop should reach its cap");
+
+        assert!(matches!(
+            error,
+            EngineError::LoopLimit { ref node, limit } if node == "loop" && limit == 1
+        ));
     }
 
     #[tokio::test]

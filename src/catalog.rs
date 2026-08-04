@@ -455,11 +455,11 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                 graph as \"=nodes.<loop id>.iteration\"."
                 .to_string(),
             config_fields: vec![
-                ConfigField::required(
+                ConfigField::optional(
                     "max_iterations",
                     "number",
-                    "How many times the body may run before the loop stops. Always finite — a \
-                     loop with no cap is the runaway case this node exists to prevent.",
+                    "How many times the body may run before the loop stops (default 25). Always \
+                     finite — a loop with no cap is the runaway case this node exists to prevent.",
                 ),
                 ConfigField::optional(
                     "on_exceeded",

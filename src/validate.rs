@@ -489,18 +489,19 @@ fn validate_loops(graph: &WorkflowGraph, errors: &mut Vec<ValidationError>) {
                 ),
             });
         }
-        // A loop head with nothing on `body` runs its exit path once and never
-        // loops — almost always a half-wired graph rather than an intent.
-        if !graph
+        // A body must both start and return to its loop head. Merely wiring a
+        // body edge otherwise runs it once and silently strands the `done` path.
+        let body_returns = graph
             .edges
             .iter()
-            .any(|e| e.from_node == node.id && e.from_port == "body")
-        {
+            .filter(|e| e.from_node == node.id && e.from_port == "body")
+            .any(|edge| path_exists(graph, &edge.to_node, &node.id));
+        if !body_returns {
             errors.push(ValidationError::InvalidNodeConfig {
                 node: node.id.clone(),
-                reason: "loop node has no outgoing edge on its `body` port, so it can never \
+                reason: "loop node's `body` does not route back to the loop head, so it can never \
                          iterate; wire `body` to the first node of the loop body and wire that \
-                         body's last node back to this one"
+                         body's last node back to this loop"
                     .to_string(),
             });
         }
@@ -518,16 +519,22 @@ fn validate_loops(graph: &WorkflowGraph, errors: &mut Vec<ValidationError>) {
         .flat_map(|(from, to)| nodes_on_cycle(graph, to, from))
         .collect();
 
-    // A `merge` inside the loop body deadlocks it. A merge is a fan-in barrier
-    // that waits for *every* predecessor; on the second pass only the looping
-    // arm arrives, so the barrier never clears and the loop stops silently
-    // after one iteration.
+    // A real fan-in `merge` inside the loop body deadlocks it. A single-input
+    // merge is a passthrough and is not lowered as a waiting barrier.
     for id in &on_a_cycle {
-        if graph
+        let is_merge = graph
             .nodes
             .iter()
-            .any(|n| n.id == *id && n.kind == NodeKind::Merge)
-        {
+            .any(|n| n.id == *id && n.kind == NodeKind::Merge);
+        let forward_predecessors = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.to_node == **id
+                    && !loop_edges.contains(&(edge.from_node.clone(), edge.to_node.clone()))
+            })
+            .count();
+        if is_merge && forward_predecessors > 1 {
             errors.push(ValidationError::IllegalCycle((*id).to_string()));
         }
     }
@@ -573,6 +580,27 @@ fn validate_loops(graph: &WorkflowGraph, errors: &mut Vec<ValidationError>) {
             }
         }
     }
+}
+
+fn path_exists(graph: &WorkflowGraph, start: &str, target: &str) -> bool {
+    let mut seen = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(node) = stack.pop() {
+        if node == target {
+            return true;
+        }
+        if !seen.insert(node) {
+            continue;
+        }
+        stack.extend(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.from_node == node)
+                .map(|edge| edge.to_node.as_str()),
+        );
+    }
+    false
 }
 
 /// The nodes lying on the cycle closed by the back-edge `end -> start`: every
@@ -1967,6 +1995,88 @@ mod loop_tests {
                     if node == "l" && reason.contains("`body`")
             )),
             "a loop that cannot iterate should be refused"
+        );
+    }
+
+    #[test]
+    fn rejects_a_loop_body_that_never_returns_to_its_head() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node_cfg(
+                    "l",
+                    NodeKind::Loop,
+                    serde_json::json!({ "max_iterations": 2 }),
+                ),
+                node("work", NodeKind::OutputParser),
+            ],
+            edges: vec![edge_on("t", "main", "l"), edge_on("l", "body", "work")],
+            ..Default::default()
+        };
+
+        assert!(validate_all(&graph).iter().any(|error| matches!(
+            error,
+            ValidationError::InvalidNodeConfig { node, reason }
+                if node == "l" && reason.contains("route back")
+        )));
+    }
+
+    #[test]
+    fn accepts_a_single_input_merge_inside_a_loop() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node_cfg(
+                    "l",
+                    NodeKind::Loop,
+                    serde_json::json!({ "max_iterations": 2 }),
+                ),
+                node("m", NodeKind::Merge),
+            ],
+            edges: vec![
+                edge_on("t", "main", "l"),
+                edge_on("l", "body", "m"),
+                edge_on("m", "main", "l"),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(validate_all(&graph), Vec::new());
+    }
+
+    #[test]
+    fn rejects_a_real_fan_in_merge_inside_a_loop() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("seed_a", NodeKind::OutputParser),
+                node("seed_b", NodeKind::OutputParser),
+                node_cfg(
+                    "l",
+                    NodeKind::Loop,
+                    serde_json::json!({ "max_iterations": 2 }),
+                ),
+                node("work", NodeKind::OutputParser),
+                node("m", NodeKind::Merge),
+                node("tail", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge_on("t", "main", "seed_a"),
+                edge_on("t", "main", "seed_b"),
+                edge_on("seed_a", "main", "m"),
+                edge_on("seed_b", "main", "m"),
+                edge_on("l", "body", "work"),
+                edge_on("work", "main", "m"),
+                edge_on("m", "main", "tail"),
+                edge_on("tail", "main", "l"),
+            ],
+            ..Default::default()
+        };
+
+        assert!(
+            validate_all(&graph)
+                .iter()
+                .any(|error| matches!(error, ValidationError::IllegalCycle(node) if node == "m"))
         );
     }
 
