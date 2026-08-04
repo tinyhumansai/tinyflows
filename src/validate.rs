@@ -424,7 +424,6 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
     }
 
     validate_loops(graph, &mut errors);
-
     // Declared-input checks. These are author-time mistakes that would otherwise
     // surface as a confusing runtime `null`: a name that `=inputs.<name>` cannot
     // address, two declarations racing for the same key, a default the input's
