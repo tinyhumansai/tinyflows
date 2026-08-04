@@ -222,6 +222,21 @@ pub enum EngineError {
     /// A host capability call failed at runtime.
     #[error("capability error: {0}")]
     Capability(String),
+
+    /// A `loop` node reached its `max_iterations` cap while its `on_exceeded`
+    /// policy was `"error"` (the default).
+    ///
+    /// Distinct from the graph-wide `recursion_limit`, which bounds total
+    /// super-steps and cannot say *which* loop ran away. A node that would
+    /// rather finish with partial results than fail sets
+    /// `on_exceeded: "continue"` and exits on its `done` port instead.
+    #[error("loop node {node} exceeded its maximum of {limit} iterations")]
+    LoopLimit {
+        /// The `loop` node that hit its cap.
+        node: String,
+        /// The `max_iterations` value it was configured with.
+        limit: u64,
+    },
 }
 
 /// Convenience result alias for compile/run operations.

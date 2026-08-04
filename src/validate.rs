@@ -21,10 +21,10 @@ fn kind_name(kind: &NodeKind) -> String {
 ///
 /// Currently checks: unique node ids, exactly one trigger node, that every edge
 /// references existing nodes, no duplicate edges, per-node `on_error` policy
-/// sanity (a known value, and an `error` edge when the policy is `route`), and
+/// sanity (a known value, and an `error` edge when the policy is `route`),
 /// declared-input sanity (addressable, unique names; defaults that match their
-/// declared type). Cycle-legality and per-kind configuration checks are
-/// completed in stages A1–A2.
+/// declared type), and loop legality (see [`validate_loops`] — cycles are
+/// permitted; only the ones that cannot iterate are refused).
 ///
 /// # Errors
 /// Returns the first [`ValidationError`] encountered. For a full list of every
@@ -423,6 +423,8 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
         }
     }
 
+    validate_loops(graph, &mut errors);
+
     // Declared-input checks. These are author-time mistakes that would otherwise
     // surface as a confusing runtime `null`: a name that `=inputs.<name>` cannot
     // address, two declarations racing for the same key, a default the input's
@@ -453,6 +455,178 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
     }
 
     errors
+}
+
+/// Loop and cycle legality.
+///
+/// **Cycles are legal.** The engine lowers a back-edge as a plain re-entry and
+/// the executor underneath is a super-step scheduler, so a graph that loops is
+/// a supported graph, not a malformed one. What this pass refuses is the
+/// narrow set of cycles that *cannot work* — each with a message naming the
+/// fix, because "your loop silently ran once and stopped" is the failure mode
+/// this replaces.
+fn validate_loops(graph: &WorkflowGraph, errors: &mut Vec<ValidationError>) {
+    let loop_edges = crate::engine::back_edges(graph);
+
+    // Per-kind `loop` config, checked whether or not the node is actually wired
+    // into a cycle: a misconfigured loop head is worth naming either way.
+    for node in graph.nodes.iter().filter(|n| n.kind == NodeKind::Loop) {
+        if let Some(max) = node.config.get("max_iterations") {
+            match max.as_u64() {
+                Some(n) if n > 0 => {}
+                _ => errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: "loop `max_iterations` must be a positive integer".to_string(),
+                }),
+            }
+        }
+        if let Some(policy) = node.config.get("on_exceeded")
+            && !matches!(policy.as_str(), Some("error") | Some("continue"))
+        {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: format!(
+                    "loop `on_exceeded` must be \"error\" or \"continue\", got {policy}"
+                ),
+            });
+        }
+        // A loop head with nothing on `body` runs its exit path once and never
+        // loops — almost always a half-wired graph rather than an intent.
+        if !graph
+            .edges
+            .iter()
+            .any(|e| e.from_node == node.id && e.from_port == "body")
+        {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: "loop node has no outgoing edge on its `body` port, so it can never \
+                         iterate; wire `body` to the first node of the loop body and wire that \
+                         body's last node back to this one"
+                    .to_string(),
+            });
+        }
+    }
+
+    if loop_edges.is_empty() {
+        return;
+    }
+
+    // Every node that sits on some cycle, and the loop heads (back-edge
+    // targets) those cycles close on.
+    let heads: HashSet<&str> = loop_edges.iter().map(|(_, to)| to.as_str()).collect();
+    let on_a_cycle: HashSet<&str> = loop_edges
+        .iter()
+        .flat_map(|(from, to)| nodes_on_cycle(graph, to, from))
+        .collect();
+
+    // A `merge` inside the loop body deadlocks it. A merge is a fan-in barrier
+    // that waits for *every* predecessor; on the second pass only the looping
+    // arm arrives, so the barrier never clears and the loop stops silently
+    // after one iteration.
+    for id in &on_a_cycle {
+        if graph
+            .nodes
+            .iter()
+            .any(|n| n.id == *id && n.kind == NodeKind::Merge)
+        {
+            errors.push(ValidationError::IllegalCycle((*id).to_string()));
+        }
+    }
+
+    for head in &heads {
+        // A loop head that is also a fan-in cannot iterate: its forward
+        // predecessors are lowered as waiting edges, and that barrier is
+        // per-node, so it swallows the re-entry the back-edge delivers. The fix
+        // is to join *before* the head — a `merge` outside the cycle — which
+        // leaves the head with a single forward predecessor.
+        let forward_predecessors = graph
+            .edges
+            .iter()
+            .filter(|e| {
+                e.to_node == **head
+                    && !loop_edges.contains(&(e.from_node.clone(), e.to_node.clone()))
+            })
+            .count();
+        if forward_predecessors > 1 {
+            errors.push(ValidationError::IllegalCycle((*head).to_string()));
+        }
+    }
+
+    // An unbounded cycle. Without a `loop` node to count passes, the only thing
+    // standing between this graph and a run that spins until the host's wall
+    // clock kills it is the trigger's `recursion_limit`. Requiring one of the
+    // two makes the bound an authoring decision rather than an accident.
+    let has_recursion_limit = graph
+        .trigger()
+        .and_then(|t| t.config.get("recursion_limit"))
+        .and_then(Value::as_u64)
+        .is_some_and(|n| n > 0);
+    if !has_recursion_limit {
+        for (from, to) in &loop_edges {
+            let bounded = nodes_on_cycle(graph, to, from).into_iter().any(|id| {
+                graph
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == id && n.kind == NodeKind::Loop)
+            });
+            if !bounded {
+                errors.push(ValidationError::IllegalCycle(to.clone()));
+            }
+        }
+    }
+}
+
+/// The nodes lying on the cycle closed by the back-edge `end -> start`: every
+/// node reachable forward from `start` that can also still reach `end`.
+///
+/// Used to ask questions about a specific cycle ("is there a `merge` on it?",
+/// "is there a `loop` node bounding it?") rather than about the graph at large,
+/// so an unrelated `merge` elsewhere is never blamed for a loop's problem.
+fn nodes_on_cycle<'g>(graph: &'g WorkflowGraph, start: &str, end: &str) -> HashSet<&'g str> {
+    // Forward reachability from `start`.
+    let mut forward: HashSet<&str> = HashSet::new();
+    let mut stack: Vec<&str> = vec![];
+    if let Some(node) = graph.nodes.iter().find(|n| n.id == start) {
+        forward.insert(node.id.as_str());
+        stack.push(node.id.as_str());
+    }
+    while let Some(node) = stack.pop() {
+        for edge in graph.edges.iter().filter(|e| e.from_node == node) {
+            if let Some(target) = graph
+                .nodes
+                .iter()
+                .find(|n| n.id == edge.to_node)
+                .map(|n| n.id.as_str())
+                && forward.insert(target)
+            {
+                stack.push(target);
+            }
+        }
+    }
+
+    // Of those, the ones that can still reach `end` — walking backwards from
+    // `end` keeps the search inside the cycle.
+    let mut backward: HashSet<&str> = HashSet::new();
+    let mut stack: Vec<&str> = vec![];
+    if let Some(node) = graph.nodes.iter().find(|n| n.id == end) {
+        backward.insert(node.id.as_str());
+        stack.push(node.id.as_str());
+    }
+    while let Some(node) = stack.pop() {
+        for edge in graph.edges.iter().filter(|e| e.to_node == node) {
+            if let Some(source) = graph
+                .nodes
+                .iter()
+                .find(|n| n.id == edge.from_node)
+                .map(|n| n.id.as_str())
+                && backward.insert(source)
+            {
+                stack.push(source);
+            }
+        }
+    }
+
+    forward.intersection(&backward).copied().collect()
 }
 
 #[cfg(test)]
@@ -1651,5 +1825,219 @@ mod fanout_tests {
             reason.contains("not supported") && reason.contains("transform"),
             "expected the kind to be named in its wire spelling, got: {reason}"
         );
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use super::*;
+    use crate::model::{Edge, Node};
+
+    /// Builds a node with no config — the shape most nodes in these graphs take.
+    fn node(id: &str, kind: NodeKind) -> Node {
+        node_cfg(id, kind, serde_json::Value::Null)
+    }
+
+    /// Builds a node with an explicit config, which a `loop` node needs.
+    fn node_cfg(id: &str, kind: NodeKind, config: serde_json::Value) -> Node {
+        Node {
+            id: id.to_string(),
+            kind,
+            type_version: 1,
+            name: id.to_string(),
+            config,
+            ports: Vec::new(),
+            position: None,
+        }
+    }
+
+    fn edge_on(from: &str, port: &str, to: &str) -> Edge {
+        Edge {
+            from_node: from.to_string(),
+            from_port: port.to_string(),
+            to_node: to.to_string(),
+            to_port: "main".to_string(),
+        }
+    }
+
+    /// The canonical bounded loop must pass clean — the point of the pass is to
+    /// permit cycles, not to refuse them.
+    #[test]
+    fn accepts_a_bounded_loop() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node_cfg(
+                    "l",
+                    NodeKind::Loop,
+                    serde_json::json!({ "max_iterations": 3 }),
+                ),
+                node("work", NodeKind::OutputParser),
+                node("out", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge_on("t", "main", "l"),
+                edge_on("l", "body", "work"),
+                edge_on("work", "main", "l"),
+                edge_on("l", "done", "out"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(validate_all(&graph), Vec::new());
+    }
+
+    #[test]
+    fn rejects_a_zero_max_iterations() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node_cfg(
+                    "l",
+                    NodeKind::Loop,
+                    serde_json::json!({ "max_iterations": 0 }),
+                ),
+                node("work", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge_on("t", "main", "l"),
+                edge_on("l", "body", "work"),
+                edge_on("work", "main", "l"),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            validate_all(&graph).iter().any(|e| matches!(
+                e,
+                ValidationError::InvalidNodeConfig { node, reason }
+                    if node == "l" && reason.contains("positive")
+            )),
+            "a zero cap should be refused"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_on_exceeded_policy() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node_cfg(
+                    "l",
+                    NodeKind::Loop,
+                    serde_json::json!({ "max_iterations": 2, "on_exceeded": "shrug" }),
+                ),
+                node("work", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge_on("t", "main", "l"),
+                edge_on("l", "body", "work"),
+                edge_on("work", "main", "l"),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            validate_all(&graph).iter().any(|e| matches!(
+                e,
+                ValidationError::InvalidNodeConfig { node, reason }
+                    if node == "l" && reason.contains("on_exceeded")
+            )),
+            "an unknown policy should be refused"
+        );
+    }
+
+    /// A loop head with nothing wired to `body` can never iterate, which is
+    /// almost always a half-finished graph rather than an intent.
+    #[test]
+    fn rejects_a_loop_with_no_body_edge() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node_cfg(
+                    "l",
+                    NodeKind::Loop,
+                    serde_json::json!({ "max_iterations": 2 }),
+                ),
+                node("out", NodeKind::OutputParser),
+            ],
+            edges: vec![edge_on("t", "main", "l"), edge_on("l", "done", "out")],
+            ..Default::default()
+        };
+        assert!(
+            validate_all(&graph).iter().any(|e| matches!(
+                e,
+                ValidationError::InvalidNodeConfig { node, reason }
+                    if node == "l" && reason.contains("`body`")
+            )),
+            "a loop that cannot iterate should be refused"
+        );
+    }
+
+    /// An acyclic graph must never reach the cycle branches — a regression here
+    /// would refuse ordinary workflows.
+    #[test]
+    fn an_acyclic_graph_raises_no_loop_errors() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("a", NodeKind::OutputParser),
+                node("m", NodeKind::Merge),
+            ],
+            edges: vec![edge_on("t", "main", "a"), edge_on("a", "main", "m")],
+            ..Default::default()
+        };
+        assert_eq!(validate_all(&graph), Vec::new());
+    }
+
+    /// A `merge` off the cycle is fine — only one sitting *on* it deadlocks.
+    #[test]
+    fn a_merge_outside_the_cycle_is_accepted() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("left", NodeKind::OutputParser),
+                node("right", NodeKind::OutputParser),
+                node("m", NodeKind::Merge),
+                node_cfg(
+                    "l",
+                    NodeKind::Loop,
+                    serde_json::json!({ "max_iterations": 2 }),
+                ),
+                node("work", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge_on("t", "main", "left"),
+                edge_on("t", "main", "right"),
+                edge_on("left", "main", "m"),
+                edge_on("right", "main", "m"),
+                edge_on("m", "main", "l"),
+                edge_on("l", "body", "work"),
+                edge_on("work", "main", "l"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(validate_all(&graph), Vec::new());
+    }
+
+    /// A cycle with no `loop` node is legal as long as the trigger declares a
+    /// `recursion_limit` — the bound just has to come from somewhere.
+    #[test]
+    fn a_recursion_limit_bounds_a_loopless_cycle() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node_cfg(
+                    "t",
+                    NodeKind::Trigger,
+                    serde_json::json!({ "recursion_limit": 10 }),
+                ),
+                node("a", NodeKind::OutputParser),
+                node("b", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge_on("t", "main", "a"),
+                edge_on("a", "main", "b"),
+                edge_on("b", "main", "a"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(validate_all(&graph), Vec::new());
     }
 }

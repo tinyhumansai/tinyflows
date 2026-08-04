@@ -38,6 +38,15 @@ pub enum NodeKind {
     Merge,
     /// Fan-out that emits one item per element of a list.
     SplitOut,
+    /// Bounded loop head: emits its input on the `body` port until its
+    /// `max_iterations` cap (or its optional `condition`) says otherwise, then
+    /// emits on `done`. The loop is closed by wiring the last node of the body
+    /// back to this node; that closing edge is a back-edge and the engine
+    /// lowers it accordingly (see [`crate::engine`]), so the head is re-entered
+    /// rather than barriered. The iteration count lives in the node's own run
+    /// state slot, which makes it survive checkpoint/resume and addressable
+    /// from expressions as `=nodes.<id>.iteration`.
+    Loop,
     /// Pure, expression-based data transform over the run state.
     Transform,
     /// Parses and validates an upstream agent's output into a structured shape.
@@ -109,6 +118,7 @@ mod tests {
         assert_wire(&NodeKind::Switch, "switch");
         assert_wire(&NodeKind::Merge, "merge");
         assert_wire(&NodeKind::SplitOut, "split_out");
+        assert_wire(&NodeKind::Loop, "loop");
         assert_wire(&NodeKind::Transform, "transform");
         assert_wire(&NodeKind::OutputParser, "output_parser");
         assert_wire(&NodeKind::SubWorkflow, "sub_workflow");

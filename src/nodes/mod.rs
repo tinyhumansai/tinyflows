@@ -57,7 +57,9 @@ pub struct NodeContext<'a> {
 ///   `=.nodes["fetch_recipient"].items[0].email` — including non-adjacent
 ///   (grandparent) nodes and specific predecessors of a fan-in node. Node
 ///   **id** is the addressing key (stable across renames); names are not
-///   indexed;
+///   indexed. A node that recorded slot state about itself also exposes it
+///   here — currently only a `loop` node's `iteration`, so
+///   `=nodes.my_loop.iteration` is the current pass number;
 /// - `inputs` — the workflow's resolved declared inputs, keyed by name (see
 ///   [`crate::model::WorkflowInput`]), so a config field reads
 ///   `=inputs.repo`. One entry per declaration with defaults already applied,
@@ -173,10 +175,15 @@ pub(crate) fn nodes_scope(nodes: &Value) -> Value {
                 .map(|item| item.get("json").cloned().unwrap_or(Value::Null))
                 .collect();
             let first = jsons.first().cloned().unwrap_or(Value::Null);
-            scope.insert(
-                id.clone(),
-                serde_json::json!({ "item": first, "items": jsons }),
-            );
+            let mut entry = serde_json::json!({ "item": first, "items": jsons });
+            // Slot state a node recorded about itself via `NodeOutput::meta`,
+            // promoted so expressions can read it the same way they read items.
+            // Currently just the `loop` node's pass counter, which is what makes
+            // `=nodes.<loop id>.iteration` resolve from anywhere in the graph.
+            if let Some(iteration) = slot.get("iteration") {
+                entry["iteration"] = iteration.clone();
+            }
+            scope.insert(id.clone(), entry);
         }
     }
     Value::Object(scope)
@@ -241,6 +248,20 @@ pub struct NodeOutput {
     /// point at the exact unresolved wiring; failure policy stays with
     /// routing/`on_error`.
     pub diagnostics: Vec<crate::expr::NullResolution>,
+    /// Extra keys to record alongside `items`/`port` in this node's run-state
+    /// slot, for a node that must remember something across its own
+    /// activations. `None` writes nothing.
+    ///
+    /// The only current user is [`NodeKind::Loop`](crate::model::NodeKind::Loop),
+    /// which keeps its `iteration` count here. Slot state is the right home for
+    /// it because the run state is what gets checkpointed, so an iteration
+    /// count rides resume for free and is addressable from expressions as
+    /// `=nodes.<id>.iteration` — whereas a counter held in the executor would
+    /// be lost the moment the run paused, and a counter threaded through items
+    /// would be destroyed by any node in the body that reshapes them.
+    ///
+    /// Must be a JSON object; anything else is ignored when the slot is built.
+    pub meta: Option<Value>,
 }
 
 impl NodeOutput {
@@ -274,6 +295,14 @@ impl NodeOutput {
     #[must_use]
     pub fn with_diagnostics(mut self, diagnostics: Vec<crate::expr::NullResolution>) -> Self {
         self.diagnostics = diagnostics;
+        self
+    }
+
+    /// Attaches extra run-state slot keys to this output (see
+    /// [`NodeOutput::meta`]).
+    #[must_use]
+    pub fn with_meta(mut self, meta: Value) -> Self {
+        self.meta = Some(meta);
         self
     }
 }
@@ -319,6 +348,7 @@ pub(crate) fn executor_for(kind: &NodeKind) -> Box<dyn NodeExecutor> {
         NodeKind::SplitOut => Box::new(control_flow::SplitOutNode),
         NodeKind::Transform => Box::new(control_flow::TransformNode),
         NodeKind::Dedup => Box::new(control_flow::DedupNode),
+        NodeKind::Loop => Box::new(control_flow::LoopNode),
     }
 }
 
@@ -333,8 +363,8 @@ mod tests {
     /// Every [`NodeKind`] variant, so the coverage below stays exhaustive.
     fn all_kinds() -> Vec<NodeKind> {
         use NodeKind::{
-            Agent, Code, Condition, Dedup, HttpRequest, Memory, Merge, OutputParser, SplitOut,
-            SubWorkflow, Switch, ToolCall, Transform, Trigger,
+            Agent, Code, Condition, Dedup, HttpRequest, Loop, Memory, Merge, OutputParser,
+            SplitOut, SubWorkflow, Switch, ToolCall, Transform, Trigger,
         };
         vec![
             Trigger,
@@ -351,6 +381,7 @@ mod tests {
             SubWorkflow,
             Memory,
             Dedup,
+            Loop,
         ]
     }
 
