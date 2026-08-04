@@ -94,6 +94,20 @@ fn current_depth(run: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// The nesting cap in force for this run.
+///
+/// Seeded from the top-level graph's `trigger.config.max_sub_workflow_depth`
+/// and forwarded down the chain by [`crate::engine::run_sub_workflow`], so
+/// every level enforces the bound the *root* run declared rather than whatever
+/// each child's own trigger happens to say. Falls back to
+/// [`MAX_SUB_WORKFLOW_DEPTH`] when unset.
+fn max_depth(run: &Value) -> u64 {
+    run.get("max_sub_workflow_depth")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .unwrap_or(MAX_SUB_WORKFLOW_DEPTH)
+}
+
 /// Deserializes the inline `workflow` config value into a [`WorkflowGraph`].
 fn inline_child(workflow: &Value) -> Result<WorkflowGraph> {
     serde_json::from_value(workflow.clone())
@@ -241,10 +255,10 @@ async fn run_child(
     // Depth / cycle guard: bound total nesting regardless of how a cycle is
     // formed. The child runs one level deeper than the current run.
     let child_depth = current_depth(ctx.run) + 1;
-    if child_depth > MAX_SUB_WORKFLOW_DEPTH {
+    let depth_cap = max_depth(ctx.run);
+    if child_depth > depth_cap {
         return Err(EngineError::Capability(format!(
-            "sub_workflow node: maximum nesting depth {MAX_SUB_WORKFLOW_DEPTH} exceeded \
-             (possible cycle)"
+            "sub_workflow node: maximum nesting depth {depth_cap} exceeded (possible cycle)"
         )));
     }
 
@@ -262,6 +276,7 @@ async fn run_child(
         crate::engine::RunInput::new(trigger).with_inputs(child_inputs),
         ctx.caps,
         child_depth,
+        depth_cap,
     ))
     .await?;
 
@@ -754,6 +769,49 @@ mod tests {
         assert!(
             matches!(err, EngineError::Capability(ref m) if m.contains("depth")),
             "expected a depth-limit error, got: {err:?}"
+        );
+    }
+
+    /// A run carrying `max_sub_workflow_depth` uses it in place of the default,
+    /// so a graph that legitimately nests deeper is not capped at 8.
+    #[tokio::test]
+    async fn a_run_declared_depth_raises_the_default_cap() {
+        let child = WorkflowGraph {
+            nodes: vec![node("ct", NodeKind::Trigger)],
+            ..Default::default()
+        };
+        let caps =
+            mock_capabilities_with_resolver(MockWorkflowResolver::default().with("child-1", child));
+
+        // At the default cap, but the run declared a higher one — so this
+        // descends rather than refusing.
+        let run_meta = json!({
+            "sub_workflow_depth": crate::engine::MAX_SUB_WORKFLOW_DEPTH,
+            "max_sub_workflow_depth": crate::engine::MAX_SUB_WORKFLOW_DEPTH + 4,
+        });
+        execute_with(json!({ "workflow_id": "child-1" }), run_meta, &caps)
+            .await
+            .expect("a raised cap should permit this level");
+    }
+
+    /// The declared cap bounds as well as raises: a lower value bites before the
+    /// default would have.
+    #[tokio::test]
+    async fn a_run_declared_depth_can_also_lower_the_cap() {
+        let child = WorkflowGraph {
+            nodes: vec![node("ct", NodeKind::Trigger)],
+            ..Default::default()
+        };
+        let caps =
+            mock_capabilities_with_resolver(MockWorkflowResolver::default().with("child-1", child));
+
+        let run_meta = json!({ "sub_workflow_depth": 2, "max_sub_workflow_depth": 2 });
+        let err = execute_with(json!({ "workflow_id": "child-1" }), run_meta, &caps)
+            .await
+            .expect_err("a lowered cap must be enforced");
+        assert!(
+            matches!(err, EngineError::Capability(ref m) if m.contains("depth 2")),
+            "the error should name the declared cap, got: {err:?}"
         );
     }
 }

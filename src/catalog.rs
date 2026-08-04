@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 /// The node kinds, in the canonical order used wherever the DSL is enumerated
 /// (matches [`NodeKind`](crate::model::NodeKind)'s serde discriminators).
-pub const NODE_KINDS: [&str; 15] = [
+pub const NODE_KINDS: [&str; 16] = [
     "trigger",
     "agent",
     "tool_call",
@@ -38,6 +38,7 @@ pub const NODE_KINDS: [&str; 15] = [
     "sub_workflow",
     "memory",
     "dedup",
+    "loop",
 ];
 
 /// One config field a node of a given kind reads at run time.
@@ -197,6 +198,33 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                     "object",
                     "Required when trigger_kind=schedule: {kind:\"cron\",expr,tz?} | \
                      {kind:\"at\",at} | {kind:\"every\",every_ms}.",
+                ),
+                ConfigField::optional(
+                    "recursion_limit",
+                    "number",
+                    "Total super-steps the run may execute before it fails. The graph-wide \
+                     backstop for cycles; a `loop` node's own max_iterations is the per-loop \
+                     bound and should usually be preferred because it names the offending loop.",
+                ),
+                ConfigField::optional(
+                    "max_node_visits",
+                    "number",
+                    "How many times any single node may be activated in one run. Bounds a cycle \
+                     that has no `loop` node and, unlike recursion_limit, names the node that ran \
+                     away.",
+                ),
+                ConfigField::optional(
+                    "node_timeout_secs",
+                    "number",
+                    "Bounds each individual node ATTEMPT (not the whole retry loop), so a node \
+                     with retries gets this budget per attempt.",
+                ),
+                ConfigField::optional(
+                    "max_sub_workflow_depth",
+                    "number",
+                    "How deep `sub_workflow` nodes may nest before the chain is cut (default 8). \
+                     Declared on the ROOT graph's trigger; it is forwarded to every child run, so \
+                     setting it on a nested workflow has no effect.",
                 ),
             ],
             ports: PortSpec::new(&[], &["main"]),
@@ -472,6 +500,56 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                 "config": { "path": "json.items" }
             }),
             notes: vec![],
+        },
+        "loop" => NodeKindContract {
+            kind: "loop".to_string(),
+            summary: "Repeat a section of the workflow a bounded number of times.".to_string(),
+            description: "Emits its input on the `body` port until either config.max_iterations \
+                is reached or config.condition goes falsey, then emits on `done`. Close the loop \
+                by wiring the last node of the body back to this node; that back-edge is what \
+                makes the section repeat. The current pass number is readable anywhere in the \
+                graph as \"=nodes.<loop id>.iteration\"."
+                .to_string(),
+            config_fields: vec![
+                ConfigField::optional(
+                    "max_iterations",
+                    "number",
+                    "How many times the body may run before the loop stops (default 25). Always \
+                     finite — a loop with no cap is the runaway case this node exists to prevent.",
+                ),
+                ConfigField::optional(
+                    "on_exceeded",
+                    "enum",
+                    "What happens at the cap: \"error\" (default) fails the run, naming this \
+                     node; \"continue\" stops looping and emits on `done` so downstream still \
+                     runs with the last pass's items.",
+                )
+                .with_enum(&["error", "continue"]),
+                ConfigField::optional(
+                    "condition",
+                    "\"=expr\"",
+                    "Optional early exit. While it resolves truthy the loop continues; the first \
+                     falsey result routes to `done` without consuming an iteration. Checked \
+                     before the cap, so a loop that finishes on its own terms never errors.",
+                ),
+            ],
+            ports: PortSpec::new(&["main"], &["body", "done"]),
+            example: json!({
+                "id": "retry_until_clean", "kind": "loop", "name": "Until tests pass",
+                "config": {
+                    "max_iterations": 5,
+                    "on_exceeded": "continue",
+                    "condition": "=item.tests_failing"
+                }
+            }),
+            notes: vec![
+                "The body must route back to this node or it runs once and stops — the \
+                 back-edge is the loop."
+                    .to_string(),
+                "A `merge` node inside the loop body deadlocks it: a merge is a fan-in barrier \
+                 that waits for every predecessor, which on a second pass never all arrive."
+                    .to_string(),
+            ],
         },
         "transform" => NodeKindContract {
             kind: "transform".to_string(),
@@ -791,15 +869,16 @@ mod tests {
     }
 
     #[test]
-    fn node_kinds_has_15_entries_including_shell_memory_and_dedup() {
-        assert_eq!(NODE_KINDS.len(), 15);
+    fn node_kinds_has_16_entries_including_shell_memory_dedup_and_loop() {
+        assert_eq!(NODE_KINDS.len(), 16);
         assert!(NODE_KINDS.contains(&"shell"));
         assert!(NODE_KINDS.contains(&"memory"));
         assert!(NODE_KINDS.contains(&"dedup"));
-        // "memory" is the 14th and "dedup" the 15th (last) entry — each added
-        // at the end per the sequenced-last design rationale.
+        assert!(NODE_KINDS.contains(&"loop"));
+        // The PR's shell node precedes the three sequenced-last node kinds.
         assert_eq!(NODE_KINDS[13], "memory");
         assert_eq!(NODE_KINDS[14], "dedup");
+        assert_eq!(NODE_KINDS[15], "loop");
     }
 
     #[test]
