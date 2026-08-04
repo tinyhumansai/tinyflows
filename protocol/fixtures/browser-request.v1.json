@@ -1,0 +1,12 @@
+{
+  "protocol_version": 1,
+  "request_id": "run-fixture:1",
+  "run_id": "run-fixture",
+  "tab_id": 42,
+  "timeout_ms": 30000,
+  "action": {
+    "action": "fill",
+    "selector": "#email",
+    "value": "person@example.com"
+  }
+}

@@ -50,3 +50,56 @@ jobs:
 
       - name: Test all features
         run: cargo test --all-features
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Coverage
+        run: cargo llvm-cov --all-features --workspace --summary-only --fail-under-lines 90
+
+  chrome-extension:
+    name: Chrome Extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint, typecheck, unit test, and build
+        run: npm run verify
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run extension end-to-end tests
+        run: npm run test:e2e
+
+      - name: Build deterministic release archive
+        run: npm run package
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: tinyflows-chrome-extension
+          path: |
+            extension/artifacts/*.zip
+            extension/artifacts/*.sha256
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: chrome-extension-playwright-traces
+          path: extension/test-results/
+          if-no-files-found: ignore

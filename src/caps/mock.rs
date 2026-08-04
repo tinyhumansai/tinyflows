@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::caps::{
-    AgentRunner, Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, ShellOutcome,
-    ShellRequest, ShellRunner, ShellScript, StateStore, ToolInvoker, WorkflowResolver,
+    AgentRunner, Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, MemoryProvider,
+    ShellOutcome, ShellRequest, ShellRunner, ShellScript, StateStore, ToolInvoker,
+    WorkflowResolver,
 };
 use crate::error::{EngineError, Result};
 use crate::model::WorkflowGraph;
@@ -107,6 +108,61 @@ impl ShellRunner for MockShell {
     }
 }
 
+/// A [`MemoryProvider`] returning small, deterministic, **shaped** canned data.
+///
+/// Unlike a naive echo mock, each method returns a plausible result shape (a
+/// `results` array for recall/search, a `traits` object for flavour, a `people`
+/// array for people lookups) rather than `null`/an empty object — the same
+/// "shaped mock" precedent OpenHuman's `SchemaAwareMockAgentRunner` /
+/// `SchemaAwareMockLlm` set, because a naive mock made dry-runs meaningless
+/// (downstream `condition`/`transform` nodes had nothing to bind to). Wired
+/// into [`mock_capabilities`] by default (not behind an opt-in helper, unlike
+/// [`MockAgentRunner`]) precisely so a workflow containing a `memory` node
+/// dry-runs out of the box.
+#[derive(Debug, Default, Clone)]
+pub struct MockMemory;
+
+#[async_trait]
+impl MemoryProvider for MockMemory {
+    async fn recall(&self, scope: &str, query: &str, opts: Value) -> Result<Value> {
+        Ok(json!({
+            "scope": scope,
+            "query": query,
+            "opts": opts,
+            "results": [
+                { "id": "mem_1", "text": format!("mock memory matching '{query}'"), "score": 0.92 },
+                { "id": "mem_2", "text": "a second mock memory", "score": 0.81 },
+            ],
+        }))
+    }
+
+    async fn flavour(&self, slug: &str) -> Result<Value> {
+        Ok(json!({
+            "slug": slug,
+            "summary": format!("mock flavour profile for '{slug}'"),
+            "traits": { "tone": "warm", "formality": "casual" },
+        }))
+    }
+
+    async fn people(&self, query: Option<&str>) -> Result<Value> {
+        Ok(json!({
+            "query": query,
+            "people": [
+                { "id": "person_1", "name": "Mock Person A" },
+                { "id": "person_2", "name": "Mock Person B" },
+            ],
+        }))
+    }
+
+    async fn remember(&self, _scope: &str, _key: &str, _value: Value) -> Result<()> {
+        Ok(())
+    }
+
+    async fn forget(&self, _scope: &str, _key: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// A [`StateStore`] backed by an in-memory map guarded by a mutex.
 #[derive(Debug, Default)]
 pub struct MockStateStore {
@@ -159,7 +215,11 @@ impl WorkflowResolver for MockWorkflowResolver {
 /// Builds a [`Capabilities`] bundle wired entirely to the mock implementations.
 ///
 /// The bundled [`MockWorkflowResolver`] is empty; use
-/// [`mock_capabilities_with_resolver`] to supply one that resolves ids.
+/// [`mock_capabilities_with_resolver`] to supply one that resolves ids. Unlike
+/// [`Capabilities::agent`] (which defaults `None`), [`Capabilities::memory`] is
+/// wired to [`MockMemory`] by default — a `memory` node must dry-run
+/// successfully out of the box; use `Capabilities { memory: None, ..caps }` to
+/// exercise the "host wired no memory store" error path instead.
 #[must_use]
 pub fn mock_capabilities() -> Capabilities {
     mock_capabilities_with_resolver(MockWorkflowResolver::default())
@@ -180,6 +240,8 @@ pub fn mock_capabilities_with_resolver(resolver: impl WorkflowResolver + 'static
         // No agent registry by default: `agent` nodes use `MockLlm`. Use
         // [`mock_capabilities_with_agent`] to exercise the `agent_ref` path.
         agent: None,
+        // Wired by default (unlike `agent`) — see the doc comment above.
+        memory: Some(Arc::new(MockMemory)),
     }
 }
 
@@ -189,6 +251,17 @@ pub fn mock_capabilities_with_resolver(resolver: impl WorkflowResolver + 'static
 pub fn mock_capabilities_with_agent(agent: impl AgentRunner + 'static) -> Capabilities {
     Capabilities {
         agent: Some(Arc::new(agent)),
+        ..mock_capabilities()
+    }
+}
+
+/// Like [`mock_capabilities`], but with a caller-supplied [`MemoryProvider`] in
+/// place of the default [`MockMemory`] — for tests that need custom recall /
+/// flavour / people / remember / forget behavior.
+#[must_use]
+pub fn mock_capabilities_with_memory(memory: impl MemoryProvider + 'static) -> Capabilities {
+    Capabilities {
+        memory: Some(Arc::new(memory)),
         ..mock_capabilities()
     }
 }
@@ -271,6 +344,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mock_memory_recall_returns_shaped_results() {
+        let memory = MockMemory;
+        let out = memory
+            .recall("flow", "budget", json!({ "operation": "recall" }))
+            .await
+            .unwrap();
+        assert_eq!(out["scope"], "flow");
+        assert_eq!(out["query"], "budget");
+        let results = out["results"].as_array().expect("results array");
+        assert!(
+            !results.is_empty(),
+            "mock recall should return shaped results"
+        );
+        assert!(results[0].get("text").is_some());
+    }
+
+    #[tokio::test]
+    async fn mock_memory_flavour_returns_shaped_object() {
+        let memory = MockMemory;
+        let out = memory.flavour("email-tone").await.unwrap();
+        assert_eq!(out["slug"], "email-tone");
+        assert!(out["traits"].is_object());
+    }
+
+    #[tokio::test]
+    async fn mock_memory_people_returns_shaped_list() {
+        let memory = MockMemory;
+        let out = memory.people(Some("cyrus")).await.unwrap();
+        assert_eq!(out["query"], "cyrus");
+        let people = out["people"].as_array().expect("people array");
+        assert!(
+            !people.is_empty(),
+            "mock people should return a shaped list"
+        );
+
+        let out_no_query = memory.people(None).await.unwrap();
+        assert!(out_no_query["query"].is_null());
+    }
+
+    #[tokio::test]
+    async fn mock_memory_remember_and_forget_are_ok() {
+        let memory = MockMemory;
+        memory
+            .remember("flow", "k", json!({ "v": 1 }))
+            .await
+            .unwrap();
+        memory.forget("flow", "k").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn mock_state_store_round_trips_and_misses() {
         let store = MockStateStore::default();
         assert!(store.load("missing").await.unwrap().is_none());
@@ -315,6 +438,15 @@ mod tests {
                 .await
                 .unwrap()["result"],
             "x"
+        );
+        assert!(
+            caps.memory
+                .as_ref()
+                .expect("memory wired by default")
+                .flavour("f")
+                .await
+                .unwrap()["slug"]
+                == "f"
         );
     }
 }

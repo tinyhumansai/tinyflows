@@ -30,14 +30,38 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 - Linear execution, conditional routing on output ports, **parallel fan-out**
   (concurrent successors sharing a port), and a **merge fan-in barrier** (a node
   runs only once all its predecessors finish).
+- **Per-item fan-out** — a single node multiplying an array of input into N
+  concurrent units of work, array in and array out. Where graph fan-out fixes
+  the width when the graph is authored, this width is data-driven:
+
+  ```jsonc
+  // one agent turn per topic, at most 8 at a time
+  { "kind": "agent", "config": {
+      "execution": "per_item",   // map over the input array
+      "concurrency": 8,          // 1 = sequential (default), n = bounded, 0/"all" = unbounded
+      "prompt": "Research =item.name"
+  } }
+
+  // ...or one whole child workflow per item — the multiplier
+  { "kind": "sub_workflow", "config": {
+      "execution": "per_item", "concurrency": 4, "workflow_id": "deep_dive"
+  } }
+  ```
+
+  Results always come back in **input order** with `paired_item` set, so a
+  fan-out never reorders data. `on_item_error` decides what a failing item does
+  to the batch — `collect` (the default when fanning out) marks that item
+  `{ error, failed: true }` and keeps the rest, `fail_fast` (the default when
+  sequential) hands the error to the node's `on_error` / retry policy, and
+  `skip` drops it. Supported on `agent`, `tool_call`, `http_request`, `memory`,
+  and `sub_workflow`.
 
 **Nodes**
 
 - Full node catalog implemented and tested — control-flow (`condition`,
   `switch`, `merge`, `split_out`, `transform`) and capability-backed (`agent`,
-  `tool_call`, `http_request`, `code`, `shell`, `output_parser`, `sub_workflow`),
-  plus the
-  `trigger` entry node.
+  `tool_call`, `http_request`, `code`, `shell`, `output_parser`, `sub_workflow`,
+  `memory`), plus the `trigger` entry node.
 
 **Reliability**
 
@@ -61,6 +85,9 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
   secrets; the crate never sees them.
 - Versioned wire format: graph `schema_version` and per-node `type_version`, with
   a `migrate` framework for load-time upgrades.
+- Optional Chrome workflow companion: a native loopback relay and MV3 extension
+  execute explicit `tool_call` nodes with `slug: "browser"` in user-shared tabs,
+  while every other tool remains with the embedding host's invoker.
 
 ## How it works
 
@@ -191,6 +218,7 @@ done
 | `shell`         | Runs a shell script, inline or from a script file, with a working directory and environment. |
 | `output_parser` | Parses / validates an upstream agent's output into a structured shape.                       |
 | `sub_workflow`  | Runs another workflow as a nested sub-graph and returns its output.                          |
+| `memory`        | Reads/writes host-managed memory (recall/search/flavour/people/remember/forget).             |
 | `condition`     | Two-way IF; emits on the `true` or `false` port.                                             |
 | `switch`        | Multi-way branch keyed by an expression result.                                              |
 | `merge`         | Fan-in barrier that combines multiple inputs; waits for all wired predecessors.              |
@@ -248,6 +276,19 @@ cargo build
 cargo test                 # unit + compiler + engine tests (mocks auto-available)
 cargo test --all-features  # also exercises the `mock` capability impls explicitly
 ```
+
+The Chrome extension is a separate local package:
+
+```sh
+cd extension
+npm ci
+npm run verify
+npm run test:e2e
+npm run package
+```
+
+See [Chrome workflow companion](docs/chrome-extension.md) for installation,
+pairing, the browser node contract, and the security boundary.
 
 The crate is `#![forbid(unsafe_code)]` and fully documented
 (`#![warn(missing_docs)]`). The CI gate is:

@@ -5,15 +5,26 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::error::ValidationError;
-use crate::model::{NodeKind, WorkflowGraph};
+use crate::model::{NodeKind, WorkflowGraph, is_valid_input_name};
+
+/// The node kind's wire discriminator (`tool_call`, `sub_workflow`, …) for use
+/// in error messages, so a validation error names the kind the way the graph
+/// JSON spells it rather than in Rust's `PascalCase`.
+fn kind_name(kind: &NodeKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{kind:?}"))
+}
 
 /// Validates a workflow graph's structure.
 ///
 /// Currently checks: unique node ids, exactly one trigger node, that every edge
-/// references existing nodes, no duplicate edges, and per-node `on_error` policy
-/// sanity (a known value, and an `error` edge when the policy is `route`).
-/// Cycle-legality and per-kind configuration checks are completed in stages
-/// A1–A2.
+/// references existing nodes, no duplicate edges, per-node `on_error` policy
+/// sanity (a known value, and an `error` edge when the policy is `route`), and
+/// declared-input sanity (addressable, unique names; defaults that match their
+/// declared type). Cycle-legality and per-kind configuration checks are
+/// completed in stages A1–A2.
 ///
 /// # Errors
 /// Returns the first [`ValidationError`] encountered. For a full list of every
@@ -32,9 +43,9 @@ pub fn validate(graph: &WorkflowGraph) -> Result<(), ValidationError> {
 ///
 /// Returns an empty `Vec` for a valid graph. The checks are ordered
 /// deterministically (duplicate ids → trigger count → edge integrity →
-/// `on_error` policy → per-kind config → condition routing), and every error is
-/// self-contained (no check can panic on a graph that failed an earlier one),
-/// so accumulating is safe. The first element is identical to what
+/// `on_error` policy → per-kind config → condition routing → declared inputs),
+/// and every error is self-contained (no check can panic on a graph that failed
+/// an earlier one), so accumulating is safe. The first element is identical to what
 /// [`validate`] returns, preserving the historical single-error contract.
 ///
 /// This is what a host should surface to an author or agent: fixing five
@@ -137,6 +148,255 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
         }
     }
 
+    // Per-item fan-out config (`execution` / `concurrency` / `on_item_error`).
+    // These select the execution strategy, so an unrecognized value cannot be
+    // caught at run time without silently changing behaviour — a bad
+    // `concurrency` would quietly stay sequential and a bad `on_item_error`
+    // would quietly pick a default. Reject them here, where the message can name
+    // the node.
+    for node in &graph.nodes {
+        let fans_out = matches!(
+            node.kind,
+            NodeKind::Agent
+                | NodeKind::ToolCall
+                | NodeKind::HttpRequest
+                | NodeKind::Memory
+                | NodeKind::SubWorkflow
+        );
+
+        if let Some(execution) = node.config.get("execution") {
+            match execution.as_str() {
+                Some("once" | "per_item") if fans_out => {}
+                Some("once" | "per_item") => {
+                    errors.push(ValidationError::InvalidNodeConfig {
+                        node: node.id.clone(),
+                        reason: format!(
+                            "`execution` is not supported on a {} node (only agent, tool_call, \
+                             http_request, memory, and sub_workflow map over their input)",
+                            kind_name(&node.kind)
+                        ),
+                    });
+                }
+                _ => {
+                    errors.push(ValidationError::InvalidNodeConfig {
+                        node: node.id.clone(),
+                        reason: format!(
+                            "unknown `execution` value {execution} (expected \"once\" or \
+                             \"per_item\")"
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Whether this node actually maps over its input, accounting for the
+        // per-kind default: `tool_call` / `http_request` / `memory` are per-item
+        // unless told otherwise; `agent` / `sub_workflow` are not.
+        let per_item = match node.config.get("execution").and_then(Value::as_str) {
+            Some("per_item") => true,
+            Some("once") => false,
+            _ => matches!(
+                node.kind,
+                NodeKind::ToolCall | NodeKind::HttpRequest | NodeKind::Memory
+            ),
+        };
+
+        for key in ["concurrency", "on_item_error"] {
+            let Some(value) = node.config.get(key) else {
+                continue;
+            };
+            // A fan-out knob on a node that runs once is a no-op, and a silent
+            // no-op reads as "I asked for parallelism and got none".
+            if !per_item {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!(
+                        "`{key}` has no effect without `execution: \"per_item\"` on a {} node",
+                        kind_name(&node.kind)
+                    ),
+                });
+                continue;
+            }
+            let ok = match key {
+                "concurrency" => {
+                    matches!(
+                        value,
+                        Value::Number(n) if n.as_u64().is_some(),
+                    ) || value.as_str() == Some("all")
+                }
+                _ => matches!(value.as_str(), Some("collect" | "fail_fast" | "skip")),
+            };
+            if !ok {
+                let expected = if key == "concurrency" {
+                    "a non-negative integer or \"all\""
+                } else {
+                    "\"collect\", \"fail_fast\", or \"skip\""
+                };
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!("`{key}` must be {expected}, got {value}"),
+                });
+            }
+        }
+    }
+
+    // `memory` node config checks, including THE hard security invariant: a
+    // `remember`/`forget` operation may never target `scope: "user"` — the
+    // caller's durable, cross-flow memory. Rejecting this structurally, at the
+    // door, means a workflow (or an LLM authoring one) can never plant or erase
+    // durable facts about the user by way of a `remember`/`forget` node; the
+    // only scope those two operations may write through is `"flow"`.
+    for node in &graph.nodes {
+        if node.kind != NodeKind::Memory {
+            continue;
+        }
+
+        let operation = node.config.get("operation").and_then(Value::as_str);
+        let Some(operation) = operation else {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: "memory node requires `operation` (recall|search|flavour|people|\
+                         remember|forget)"
+                    .to_string(),
+            });
+            continue;
+        };
+        if !matches!(
+            operation,
+            "recall" | "search" | "flavour" | "people" | "remember" | "forget"
+        ) {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: format!(
+                    "memory node has unknown operation {operation:?} (expected one of \
+                     recall|search|flavour|people|remember|forget)"
+                ),
+            });
+            continue;
+        }
+
+        let scope = node.config.get("scope").and_then(Value::as_str);
+
+        // THE hard invariant (see the block comment above): reject before any
+        // other config check, so it can never be masked by a different error.
+        // remember/forget may write ONLY scope "flow". BOTH read-only scopes are
+        // rejected here — "user" (the user's durable memory) and "flows"
+        // (cross-flow read). This gate is unbypassable precisely because `scope`
+        // is validated as a literal enum (below): an "=expr" binding resolves at
+        // runtime and is never one of user|flow|flows, so it fails the enum
+        // check and can never smuggle a write past this into
+        // provider.remember/forget. If a future change makes `scope` bindable,
+        // this invariant reopens — keep the enum check.
+        if matches!(operation, "remember" | "forget")
+            && matches!(scope, Some("user") | Some("flows"))
+        {
+            let bad = scope.unwrap_or_default();
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: format!(
+                    "memory node operation {operation:?} may not target scope {bad:?} — \
+                     remember/forget may only write scope \"flow\"; scopes \"user\" and \
+                     \"flows\" are read-only from a workflow"
+                ),
+            });
+        }
+
+        if let Some(scope) = scope {
+            if !matches!(scope, "user" | "flow" | "flows") {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!(
+                        "memory node has unknown scope {scope:?} (expected \
+                         user|flow|flows)"
+                    ),
+                });
+            }
+        }
+
+        // `scope` is required for recall/remember/forget (not search/flavour/
+        // people — see the catalog contract for the exact per-operation table).
+        if matches!(operation, "recall" | "remember" | "forget") && scope.is_none() {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: format!("memory node operation {operation:?} requires `scope`"),
+            });
+        }
+
+        if matches!(operation, "recall" | "search") {
+            let has_query = node
+                .config
+                .get("query")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            if !has_query {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!("memory node operation {operation:?} requires `query`"),
+                });
+            }
+        }
+
+        if operation == "flavour" {
+            let has_flavour = node
+                .config
+                .get("flavour")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            if !has_flavour {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: "memory node operation \"flavour\" requires `flavour` (slug)"
+                        .to_string(),
+                });
+            }
+        }
+
+        if matches!(operation, "remember" | "forget") {
+            let has_key = node
+                .config
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            if !has_key {
+                errors.push(ValidationError::InvalidNodeConfig {
+                    node: node.id.clone(),
+                    reason: format!("memory node operation {operation:?} requires `key`"),
+                });
+            }
+        }
+
+        if operation == "remember" && node.config.get("value").is_none() {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: "memory node operation \"remember\" requires `value`".to_string(),
+            });
+        }
+    }
+
+    // `dedup` node config checks: `key` (the per-item "=expr" dedup key) is the
+    // only config field, and it is required — a dedup node with no `key` can
+    // never resolve anything to compare, which is always an authoring mistake
+    // (as opposed to a `key` that *resolves* to null at run time, which is the
+    // intentional, per-item fail-open path the executor handles).
+    for node in &graph.nodes {
+        if node.kind != NodeKind::Dedup {
+            continue;
+        }
+        let has_key = node
+            .config
+            .get("key")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if !has_key {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason: "dedup node requires `key` (an \"=expr\" resolved per item, e.g. \
+                         \"=item.id\")"
+                    .to_string(),
+            });
+        }
+    }
+
     // A `condition` node's outgoing edges must emit on `from_port` "true" or
     // "false" — routing is keyed EXCLUSIVELY on `from_port` (see
     // `engine::outgoing_by_port` / `handler_routing`), so any other value
@@ -163,6 +423,35 @@ pub fn validate_all(graph: &WorkflowGraph) -> Vec<ValidationError> {
         }
     }
 
+    // Declared-input checks. These are author-time mistakes that would otherwise
+    // surface as a confusing runtime `null`: a name that `=inputs.<name>` cannot
+    // address, two declarations racing for the same key, a default the input's
+    // own type would reject, or `required` alongside a default (which makes the
+    // requirement unreachable — a default always supplies a value).
+    let mut seen_inputs = HashSet::new();
+    for input in &graph.inputs {
+        if !is_valid_input_name(&input.name) {
+            errors.push(ValidationError::InvalidInputName(input.name.clone()));
+        }
+        if !seen_inputs.insert(input.name.as_str()) {
+            errors.push(ValidationError::DuplicateInputName(input.name.clone()));
+        }
+        match &input.default {
+            Some(default) if !input.ty.accepts(default) => {
+                errors.push(ValidationError::InputDefaultTypeMismatch {
+                    name: input.name.clone(),
+                    expected: input.ty.as_str(),
+                });
+            }
+            Some(_) if input.required => {
+                errors.push(ValidationError::RequiredInputWithDefault(
+                    input.name.clone(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
     errors
 }
 
@@ -181,6 +470,108 @@ mod tests {
             ports: Vec::new(),
             position: None,
         }
+    }
+
+    /// A graph with one trigger and no edges — the minimum that passes every
+    /// structural check, so an inputs test sees only inputs errors.
+    fn graph_with_inputs(inputs: Vec<crate::model::WorkflowInput>) -> WorkflowGraph {
+        WorkflowGraph {
+            inputs,
+            nodes: vec![node("t", NodeKind::Trigger)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn accepts_declared_inputs() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("repo", InputType::String).required(),
+            WorkflowInput::new("depth", InputType::Number).with_default(serde_json::json!(3)),
+            WorkflowInput::new("payload", InputType::Json),
+        ]);
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn rejects_duplicate_input_names() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("repo", InputType::String),
+            WorkflowInput::new("repo", InputType::Number),
+        ]);
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::DuplicateInputName("repo".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_input_names_expressions_could_not_address() {
+        use crate::model::{InputType, WorkflowInput};
+
+        for bad in ["repo-url", "2fa", "", "repo.url"] {
+            let graph = graph_with_inputs(vec![WorkflowInput::new(bad, InputType::String)]);
+            assert_eq!(
+                validate(&graph),
+                Err(ValidationError::InvalidInputName(bad.to_string())),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_default_that_violates_its_own_type() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("depth", InputType::Number).with_default(serde_json::json!("3")),
+        ]);
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::InputDefaultTypeMismatch {
+                name: "depth".to_string(),
+                expected: "number",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_required_input_with_a_default() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("repo", InputType::String)
+                .required()
+                .with_default(serde_json::json!("acme/api")),
+        ]);
+        assert_eq!(
+            validate(&graph),
+            Err(ValidationError::RequiredInputWithDefault(
+                "repo".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn collects_every_input_error_in_one_pass() {
+        use crate::model::{InputType, WorkflowInput};
+
+        let graph = graph_with_inputs(vec![
+            WorkflowInput::new("repo-url", InputType::String),
+            WorkflowInput::new("depth", InputType::Number).with_default(serde_json::json!("3")),
+            WorkflowInput::new("depth", InputType::Number),
+        ]);
+        let errors = validate_all(&graph);
+        assert_eq!(errors.len(), 3, "got {errors:?}");
+        assert!(errors.contains(&ValidationError::InvalidInputName("repo-url".to_string())));
+        assert!(errors.contains(&ValidationError::InputDefaultTypeMismatch {
+            name: "depth".to_string(),
+            expected: "number",
+        }));
+        assert!(errors.contains(&ValidationError::DuplicateInputName("depth".to_string())));
     }
 
     #[test]
@@ -357,6 +748,322 @@ mod tests {
             Err(ValidationError::InvalidNodeConfig { .. })
         ));
         let graph = graph_with_sub_workflow(serde_json::Value::Null);
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+    }
+
+    fn memory_node(id: &str, config: serde_json::Value) -> Node {
+        let mut n = node(id, NodeKind::Memory);
+        n.config = config;
+        n
+    }
+
+    fn graph_with_memory_node(config: serde_json::Value) -> WorkflowGraph {
+        WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), memory_node("mem", config)],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "mem".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    // --- the hard invariant: remember/forget may never target scope "user" ---
+
+    #[test]
+    fn memory_rejects_remember_user_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "user", "key": "k", "value": 1
+        }));
+        let err = validate(&graph).expect_err("remember·user must be rejected");
+        match err {
+            ValidationError::InvalidNodeConfig { node, reason } => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("\"user\""), "reason: {reason}");
+                assert!(reason.contains("remember"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_rejects_forget_user_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "user", "key": "k"
+        }));
+        let err = validate(&graph).expect_err("forget·user must be rejected");
+        match err {
+            ValidationError::InvalidNodeConfig { node, reason } => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("\"user\""), "reason: {reason}");
+                assert!(reason.contains("forget"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_rejects_remember_flows_scope() {
+        // "flows" is a read-only cross-flow scope — a write to it must be
+        // rejected at validate time, not just backstopped by the host adapter.
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "flows", "key": "k", "value": 1
+        }));
+        let err = validate(&graph).expect_err("remember·flows must be rejected");
+        match err {
+            ValidationError::InvalidNodeConfig { node, reason } => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("\"flows\""), "reason: {reason}");
+                assert!(reason.contains("remember"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_rejects_forget_flows_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "flows", "key": "k"
+        }));
+        let err = validate(&graph).expect_err("forget·flows must be rejected");
+        match err {
+            ValidationError::InvalidNodeConfig { node, reason } => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("\"flows\""), "reason: {reason}");
+                assert!(reason.contains("forget"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_accepts_remember_flow_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "flow", "key": "k", "value": { "v": 1 }
+        }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn memory_accepts_forget_flow_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "flow", "key": "k"
+        }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn memory_rejects_unknown_scope_value() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "recall", "scope": "everyone", "query": "x"
+        }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+    }
+
+    // --- required-field checks per operation ---
+
+    #[test]
+    fn memory_recall_accepts_user_and_flows_scope() {
+        // Only remember/forget are scope-restricted; reads may target any
+        // declared scope, including the read-only ones.
+        for scope in ["user", "flow", "flows"] {
+            let graph = graph_with_memory_node(serde_json::json!({
+                "operation": "recall", "scope": scope, "query": "x"
+            }));
+            assert_eq!(
+                validate(&graph),
+                Ok(()),
+                "scope {scope} should be valid for recall"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_requires_operation() {
+        let graph = graph_with_memory_node(serde_json::json!({ "scope": "flow" }));
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("operation"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_rejects_unknown_operation() {
+        let graph = graph_with_memory_node(serde_json::json!({ "operation": "levitate" }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn memory_recall_requires_scope() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "recall", "query": "x"
+        }));
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("scope"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_recall_requires_query() {
+        let graph = graph_with_memory_node(serde_json::json!({
+            "operation": "recall", "scope": "flow"
+        }));
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("query"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_search_requires_query_but_not_scope() {
+        let missing_query = graph_with_memory_node(serde_json::json!({ "operation": "search" }));
+        assert!(matches!(
+            validate(&missing_query),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+
+        let no_scope_ok = graph_with_memory_node(serde_json::json!({
+            "operation": "search", "query": "x"
+        }));
+        assert_eq!(validate(&no_scope_ok), Ok(()));
+    }
+
+    #[test]
+    fn memory_flavour_requires_flavour_slug() {
+        let graph = graph_with_memory_node(serde_json::json!({ "operation": "flavour" }));
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("flavour"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+        let ok = graph_with_memory_node(serde_json::json!({
+            "operation": "flavour", "flavour": "email-tone"
+        }));
+        assert_eq!(validate(&ok), Ok(()));
+    }
+
+    #[test]
+    fn memory_people_requires_nothing() {
+        // `people` has no required `scope`/`query` — an empty config is valid.
+        let graph = graph_with_memory_node(serde_json::json!({ "operation": "people" }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn memory_remember_requires_key_and_value() {
+        let missing_both = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "flow"
+        }));
+        match validate(&missing_both) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("key"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig (key), got {other:?}"),
+        }
+
+        let missing_value = graph_with_memory_node(serde_json::json!({
+            "operation": "remember", "scope": "flow", "key": "k"
+        }));
+        match validate(&missing_value) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "mem");
+                assert!(reason.contains("value"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig (value), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_forget_requires_key_but_not_value() {
+        let missing_key = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "flow"
+        }));
+        assert!(matches!(
+            validate(&missing_key),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+
+        let ok = graph_with_memory_node(serde_json::json!({
+            "operation": "forget", "scope": "flow", "key": "k"
+        }));
+        assert_eq!(validate(&ok), Ok(()));
+    }
+
+    fn dedup_node(id: &str, config: serde_json::Value) -> Node {
+        let mut n = node(id, NodeKind::Dedup);
+        n.config = config;
+        n
+    }
+
+    fn graph_with_dedup_node(config: serde_json::Value) -> WorkflowGraph {
+        WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), dedup_node("dd", config)],
+            edges: vec![Edge {
+                from_node: "t".to_string(),
+                from_port: "main".to_string(),
+                to_node: "dd".to_string(),
+                to_port: "main".to_string(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dedup_accepts_a_key_expression() {
+        let graph = graph_with_dedup_node(serde_json::json!({ "key": "=item.id" }));
+        assert_eq!(validate(&graph), Ok(()));
+    }
+
+    #[test]
+    fn dedup_rejects_missing_key() {
+        let graph = graph_with_dedup_node(serde_json::Value::Null);
+        match validate(&graph) {
+            Err(ValidationError::InvalidNodeConfig { node, reason }) => {
+                assert_eq!(node, "dd");
+                assert!(reason.contains("key"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidNodeConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dedup_rejects_empty_key() {
+        let graph = graph_with_dedup_node(serde_json::json!({ "key": "" }));
+        assert!(matches!(
+            validate(&graph),
+            Err(ValidationError::InvalidNodeConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn dedup_rejects_non_string_key() {
+        // `key` is a literal "=expr" string in config — a non-string value
+        // (e.g. authored as a bare number) is just as much a missing key.
+        let graph = graph_with_dedup_node(serde_json::json!({ "key": 1 }));
         assert!(matches!(
             validate(&graph),
             Err(ValidationError::InvalidNodeConfig { .. })
@@ -801,6 +1508,148 @@ mod tests {
         assert_eq!(
             ValidationError::MultipleTriggers(vec!["a".to_string()]).node_id(),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod fanout_tests {
+    use super::{validate, validate_all};
+    use crate::error::ValidationError;
+    use crate::model::{Node, NodeKind, WorkflowGraph};
+    use serde_json::{Value, json};
+
+    /// A trigger plus one configured node of `kind` — the smallest graph that
+    /// exercises a per-kind config check.
+    fn graph(kind: NodeKind, config: Value) -> WorkflowGraph {
+        let mk = |id: &str, kind: NodeKind, config: Value| Node {
+            id: id.to_string(),
+            kind,
+            type_version: 1,
+            name: id.to_string(),
+            config,
+            ports: Vec::new(),
+            position: None,
+        };
+        WorkflowGraph {
+            nodes: vec![
+                mk("t", NodeKind::Trigger, Value::Null),
+                mk("n", kind, config),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// The `reason` of the single `InvalidNodeConfig` error, or a panic.
+    fn reason(kind: NodeKind, config: Value) -> String {
+        match validate_all(&graph(kind, config))
+            .into_iter()
+            .find(|e| matches!(e, ValidationError::InvalidNodeConfig { .. }))
+        {
+            Some(ValidationError::InvalidNodeConfig { reason, .. }) => reason,
+            other => panic!("expected an InvalidNodeConfig error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_valid_fan_out_passes() {
+        assert_eq!(
+            validate(&graph(
+                NodeKind::Agent,
+                json!({ "execution": "per_item", "concurrency": 8, "on_item_error": "collect" })
+            )),
+            Ok(())
+        );
+        // `"all"` and `0` are both legal spellings of unbounded.
+        for c in [json!("all"), json!(0)] {
+            assert_eq!(
+                validate(&graph(
+                    NodeKind::ToolCall,
+                    json!({ "execution": "per_item", "concurrency": c })
+                )),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn per_item_default_kinds_may_carry_fan_out_config_without_declaring_execution() {
+        // tool_call / http_request / memory are per-item by default, so the
+        // knobs apply without an explicit `execution`.
+        for kind in [NodeKind::ToolCall, NodeKind::HttpRequest] {
+            assert_eq!(
+                validate(&graph(kind.clone(), json!({ "concurrency": 4 }))),
+                Ok(()),
+                "{kind:?} is per-item by default"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrency_on_a_once_node_is_rejected_rather_than_silently_ignored() {
+        // `agent` defaults to `once`, so this author asked for parallelism and
+        // would otherwise have got none, with no signal at all.
+        let reason = reason(NodeKind::Agent, json!({ "concurrency": 8 }));
+        assert!(
+            reason.contains("no effect") && reason.contains("per_item"),
+            "expected a no-effect explanation, got: {reason}"
+        );
+
+        // Explicitly opting out is the same story.
+        let reason = reason_of(
+            NodeKind::ToolCall,
+            json!({ "execution": "once", "concurrency": 8 }),
+        );
+        assert!(reason.contains("no effect"), "got: {reason}");
+    }
+
+    fn reason_of(kind: NodeKind, config: Value) -> String {
+        reason(kind, config)
+    }
+
+    #[test]
+    fn a_malformed_concurrency_is_rejected() {
+        for bad in [json!("lots"), json!(-1), json!(1.5), json!(true)] {
+            let reason = reason(
+                NodeKind::ToolCall,
+                json!({ "execution": "per_item", "concurrency": bad }),
+            );
+            assert!(
+                reason.contains("concurrency"),
+                "expected a concurrency error for {bad}, got: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_item_error_policy_is_rejected() {
+        let reason = reason(
+            NodeKind::ToolCall,
+            json!({ "execution": "per_item", "on_item_error": "explode" }),
+        );
+        assert!(
+            reason.contains("on_item_error") && reason.contains("collect"),
+            "expected the allowed policies to be listed, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_execution_value_is_rejected() {
+        let reason = reason(NodeKind::Agent, json!({ "execution": "parallel" }));
+        assert!(
+            reason.contains("execution") && reason.contains("per_item"),
+            "expected the allowed modes to be listed, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn execution_on_a_kind_that_cannot_map_is_rejected() {
+        // A `transform` node does not map over its input; accepting `execution`
+        // there would imply a fan-out that never happens.
+        let reason = reason(NodeKind::Transform, json!({ "execution": "per_item" }));
+        assert!(
+            reason.contains("not supported") && reason.contains("transform"),
+            "expected the kind to be named in its wire spelling, got: {reason}"
         );
     }
 }

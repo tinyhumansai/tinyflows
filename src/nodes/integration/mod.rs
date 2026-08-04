@@ -1,6 +1,6 @@
 //! Capability-backed node executors: `agent`, `tool_call`, `http_request`,
-//! `code`, `shell`, `output_parser`, and `sub_workflow`. These reach the outside world
-//! through the host capabilities in [`crate::caps`].
+//! `code`, `shell`, `output_parser`, `sub_workflow`, and `memory`. These reach the
+//! outside world through the host capabilities in [`crate::caps`].
 //!
 //! One module per node kind so parallel work can edit them without conflicts.
 
@@ -8,6 +8,7 @@ pub mod agent;
 pub mod code;
 pub(crate) mod envelope;
 pub mod http_request;
+pub mod memory;
 pub mod output_parser;
 pub(crate) mod schema;
 pub mod shell;
@@ -17,6 +18,7 @@ pub mod tool_call;
 pub use agent::AgentNode;
 pub use code::CodeNode;
 pub use http_request::HttpRequestNode;
+pub use memory::MemoryNode;
 pub use output_parser::OutputParserNode;
 pub use shell::ShellNode;
 pub use sub_workflow::SubWorkflowNode;
