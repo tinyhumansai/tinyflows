@@ -438,7 +438,12 @@ fn conditional_predecessors(
 /// the back-edge depends on node/edge order for graphs with several cycles
 /// through the same nodes. That is fine for every use here: what matters is
 /// that exactly one edge per cycle is cut, not which one.
-pub(crate) fn back_edges(
+///
+/// Public because a host that mirrors the engine's fan-in classification — to
+/// pre-flight a graph, lay it out, or explain it — must make the same
+/// distinction, and a second implementation would drift from this one and
+/// disagree about which graphs are legal.
+pub fn back_edges(
     graph: &crate::model::WorkflowGraph,
 ) -> std::collections::HashSet<(String, String)> {
     /// DFS colours. `Grey` = on the current stack (an ancestor of the node
