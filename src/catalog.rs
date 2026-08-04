@@ -791,14 +791,15 @@ mod tests {
     }
 
     #[test]
-    fn node_kinds_has_14_entries_including_memory_and_dedup() {
-        assert_eq!(NODE_KINDS.len(), 14);
+    fn node_kinds_has_15_entries_including_shell_memory_and_dedup() {
+        assert_eq!(NODE_KINDS.len(), 15);
+        assert!(NODE_KINDS.contains(&"shell"));
         assert!(NODE_KINDS.contains(&"memory"));
         assert!(NODE_KINDS.contains(&"dedup"));
-        // "memory" is the 13th and "dedup" the 14th (last) entry — each added
+        // "memory" is the 14th and "dedup" the 15th (last) entry — each added
         // at the end per the sequenced-last design rationale.
-        assert_eq!(NODE_KINDS[12], "memory");
-        assert_eq!(NODE_KINDS[13], "dedup");
+        assert_eq!(NODE_KINDS[13], "memory");
+        assert_eq!(NODE_KINDS[14], "dedup");
     }
 
     #[test]
