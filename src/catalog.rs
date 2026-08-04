@@ -842,7 +842,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(all_contracts().len(), 15);
+        assert_eq!(all_contracts().len(), 16);
     }
 
     #[test]
