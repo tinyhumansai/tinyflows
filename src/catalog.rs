@@ -22,12 +22,13 @@ use serde_json::{Value, json};
 
 /// The node kinds, in the canonical order used wherever the DSL is enumerated
 /// (matches [`NodeKind`](crate::model::NodeKind)'s serde discriminators).
-pub const NODE_KINDS: [&str; 12] = [
+pub const NODE_KINDS: [&str; 16] = [
     "trigger",
     "agent",
     "tool_call",
     "http_request",
     "code",
+    "shell",
     "condition",
     "switch",
     "merge",
@@ -35,6 +36,9 @@ pub const NODE_KINDS: [&str; 12] = [
     "transform",
     "output_parser",
     "sub_workflow",
+    "memory",
+    "dedup",
+    "loop",
 ];
 
 /// One config field a node of a given kind reads at run time.
@@ -162,7 +166,7 @@ pub fn all_contracts() -> Vec<NodeKindContract> {
         .collect()
 }
 
-/// The contract for one node kind, or `None` if `kind` is not one of the 12.
+/// The contract for one node kind, or `None` if `kind` is not catalogued.
 pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
     let c = match kind {
         "trigger" => NodeKindContract {
@@ -195,6 +199,33 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                     "Required when trigger_kind=schedule: {kind:\"cron\",expr,tz?} | \
                      {kind:\"at\",at} | {kind:\"every\",every_ms}.",
                 ),
+                ConfigField::optional(
+                    "recursion_limit",
+                    "number",
+                    "Total super-steps the run may execute before it fails. The graph-wide \
+                     backstop for cycles; a `loop` node's own max_iterations is the per-loop \
+                     bound and should usually be preferred because it names the offending loop.",
+                ),
+                ConfigField::optional(
+                    "max_node_visits",
+                    "number",
+                    "How many times any single node may be activated in one run. Bounds a cycle \
+                     that has no `loop` node and, unlike recursion_limit, names the node that ran \
+                     away.",
+                ),
+                ConfigField::optional(
+                    "node_timeout_secs",
+                    "number",
+                    "Bounds each individual node ATTEMPT (not the whole retry loop), so a node \
+                     with retries gets this budget per attempt.",
+                ),
+                ConfigField::optional(
+                    "max_sub_workflow_depth",
+                    "number",
+                    "How deep `sub_workflow` nodes may nest before the chain is cut (default 8). \
+                     Declared on the ROOT graph's trigger; it is forwarded to every child run, so \
+                     setting it on a nested workflow has no effect.",
+                ),
             ],
             ports: PortSpec::new(&[], &["main"]),
             example: json!({
@@ -203,6 +234,12 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
             }),
             notes: vec![
                 "Exactly ONE trigger node per graph — zero or multiple is a hard reject."
+                    .to_string(),
+                "A workflow's typed PARAMETERS are NOT declared here. They live in the graph's \
+                 top-level `inputs` array (name/type/required/default/description), are validated \
+                 before the run starts, and are read from any node as \"=inputs.<name>\". The \
+                 trigger payload — free-form, whatever fired the run — stays at \
+                 \"=run.trigger.<path>\"."
                     .to_string(),
             ],
         },
@@ -328,6 +365,61 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
             }),
             notes: vec![],
         },
+        "shell" => NodeKindContract {
+            kind: "shell".to_string(),
+            summary: "Run a shell script — inline, or an external script file.".to_string(),
+            description: "Runs config.source (an inline script) or config.script_path (a script \
+                file) through the host's ShellRunner capability, with an optional working \
+                directory and environment. The script reads the node's input items as JSON from \
+                the file named by its first argument. A non-zero exit fails the step; a \
+                successful run emits one item of { exit_code, stdout, stderr, stdout_json }, \
+                where stdout_json is the parsed stdout when it was JSON and null otherwise. \
+                Whether shell steps run at all, which paths config.script_path and config.cwd may \
+                reach, and what environment a script inherits are the host's decisions."
+                .to_string(),
+            config_fields: vec![
+                ConfigField::optional(
+                    "source",
+                    "string",
+                    "An inline script. Required unless script_path is set; the two are mutually exclusive.",
+                ),
+                ConfigField::optional(
+                    "script_path",
+                    "string",
+                    "A path to an external script file, resolved and access-checked by the host. Required unless source is set.",
+                ),
+                ConfigField::optional("interpreter", "enum", "The shell runtime; defaults to sh.")
+                    .with_enum(&["sh", "bash"]),
+                ConfigField::optional(
+                    "cwd",
+                    "string",
+                    "The working directory to run in, subject to the host's own path policy.",
+                ),
+                ConfigField::optional(
+                    "env",
+                    "object",
+                    "Environment variables as a flat name/value map of strings.",
+                ),
+            ],
+            ports: PortSpec::linear(),
+            example: json!({
+                "id": "build", "kind": "shell", "name": "Build",
+                "config": {
+                    "interpreter": "bash",
+                    "cwd": "/srv/project",
+                    "env": { "PROFILE": "release" },
+                    "source": "set -euo pipefail\ncargo build --release\nprintf '{\"built\":true}'"
+                }
+            }),
+            notes: vec![
+                "The first argument to the script is a JSON file holding the node's input items."
+                    .to_string(),
+                "A non-zero exit status fails the step; stderr is quoted in the error.".to_string(),
+                "Prefer config.source: an inline script stays reviewable with the workflow, where \
+                 a script_path is only as trustworthy as the file it names."
+                    .to_string(),
+            ],
+        },
         "condition" => NodeKindContract {
             kind: "condition".to_string(),
             summary: "A boolean gate that routes to the `true` or `false` port.".to_string(),
@@ -409,6 +501,56 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
             }),
             notes: vec![],
         },
+        "loop" => NodeKindContract {
+            kind: "loop".to_string(),
+            summary: "Repeat a section of the workflow a bounded number of times.".to_string(),
+            description: "Emits its input on the `body` port until either config.max_iterations \
+                is reached or config.condition goes falsey, then emits on `done`. Close the loop \
+                by wiring the last node of the body back to this node; that back-edge is what \
+                makes the section repeat. The current pass number is readable anywhere in the \
+                graph as \"=nodes.<loop id>.iteration\"."
+                .to_string(),
+            config_fields: vec![
+                ConfigField::optional(
+                    "max_iterations",
+                    "number",
+                    "How many times the body may run before the loop stops (default 25). Always \
+                     finite — a loop with no cap is the runaway case this node exists to prevent.",
+                ),
+                ConfigField::optional(
+                    "on_exceeded",
+                    "enum",
+                    "What happens at the cap: \"error\" (default) fails the run, naming this \
+                     node; \"continue\" stops looping and emits on `done` so downstream still \
+                     runs with the last pass's items.",
+                )
+                .with_enum(&["error", "continue"]),
+                ConfigField::optional(
+                    "condition",
+                    "\"=expr\"",
+                    "Optional early exit. While it resolves truthy the loop continues; the first \
+                     falsey result routes to `done` without consuming an iteration. Checked \
+                     before the cap, so a loop that finishes on its own terms never errors.",
+                ),
+            ],
+            ports: PortSpec::new(&["main"], &["body", "done"]),
+            example: json!({
+                "id": "retry_until_clean", "kind": "loop", "name": "Until tests pass",
+                "config": {
+                    "max_iterations": 5,
+                    "on_exceeded": "continue",
+                    "condition": "=item.tests_failing"
+                }
+            }),
+            notes: vec![
+                "The body must route back to this node or it runs once and stops — the \
+                 back-edge is the loop."
+                    .to_string(),
+                "A `merge` node inside the loop body deadlocks it: a merge is a fan-in barrier \
+                 that waits for every predecessor, which on a second pass never all arrive."
+                    .to_string(),
+            ],
+        },
         "transform" => NodeKindContract {
             kind: "transform".to_string(),
             summary: "Merge computed keys onto each item.".to_string(),
@@ -456,20 +598,221 @@ pub fn contract_for(kind: &str) -> Option<NodeKindContract> {
                     "string",
                     "The id of a saved workflow to run as the child. Provide this OR workflow.",
                 ),
+                ConfigField::optional(
+                    "inputs",
+                    "object",
+                    "Values for the child's declared workflow inputs, by name. Each value is \
+                     resolved against THIS node's scope, so a parent can forward its own inputs \
+                     (\"=inputs.repo\") or an upstream node's output. Under \
+                     execution=\"per_item\" the scope is the current element, so each child in a \
+                     fan-out gets values from its own item (\"=item.name\").",
+                ),
             ],
             ports: PortSpec::linear(),
             example: json!({
                 "id": "sub", "kind": "sub_workflow", "name": "Enrich",
-                "config": { "workflow_id": "flow-123" }
+                "config": { "workflow_id": "flow-123", "inputs": { "repo": "=inputs.repo" } }
             }),
             notes: vec![
                 "Exactly one of workflow / workflow_id — having both or neither is a hard reject."
+                    .to_string(),
+                "The child validates config.inputs against its OWN declarations, so omitting a \
+                 required child input fails before the child executes anything."
+                    .to_string(),
+            ],
+        },
+        "memory" => NodeKindContract {
+            kind: "memory".to_string(),
+            summary: "Reads or writes host-managed memory via the MemoryProvider capability."
+                .to_string(),
+            description: "config.operation selects recall / search (query lookups), flavour \
+                (a named ask/persona/style profile by slug), people (a people lookup), or \
+                remember / forget (writes). What memory actually contains, how recall ranks \
+                results, and what a flavour/people entry looks like are host concerns — the \
+                engine only shapes the call and envelopes the response."
+                .to_string(),
+            config_fields: vec![
+                ConfigField::required(
+                    "operation",
+                    "enum",
+                    "Which memory action this node performs.",
+                )
+                .with_enum(&[
+                    "recall", "search", "flavour", "people", "remember", "forget",
+                ]),
+                ConfigField::optional(
+                    "scope",
+                    "enum",
+                    "Required for recall / remember / forget. Host-defined: \"user\" (the \
+                     caller's durable, cross-flow memory — READ-ONLY from a workflow), \"flow\" \
+                     (this flow's own memory — the only scope remember/forget may target), or \
+                     \"flows\" (cross-flow read access — read-only).",
+                )
+                .with_enum(&["user", "flow", "flows"]),
+                ConfigField::optional(
+                    "query",
+                    "\"=expr\"",
+                    "Required for recall / search (optional for people). The lookup query.",
+                ),
+                ConfigField::optional(
+                    "flavour",
+                    "string",
+                    "Required for the flavour operation: the ask/persona/style slug to look up, \
+                     e.g. \"email-tone\".",
+                ),
+                ConfigField::optional(
+                    "key",
+                    "\"=expr\"",
+                    "Required for remember / forget: the memory key to write or delete.",
+                ),
+                ConfigField::optional(
+                    "value",
+                    "\"=expr\"",
+                    "Required for remember: the value to persist under key.",
+                ),
+                ConfigField::optional(
+                    "limit",
+                    "number",
+                    "Optional cap on the number of results for recall / search.",
+                ),
+                ConfigField::optional(
+                    "min_score",
+                    "number",
+                    "Optional relevance-score floor for recall / search results.",
+                ),
+            ],
+            ports: PortSpec::linear(),
+            example: json!({
+                "id": "check_seen", "kind": "memory", "name": "Already published?",
+                "config": { "operation": "recall", "scope": "flow", "query": "=item.title" }
+            }),
+            notes: vec![
+                "HARD SECURITY RULE: a remember/forget node with scope \"user\" is a hard reject \
+                 at validate time — writes may only target scope \"flow\". This is enforced \
+                 structurally so an author (or an LLM authoring a graph) cannot plant or erase \
+                 durable facts about the user via workflow content."
+                    .to_string(),
+                "Default execution is per_item (like tool_call), so a split_out fan-out runs one \
+                 memory call per item — set execution: \"once\" to run a single call against the \
+                 first item instead."
+                    .to_string(),
+            ],
+        },
+        "dedup" => NodeKindContract {
+            kind: "dedup".to_string(),
+            summary: "Commit-on-success exactly-once filter: drops items whose key was already \
+                      committed."
+                .to_string(),
+            description: "config.key is an \"=\"-expression resolved per item (e.g. \
+                \"=item.id\"). An item whose resolved key is already in the host's COMMITTED set \
+                (a prior successful run) is dropped; an unseen key passes the item through and \
+                records the key in the TENTATIVE set. This node never commits — the host commits \
+                tentative keys into committed when the run succeeds, and releases (discards) \
+                tentative keys when the run fails, via `StateStore`. Pairs with a host-side \
+                commit-on-success subscriber; see the engine's `dedup` module docs for the exact \
+                StateStore key layout."
+                .to_string(),
+            config_fields: vec![ConfigField::required(
+                "key",
+                "\"=expr\"",
+                "The per-item dedup key expression, e.g. \"=item.id\". A key that resolves to \
+                 null, missing, or an empty string fails OPEN: the item passes through and is \
+                 NOT recorded (never silently dropped for a missing key).",
+            )],
+            ports: PortSpec::linear(),
+            example: json!({
+                "id": "once_only", "kind": "dedup", "name": "Skip already-published",
+                "config": { "key": "=item.id" }
+            }),
+            notes: vec![
+                "This node only FILTERS and stages tentative keys — it never writes to the \
+                 committed set itself. A workflow author does not need to (and cannot) commit \
+                 keys directly; the host commits/releases tentative keys based on overall run \
+                 outcome."
+                    .to_string(),
+                "A null/missing/empty resolved key always passes through unrecorded (fail-open) \
+                 rather than being treated as a match or a hard error."
+                    .to_string(),
+                "Within a single run, two input items that resolve to the SAME key: only the \
+                 first passes; later duplicates are dropped, matching the committed-key rule."
                     .to_string(),
             ],
         },
         _ => return None,
     };
-    Some(c)
+    Some(with_fan_out_fields(c))
+}
+
+/// The node kinds that map over their input, and whether they do so by default.
+///
+/// `true` means the kind is `per_item` unless told otherwise, so its fan-out
+/// knobs apply without an explicit `execution`.
+const FAN_OUT_KINDS: [(&str, bool); 5] = [
+    ("agent", false),
+    ("tool_call", true),
+    ("http_request", true),
+    ("memory", true),
+    ("sub_workflow", false),
+];
+
+/// Appends the shared per-item fan-out contract (`execution`, `concurrency`,
+/// `on_item_error`) to the kinds that support it.
+///
+/// These three keys behave identically on every mapping kind, so they are
+/// described once here rather than copied into five contracts that would then
+/// drift. Kinds that cannot map over their input are returned untouched — and
+/// [`crate::validate`] rejects the keys there, so the contract and the validator
+/// agree on exactly which kinds fan out.
+fn with_fan_out_fields(mut c: NodeKindContract) -> NodeKindContract {
+    let Some((_, per_item_by_default)) = FAN_OUT_KINDS.iter().find(|(k, _)| *k == c.kind) else {
+        return c;
+    };
+    let default_mode = if *per_item_by_default {
+        "per_item"
+    } else {
+        "once"
+    };
+
+    c.config_fields.push(
+        ConfigField::optional(
+            "execution",
+            "enum",
+            &format!(
+                "Whether this node runs once for the whole input array or once per input item. \
+                 Defaults to \"{default_mode}\" for this kind."
+            ),
+        )
+        .with_enum(&["once", "per_item"]),
+    );
+    c.config_fields.push(ConfigField::optional(
+        "concurrency",
+        "integer | \"all\"",
+        "With execution \"per_item\", how many items run at a time: 1 (the default) is strictly \
+         sequential, n runs at most n at once, and 0 or \"all\" runs every item at once. This is \
+         the fan-out dial — use it to turn an array of work into parallel work. Ignored (and \
+         rejected by validation) unless the node runs per item.",
+    ));
+    c.config_fields.push(
+        ConfigField::optional(
+            "on_item_error",
+            "enum",
+            "What a failing item does to the batch. Defaults to \"collect\" when the node fans \
+             out (concurrency other than 1) and \"fail_fast\" when it runs sequentially. \
+             \"collect\" emits an error item — {json:{error,failed:true}} — in that item's slot so \
+             the node still returns one output per input and a downstream condition can branch on \
+             =item.json.failed. \"fail_fast\" fails the node on the first error in input order, \
+             handing it to the node's on_error/retry policy. \"skip\" drops failed items, so the \
+             output array may be shorter than the input.",
+        )
+        .with_enum(&["collect", "fail_fast", "skip"]),
+    );
+
+    c.notes.push(
+        "Output items are always returned in INPUT order with paired_item set, however the \
+         concurrency is set — a fan-out never reorders data."
+            .to_string(),
+    );
+    c
 }
 
 #[cfg(test)]
@@ -499,7 +842,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(all_contracts().len(), 12);
+        assert_eq!(all_contracts().len(), 16);
     }
 
     #[test]
@@ -526,6 +869,76 @@ mod tests {
     }
 
     #[test]
+    fn node_kinds_has_16_entries_including_shell_memory_dedup_and_loop() {
+        assert_eq!(NODE_KINDS.len(), 16);
+        assert!(NODE_KINDS.contains(&"shell"));
+        assert!(NODE_KINDS.contains(&"memory"));
+        assert!(NODE_KINDS.contains(&"dedup"));
+        assert!(NODE_KINDS.contains(&"loop"));
+        // The PR's shell node precedes the three sequenced-last node kinds.
+        assert_eq!(NODE_KINDS[13], "memory");
+        assert_eq!(NODE_KINDS[14], "dedup");
+        assert_eq!(NODE_KINDS[15], "loop");
+    }
+
+    #[test]
+    fn memory_contract_documents_the_six_operations_and_scope_enum() {
+        let c = contract_for("memory").expect("memory contract exists");
+        let operation_field = c
+            .config_fields
+            .iter()
+            .find(|f| f.name == "operation")
+            .expect("memory contract declares `operation`");
+        assert!(operation_field.required);
+        assert_eq!(
+            operation_field.enum_values,
+            Some(
+                vec![
+                    "recall", "search", "flavour", "people", "remember", "forget"
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+            )
+        );
+        let scope_field = c
+            .config_fields
+            .iter()
+            .find(|f| f.name == "scope")
+            .expect("memory contract declares `scope`");
+        assert_eq!(
+            scope_field.enum_values,
+            Some(
+                vec!["user", "flow", "flows"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            )
+        );
+        assert!(
+            c.notes.iter().any(|n| n.contains("HARD SECURITY RULE")),
+            "memory contract must document the user-scope write rejection"
+        );
+    }
+
+    #[test]
+    fn dedup_contract_requires_key_and_documents_fail_open_behavior() {
+        let c = contract_for("dedup").expect("dedup contract exists");
+        let key_field = c
+            .config_fields
+            .iter()
+            .find(|f| f.name == "key")
+            .expect("dedup contract declares `key`");
+        assert!(key_field.required);
+        assert_eq!(key_field.value_type, "\"=expr\"");
+        assert!(
+            c.notes.iter().any(|n| n.contains("fail-open")),
+            "dedup contract must document the null-key fail-open behavior"
+        );
+        assert_eq!(c.ports, PortSpec::linear());
+    }
+
+    #[test]
     fn with_note_appends_a_host_caveat() {
         let c = contract_for("tool_call").unwrap().with_note("host says hi");
         assert_eq!(c.notes.last().map(String::as_str), Some("host says hi"));
@@ -538,5 +951,64 @@ mod tests {
             let back: NodeKindContract = serde_json::from_value(json).unwrap();
             assert_eq!(c, back);
         }
+    }
+}
+
+#[cfg(test)]
+mod fan_out_contract_tests {
+    use super::*;
+
+    #[test]
+    fn every_mapping_kind_advertises_the_fan_out_knobs() {
+        for (kind, _) in FAN_OUT_KINDS {
+            let c = contract_for(kind).expect("contract");
+            for field in ["execution", "concurrency", "on_item_error"] {
+                assert!(
+                    c.config_fields.iter().any(|f| f.name == field),
+                    "{kind} should advertise `{field}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kinds_that_cannot_map_do_not_advertise_them() {
+        // The contract and the validator must agree on which kinds fan out;
+        // advertising a key that validation rejects would be worse than silence.
+        for kind in [
+            "trigger",
+            "condition",
+            "switch",
+            "merge",
+            "transform",
+            "code",
+        ] {
+            let c = contract_for(kind).expect("contract");
+            assert!(
+                !c.config_fields.iter().any(|f| f.name == "concurrency"),
+                "{kind} must not advertise `concurrency`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_execution_default_is_stated_per_kind() {
+        let doc = |kind: &str| {
+            contract_for(kind)
+                .expect("contract")
+                .config_fields
+                .iter()
+                .find(|f| f.name == "execution")
+                .expect("execution field")
+                .description
+                .clone()
+        };
+        // An author needs to know that `agent` must opt in but `tool_call` need not.
+        assert!(doc("agent").contains("\"once\""), "{}", doc("agent"));
+        assert!(
+            doc("tool_call").contains("\"per_item\""),
+            "{}",
+            doc("tool_call")
+        );
     }
 }

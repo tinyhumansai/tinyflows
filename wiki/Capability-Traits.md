@@ -19,6 +19,7 @@ examples without any real backend.
 | `ToolInvoker` | `tool_call` | Invokes a named integration action (`slug` + `args`), returning its output. |
 | `HttpClient` | `http_request` | Issues an outbound HTTP request described by JSON, returning the response. |
 | `CodeRunner` | `code` | Executes sandboxed user code (`CodeLanguage::JavaScript` / `Python`) with a JSON input. |
+| `ShellRunner` | `shell` | Runs a shell script (inline or by path) with a working directory and environment, returning its exit code, stdout, and stderr. Optional: `None` refuses `shell` nodes. |
 | `StateStore` | resumable / stateful workflows | Durable key/value state (`load` / `store`) for a run. |
 
 ## Connection references

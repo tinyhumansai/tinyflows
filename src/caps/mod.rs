@@ -7,6 +7,7 @@
 
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
+pub mod shell;
 
 use std::sync::Arc;
 
@@ -14,6 +15,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::Result;
+
+pub use self::shell::{ShellInterpreter, ShellOutcome, ShellRequest, ShellRunner, ShellScript};
 
 /// A chat / LLM provider used by `agent` and `output_parser` nodes.
 #[async_trait]
@@ -55,6 +58,94 @@ pub trait AgentRunner: Send + Sync {
     /// when `agent_ref` is unknown or the agent run fails.
     async fn run_agent(&self, agent_ref: &str, request: Value, conn: Option<&str>)
     -> Result<Value>;
+}
+
+/// Host-injected memory access for `memory` nodes.
+///
+/// A `memory` node is a **delivery surface** onto whatever durable memory store
+/// the host already maintains — it exposes no capability of its own. Six config
+/// `operation`s map onto five trait methods:
+///
+/// - `recall` and `search` both call [`recall`](Self::recall); `search` passes
+///   `opts.operation == "search"` (alongside the same `query`) so a host that
+///   distinguishes semantic recall from full-text search can branch on it, but
+///   a host that treats them identically may ignore the distinction entirely.
+///   This keeps the trait small (one read-with-a-query method rather than two
+///   near-duplicates) while still letting `opts` carry the distinction through
+///   to the host.
+/// - `flavour` and `people` are read-only lookups with no free-text `query`
+///   requirement, each with its own method.
+/// - `remember` and `forget` are the two write operations.
+///
+/// `scope` is an opaque, host-defined string (the model layer never interprets
+/// it) but the wire contract in practice is `"user"` (the caller's durable,
+/// cross-flow memory — read-only from a workflow), `"flow"` (this flow's own
+/// memory — the only scope `remember`/`forget` may target), and `"flows"`
+/// (cross-flow read access — read-only). [`crate::validate`] enforces the hard
+/// invariant that a `remember`/`forget` operation may never carry
+/// `scope: "user"`, structurally, before a run ever starts — that boundary is
+/// NOT re-checked here, so a host implementing this trait directly (bypassing
+/// the node + validator) must not treat that check as already done.
+///
+/// This capability is **optional**, matching the [`AgentRunner`] precedent:
+/// hosts without a memory store leave [`Capabilities::memory`] `None`, and a
+/// `memory` node then fails at run time with a capability error rather than
+/// silently no-opping (there is no meaningful fallback for a read/write memory
+/// call the way `agent` falls back to a bare completion).
+#[async_trait]
+pub trait MemoryProvider: Send + Sync {
+    /// Recalls memory matching `query` within `scope`.
+    ///
+    /// Backs both the `recall` and `search` node operations; `opts` carries
+    /// `"operation"` (`"recall"` or `"search"`) plus any of the node's optional
+    /// `limit` / `min_score` config, each present only when the author set it.
+    /// The return shape is host-defined — typically an object with a `results`
+    /// (or similar) array — and is passed through to the node's output
+    /// envelope unchanged.
+    ///
+    /// # Errors
+    /// Returns an [`EngineError::Capability`](crate::error::EngineError::Capability)
+    /// when the scope is unknown to the host or the lookup fails.
+    async fn recall(&self, scope: &str, query: &str, opts: Value) -> Result<Value>;
+
+    /// Looks up a named "flavour" (a host-defined ask/persona/style profile,
+    /// e.g. `"email-tone"`) by its slug.
+    ///
+    /// # Errors
+    /// Returns an [`EngineError::Capability`](crate::error::EngineError::Capability)
+    /// when `slug` is unknown to the host.
+    async fn flavour(&self, slug: &str) -> Result<Value>;
+
+    /// Looks up people the host's memory knows about, optionally narrowed by a
+    /// free-text `query`; `None` returns the host's default listing.
+    ///
+    /// # Errors
+    /// Returns an [`EngineError::Capability`](crate::error::EngineError::Capability)
+    /// when the lookup fails.
+    async fn people(&self, query: Option<&str>) -> Result<Value>;
+
+    /// Persists `value` under `key` within `scope`.
+    ///
+    /// Callers (the `memory` node, via the validator) must never pass
+    /// `scope: "user"` here — see the trait-level docs. `value` is caller
+    /// (workflow-author / upstream node) controlled; hosts should apply the
+    /// same taint/provenance handling they use for any externally-influenced
+    /// write.
+    ///
+    /// # Errors
+    /// Returns an [`EngineError::Capability`](crate::error::EngineError::Capability)
+    /// when the scope is unknown to the host or the write fails.
+    async fn remember(&self, scope: &str, key: &str, value: Value) -> Result<()>;
+
+    /// Deletes the memory stored under `key` within `scope`.
+    ///
+    /// Same `scope: "user"` restriction as [`remember`](Self::remember).
+    /// Deleting an already-absent `key` is not an error.
+    ///
+    /// # Errors
+    /// Returns an [`EngineError::Capability`](crate::error::EngineError::Capability)
+    /// when the scope is unknown to the host or the delete fails.
+    async fn forget(&self, scope: &str, key: &str) -> Result<()>;
 }
 
 /// Invokes a named integration tool (e.g. a curated Composio action).
@@ -126,9 +217,11 @@ pub trait StateStore: Send + Sync {
 /// The bundle of capabilities handed to the engine for a run.
 ///
 /// Construct one per run from the host's concrete implementations. It carries
-/// all five host-injected capabilities: the [`LlmProvider`], [`ToolInvoker`],
-/// [`HttpClient`], [`CodeRunner`], and [`StateStore`]. Nodes reach each one
-/// through `ctx.caps` during execution.
+/// every host-injected capability: the always-present [`LlmProvider`],
+/// [`ToolInvoker`], [`HttpClient`], [`CodeRunner`], [`StateStore`], and
+/// [`WorkflowResolver`], plus the optional [`AgentRunner`] and
+/// [`MemoryProvider`]. Nodes reach each one through `ctx.caps` during
+/// execution.
 #[derive(Clone)]
 pub struct Capabilities {
     /// LLM provider for agent / output-parser nodes.
@@ -156,6 +249,16 @@ pub struct Capabilities {
     /// [`LlmProvider`] completion. `None` on hosts without an agent registry, in
     /// which case `agent` nodes always use [`LlmProvider`].
     pub agent: Option<Arc<dyn AgentRunner>>,
+    /// Optional runner for `shell` nodes. `None` on hosts that do not permit
+    /// workflows to execute shell scripts, in which case a `shell` node fails
+    /// with a capability error rather than silently doing nothing.
+    pub shell: Option<Arc<dyn ShellRunner>>,
+    /// Optional host-managed memory access for `memory` nodes. `None` on hosts
+    /// without a memory store, in which case a `memory` node fails at run time
+    /// with a capability error (there is no meaningful no-op fallback for a
+    /// read/write memory call). See [`MemoryProvider`] for the `scope`
+    /// contract and the `remember`/`forget` write restriction.
+    pub memory: Option<Arc<dyn MemoryProvider>>,
 }
 
 #[cfg(test)]
@@ -190,6 +293,10 @@ mod tests {
         assert!(Arc::ptr_eq(&caps.code, &clone.code));
         assert!(Arc::ptr_eq(&caps.state, &clone.state));
         assert!(Arc::ptr_eq(&caps.resolver, &clone.resolver));
+        assert!(Arc::ptr_eq(
+            caps.memory.as_ref().expect("mock wires memory"),
+            clone.memory.as_ref().expect("mock wires memory")
+        ));
     }
 
     #[tokio::test]

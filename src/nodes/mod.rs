@@ -8,6 +8,7 @@
 
 pub mod control_flow;
 pub mod integration;
+pub(crate) mod map;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -56,7 +57,24 @@ pub struct NodeContext<'a> {
 ///   `=.nodes["fetch_recipient"].items[0].email` — including non-adjacent
 ///   (grandparent) nodes and specific predecessors of a fan-in node. Node
 ///   **id** is the addressing key (stable across renames); names are not
-///   indexed.
+///   indexed. A node that recorded slot state about itself also exposes it
+///   here — currently only a `loop` node's `iteration`, so
+///   `=nodes.my_loop.iteration` is the current pass number;
+/// - `inputs` — the workflow's resolved declared inputs, keyed by name (see
+///   [`crate::model::WorkflowInput`]), so a config field reads
+///   `=inputs.repo`. One entry per declaration with defaults already applied,
+///   so a binding to a declared name is never *absent* — at worst it is the
+///   explicit `null` of an optional input nobody supplied.
+///
+///   **Write `.inputs.<name>` inside a real jq program.** `=inputs.repo` works
+///   because a simple dotted path is walked directly, never compiled. Anything
+///   jq actually compiles — a concatenation, a conditional, a pipe — resolves
+///   bare `inputs` as jq's own `inputs` *builtin* (which reads further program
+///   inputs) rather than this scope key, and the expression quietly yields
+///   nothing instead of erroring. The leading dot forces the object lookup:
+///   `="Review " + .inputs.repo` is right, `="Review " + inputs.repo` is not.
+///   No other scope key has this problem; `inputs` is the one name jq already
+///   uses.
 #[must_use]
 pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
     let item = ctx
@@ -74,11 +92,33 @@ pub(crate) fn expr_scope(ctx: &NodeContext) -> Value {
 #[must_use]
 pub(crate) fn expr_scope_for(ctx: &NodeContext, item: Value) -> Value {
     let items: Vec<Value> = ctx.input.iter().map(|i| i.json.clone()).collect();
+    build_expr_scope(item, items, ctx.run, nodes_scope(ctx.nodes))
+}
+
+/// THE single constructor for an expression scope — every `=`-expression in the
+/// crate is evaluated against an object built here.
+///
+/// Takes an already-projected `nodes` scope so a per-item loop can project it
+/// once and reuse it across the batch (see the `transform` node), while callers
+/// with a [`NodeContext`] go through [`expr_scope`] / [`expr_scope_for`].
+///
+/// Keeping this in one place is load-bearing, not tidiness: a node that
+/// hand-rolls the object silently loses whatever key it was written before, and
+/// the binding fails as a quiet `null` rather than an error. Add a key here and
+/// every node sees it.
+#[must_use]
+pub(crate) fn build_expr_scope(item: Value, items: Vec<Value>, run: &Value, nodes: Value) -> Value {
     serde_json::json!({
         "item": item,
         "items": items,
-        "run": ctx.run,
-        "nodes": nodes_scope(ctx.nodes),
+        "run": run,
+        "nodes": nodes,
+        // Lifted out of `run` rather than carried separately on `NodeContext`:
+        // the engine seeds the resolved declared inputs at `run.inputs`, and
+        // this promotes them to a top-level key so authors write the short
+        // `=inputs.<name>` while jq programs walking `run` still find them.
+        // `Null` when the run predates inputs or the graph declares none.
+        "inputs": run.get("inputs").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -91,6 +131,11 @@ pub(crate) fn expr_scope_for(ctx: &NodeContext, item: Value) -> Value {
 ///   `paired_item`). This is the n8n-style default for `tool_call` /
 ///   `http_request`, so a fan-out (`split_out` → node) actually runs per element
 ///   instead of silently dropping all but the first.
+///
+/// `PerItem` says *that* the node maps over its input; [`map`] says **how many
+/// items run at a time** (`config.concurrency`) and what a failing item does to
+/// the batch (`config.on_item_error`). Concurrency defaults to `1`, so a node
+/// that does not opt in keeps the sequential ordering and timing it always had.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutionMode {
     /// Single invocation against the first item.
@@ -130,10 +175,15 @@ pub(crate) fn nodes_scope(nodes: &Value) -> Value {
                 .map(|item| item.get("json").cloned().unwrap_or(Value::Null))
                 .collect();
             let first = jsons.first().cloned().unwrap_or(Value::Null);
-            scope.insert(
-                id.clone(),
-                serde_json::json!({ "item": first, "items": jsons }),
-            );
+            let mut entry = serde_json::json!({ "item": first, "items": jsons });
+            // Slot state a node recorded about itself via `NodeOutput::meta`,
+            // promoted so expressions can read it the same way they read items.
+            // Currently just the `loop` node's pass counter, which is what makes
+            // `=nodes.<loop id>.iteration` resolve from anywhere in the graph.
+            if let Some(iteration) = slot.get("iteration") {
+                entry["iteration"] = iteration.clone();
+            }
+            scope.insert(id.clone(), entry);
         }
     }
     Value::Object(scope)
@@ -198,6 +248,20 @@ pub struct NodeOutput {
     /// point at the exact unresolved wiring; failure policy stays with
     /// routing/`on_error`.
     pub diagnostics: Vec<crate::expr::NullResolution>,
+    /// Extra keys to record alongside `items`/`port` in this node's run-state
+    /// slot, for a node that must remember something across its own
+    /// activations. `None` writes nothing.
+    ///
+    /// The only current user is [`NodeKind::Loop`](crate::model::NodeKind::Loop),
+    /// which keeps its `iteration` count here. Slot state is the right home for
+    /// it because the run state is what gets checkpointed, so an iteration
+    /// count rides resume for free and is addressable from expressions as
+    /// `=nodes.<id>.iteration` — whereas a counter held in the executor would
+    /// be lost the moment the run paused, and a counter threaded through items
+    /// would be destroyed by any node in the body that reshapes them.
+    ///
+    /// Must be a JSON object; anything else is ignored when the slot is built.
+    pub meta: Option<Value>,
 }
 
 impl NodeOutput {
@@ -231,6 +295,14 @@ impl NodeOutput {
     #[must_use]
     pub fn with_diagnostics(mut self, diagnostics: Vec<crate::expr::NullResolution>) -> Self {
         self.diagnostics = diagnostics;
+        self
+    }
+
+    /// Attaches extra run-state slot keys to this output (see
+    /// [`NodeOutput::meta`]).
+    #[must_use]
+    pub fn with_meta(mut self, meta: Value) -> Self {
+        self.meta = Some(meta);
         self
     }
 }
@@ -267,13 +339,17 @@ pub(crate) fn executor_for(kind: &NodeKind) -> Box<dyn NodeExecutor> {
         NodeKind::ToolCall => Box::new(integration::ToolCallNode),
         NodeKind::HttpRequest => Box::new(integration::HttpRequestNode),
         NodeKind::Code => Box::new(integration::CodeNode),
+        NodeKind::Shell => Box::new(integration::ShellNode),
         NodeKind::OutputParser => Box::new(integration::OutputParserNode),
         NodeKind::SubWorkflow => Box::new(integration::SubWorkflowNode),
+        NodeKind::Memory => Box::new(integration::MemoryNode),
         NodeKind::Condition => Box::new(control_flow::ConditionNode),
         NodeKind::Switch => Box::new(control_flow::SwitchNode),
         NodeKind::Merge => Box::new(control_flow::MergeNode),
         NodeKind::SplitOut => Box::new(control_flow::SplitOutNode),
         NodeKind::Transform => Box::new(control_flow::TransformNode),
+        NodeKind::Dedup => Box::new(control_flow::DedupNode),
+        NodeKind::Loop => Box::new(control_flow::LoopNode),
     }
 }
 
@@ -288,8 +364,8 @@ mod tests {
     /// Every [`NodeKind`] variant, so the coverage below stays exhaustive.
     fn all_kinds() -> Vec<NodeKind> {
         use NodeKind::{
-            Agent, Code, Condition, HttpRequest, Merge, OutputParser, SplitOut, SubWorkflow,
-            Switch, ToolCall, Transform, Trigger,
+            Agent, Code, Condition, Dedup, HttpRequest, Loop, Memory, Merge, OutputParser, Shell,
+            SplitOut, SubWorkflow, Switch, ToolCall, Transform, Trigger,
         };
         vec![
             Trigger,
@@ -297,6 +373,7 @@ mod tests {
             ToolCall,
             HttpRequest,
             Code,
+            Shell,
             Condition,
             Switch,
             Merge,
@@ -304,6 +381,9 @@ mod tests {
             Transform,
             OutputParser,
             SubWorkflow,
+            Memory,
+            Dedup,
+            Loop,
         ]
     }
 
@@ -311,9 +391,14 @@ mod tests {
     fn config_for(kind: &NodeKind) -> Value {
         match kind {
             NodeKind::ToolCall => json!({ "slug": "demo" }),
+            NodeKind::Shell => json!({ "source": "printf ok" }),
             NodeKind::SubWorkflow => json!({
                 "workflow": { "nodes": [{ "id": "ct", "kind": "trigger", "name": "ct" }], "edges": [] }
             }),
+            // `people` needs no `scope`/`query`, so it runs against the
+            // default mock capabilities (which wire a `MemoryProvider`) with
+            // the minimal config every other kind gets via `Value::Null`.
+            NodeKind::Memory => json!({ "operation": "people" }),
             _ => Value::Null,
         }
     }

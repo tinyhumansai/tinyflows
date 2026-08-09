@@ -15,9 +15,17 @@
 //!
 //! Both fields are `#[serde(default)]`, so definitions persisted before they
 //! existed still load. Load-time upgrades are performed by [`crate::migrate`].
+//!
+//! ## Inputs
+//!
+//! A graph also declares its parameters — see [`WorkflowInput`] and
+//! [`resolve_inputs`]. They are the workflow's public signature, validated
+//! before a run starts and addressed from node config as `=inputs.<name>`.
 
+mod inputs;
 mod node_kind;
 
+pub use inputs::{InputError, InputType, WorkflowInput, is_valid_input_name, resolve_inputs};
 pub use node_kind::{NodeKind, TriggerKind};
 
 use serde::{Deserialize, Serialize};
@@ -140,6 +148,14 @@ pub struct WorkflowGraph {
     /// Human-readable workflow name.
     #[serde(default)]
     pub name: String,
+    /// The workflow's declared parameters — its public signature. Empty for
+    /// graphs authored before inputs existed, and for graphs that take none.
+    ///
+    /// Values supplied by a caller are validated against these declarations
+    /// before the run starts (see [`resolve_inputs`]) and exposed to node
+    /// configuration as `=inputs.<name>`.
+    #[serde(default)]
+    pub inputs: Vec<WorkflowInput>,
     /// The nodes in the graph.
     #[serde(default)]
     pub nodes: Vec<Node>,
@@ -156,6 +172,7 @@ impl Default for WorkflowGraph {
             schema_version: CURRENT_SCHEMA_VERSION,
             id: None,
             name: String::new(),
+            inputs: Vec::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
         }
@@ -249,6 +266,12 @@ mod tests {
             schema_version: CURRENT_SCHEMA_VERSION,
             id: Some("wf_1".to_string()),
             name: "demo".to_string(),
+            inputs: vec![
+                WorkflowInput::new("repo", InputType::String).required(),
+                WorkflowInput::new("depth", InputType::Number)
+                    .with_default(serde_json::json!(3))
+                    .with_description("How deep to recurse"),
+            ],
             nodes: vec![node("t", NodeKind::Trigger), node("a", NodeKind::Agent)],
             edges: vec![Edge {
                 from_node: "t".to_string(),
@@ -372,11 +395,34 @@ mod tests {
     }
 
     #[test]
+    fn graphs_authored_before_inputs_existed_still_load() {
+        let graph: WorkflowGraph = serde_json::from_str(
+            r#"{"name":"legacy","nodes":[{"id":"t","kind":"trigger","name":"start"}],"edges":[]}"#,
+        )
+        .expect("deserialize");
+        assert!(graph.inputs.is_empty());
+    }
+
+    #[test]
+    fn declared_inputs_survive_a_json_round_trip() {
+        let graph = WorkflowGraph {
+            inputs: vec![WorkflowInput::new("repo", InputType::String).required()],
+            nodes: vec![node("t", NodeKind::Trigger)],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&graph).expect("serialize");
+        assert!(json.contains(r#""inputs":[{"name":"repo","type":"string""#));
+        let back: WorkflowGraph = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, graph);
+    }
+
+    #[test]
     fn round_trip_preserves_version_fields() {
         let graph = WorkflowGraph {
             schema_version: CURRENT_SCHEMA_VERSION,
             id: Some("wf_1".to_string()),
             name: "demo".to_string(),
+            inputs: Vec::new(),
             nodes: vec![Node {
                 id: "t".to_string(),
                 kind: NodeKind::Trigger,

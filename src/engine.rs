@@ -4,8 +4,11 @@
 //! [`WorkflowGraph`](crate::model::WorkflowGraph) — capturing the run's host
 //! [`Capabilities`] in each node handler — then drives it and returns the final
 //! run state. State is a [`serde_json::Value`] laid out as
-//! `{ "run": { "trigger": … }, "nodes": { "<id>": { "items": [ … ] } } }`;
-//! a merge reducer folds each node's item output into that map.
+//! `{ "run": { "trigger": …, "inputs": { … } }, "nodes": { "<id>": { "items": [ … ] } } }`;
+//! a merge reducer folds each node's item output into that map. `run.trigger` is
+//! the free-form payload that fired the run; `run.inputs` is the workflow's
+//! resolved declared inputs (see [`RunInput`]), which node config addresses as
+//! `=inputs.<name>`.
 //!
 //! Lowering covers the **linear** path (one successor per node), **conditional
 //! branching** (successors on distinct ports), **parallel fan-out** (several
@@ -98,6 +101,67 @@ impl CancellationToken {
     }
 }
 
+/// What a caller hands a run: the trigger payload plus values for the
+/// workflow's declared inputs.
+///
+/// The two are deliberately separate channels. The **trigger payload** is
+/// whatever fired the run — a webhook body, a chat message, an empty object for
+/// a manual start — and is free-form by nature. **Inputs** are the workflow's
+/// declared, typed parameters (see [`crate::model::WorkflowInput`]); they are
+/// validated against the graph's declarations before anything executes.
+///
+/// Every entry point takes `impl Into<RunInput>`, and [`Value`] converts, so a
+/// caller with no declared inputs passes a bare payload exactly as before:
+///
+/// ```
+/// use tinyflows::engine::RunInput;
+/// use serde_json::json;
+///
+/// // Trigger payload only — the historical form.
+/// let plain: RunInput = json!({"from": "webhook"}).into();
+/// assert!(plain.inputs.is_empty());
+///
+/// // With declared input values.
+/// let mut values = serde_json::Map::new();
+/// values.insert("repo".into(), json!("acme/api"));
+/// let parameterized = RunInput::new(json!({})).with_inputs(values);
+/// assert_eq!(parameterized.inputs["repo"], json!("acme/api"));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct RunInput {
+    /// The trigger payload, seeded as the trigger node's item and `run.trigger`.
+    pub trigger: Value,
+    /// Caller-supplied values for the workflow's declared inputs, by name.
+    /// Validated by [`crate::model::resolve_inputs`] before the run starts.
+    pub inputs: Map<String, Value>,
+}
+
+impl RunInput {
+    /// A run carrying only a trigger payload and no declared-input values.
+    #[must_use]
+    pub fn new(trigger: Value) -> Self {
+        Self {
+            trigger,
+            inputs: Map::new(),
+        }
+    }
+
+    /// Attaches values for the workflow's declared inputs.
+    #[must_use]
+    pub fn with_inputs(mut self, inputs: Map<String, Value>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+}
+
+impl From<Value> for RunInput {
+    /// Treats a bare JSON value as a trigger payload with no declared inputs —
+    /// what every caller meant before inputs existed.
+    fn from(trigger: Value) -> Self {
+        Self::new(trigger)
+    }
+}
+
 /// The result of a completed workflow run.
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
@@ -177,9 +241,27 @@ fn merge(base: &mut Value, update: Value) {
 /// no-op, while preventing an untaken conditional branch (e.g. a `condition` that
 /// took `"true"`) from leaking its data into a fan-in wired to a different port.
 fn collect_input(state: &Value, incoming: &[(String, String)]) -> Vec<Item> {
+    collect_input_since(state, incoming, None)
+}
+
+/// Collects matching inputs, optionally ignoring predecessor slots older than
+/// `min_step`. Loop re-entry uses this to avoid replaying an alternate return
+/// arm whose slot was written by an earlier iteration.
+fn collect_input_since(
+    state: &Value,
+    incoming: &[(String, String)],
+    min_step: Option<u64>,
+) -> Vec<Item> {
     let mut items = Vec::new();
     for (pred, from_port) in incoming {
         let slot = state.get("nodes").and_then(|nodes| nodes.get(pred));
+        if min_step.is_some_and(|minimum| {
+            slot.and_then(|slot| slot.get("_activation_step"))
+                .and_then(Value::as_u64)
+                .is_none_or(|step| step < minimum)
+        }) {
+            continue;
+        }
         // The port this predecessor actually emitted on (defaulting to `"main"`),
         // compared against the port the edge draws from (also `"main"` by
         // default). A mismatch means this edge's branch was not taken.
@@ -202,6 +284,20 @@ fn collect_input(state: &Value, incoming: &[(String, String)]) -> Vec<Item> {
         }
     }
     items
+}
+
+/// Records the super-step that produced a node slot. This private marker lets
+/// a loop head distinguish the return edge that activated it from stale slots
+/// left by alternate return arms in earlier iterations.
+fn stamp_activation_step(update: &mut Value, node_id: &str, step: usize) {
+    if let Some(slot) = update
+        .get_mut("nodes")
+        .and_then(Value::as_object_mut)
+        .and_then(|nodes| nodes.get_mut(node_id))
+        .and_then(Value::as_object_mut)
+    {
+        slot.insert("_activation_step".to_string(), json!(step));
+    }
 }
 
 /// How a node's handler drives its successors once it has produced an update.
@@ -328,9 +424,15 @@ fn has_unconditional_path(
 ///
 /// Returns an empty set when the graph has no unique trigger (defensive; a
 /// validated workflow always has exactly one).
+///
+/// `loop_edges` are the graph's back-edges (see [`back_edges`]) and are skipped
+/// outright: a back-edge predecessor is the loop head's own re-entry, never a
+/// branch that might go untaken, so registering a relief for it would be
+/// meaningless — and its edge is not lowered as waiting in the first place.
 fn conditional_predecessors(
     graph: &crate::model::WorkflowGraph,
     merge_id: &str,
+    loop_edges: &std::collections::HashSet<(String, String)>,
 ) -> std::collections::HashSet<String> {
     let Some(trigger) = graph.trigger() else {
         return std::collections::HashSet::new();
@@ -339,9 +441,121 @@ fn conditional_predecessors(
         .edges
         .iter()
         .filter(|e| e.to_node == merge_id)
+        .filter(|e| !loop_edges.contains(&(e.from_node.clone(), e.to_node.clone())))
         .map(|e| e.from_node.clone())
         .filter(|pred| !has_unconditional_path(graph, &trigger.id, pred, merge_id))
         .collect()
+}
+
+/// The graph's **back-edges**: the edges that close a cycle, as
+/// `(from_node, to_node)` pairs.
+///
+/// Found with the standard grey-node test — a depth-first walk from the trigger
+/// in which an edge pointing at a node still on the current DFS stack is, by
+/// definition, an edge back to one of its own ancestors. Edges unreachable from
+/// the trigger are walked afterwards so a detached loop is still classified
+/// (it cannot run, but it must not be mistaken for a forward edge either).
+///
+/// This is load-bearing for loops rather than diagnostic. The edge-lowering
+/// below treats a node with more than one predecessor as a fan-in point and
+/// wires its incoming edges as *waiting* edges — the merge barrier. A loop head
+/// (`trigger -> a -> b -> a`) has two predecessors by that count, so without
+/// this distinction it would barrier on its own back-edge and wait forever for
+/// an activation that can only happen after it runs. Excluding back-edges from
+/// the fan-in count is what lets a loop actually iterate; a node that is both a
+/// genuine fan-in *and* a loop head still barriers on its forward predecessors,
+/// which is the correct semantics.
+///
+/// Because a cycle has no canonical entry point, *which* edge is reported as
+/// the back-edge depends on node/edge order for graphs with several cycles
+/// through the same nodes. That is fine for every use here: what matters is
+/// that exactly one edge per cycle is cut, not which one.
+///
+/// Public because a host that mirrors the engine's fan-in classification — to
+/// pre-flight a graph, lay it out, or explain it — must make the same
+/// distinction, and a second implementation would drift from this one and
+/// disagree about which graphs are legal.
+pub fn back_edges(
+    graph: &crate::model::WorkflowGraph,
+) -> std::collections::HashSet<(String, String)> {
+    /// DFS colours. `Grey` = on the current stack (an ancestor of the node
+    /// being expanded), `Black` = fully explored.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Colour {
+        Grey,
+        Black,
+    }
+
+    /// One iterative DFS from `root`, colouring as it goes and recording every
+    /// edge it finds pointing at a grey (on-stack) node. Iterative rather than
+    /// recursive so a deep graph cannot blow the stack; each frame carries the
+    /// node's outgoing edges and how many have been expanded.
+    fn visit<'g>(
+        graph: &'g crate::model::WorkflowGraph,
+        root: &'g str,
+        colours: &mut std::collections::HashMap<&'g str, Colour>,
+        found: &mut std::collections::HashSet<(String, String)>,
+    ) {
+        if colours.contains_key(root) {
+            return;
+        }
+        let outgoing = |node: &str| -> Vec<&'g crate::model::Edge> {
+            graph.edges.iter().filter(|e| e.from_node == node).collect()
+        };
+        colours.insert(root, Colour::Grey);
+        let mut stack: Vec<(&'g str, Vec<&'g crate::model::Edge>, usize)> =
+            vec![(root, outgoing(root), 0)];
+        while let Some((node, edges, cursor)) = stack.last_mut() {
+            if *cursor >= edges.len() {
+                colours.insert(node, Colour::Black);
+                stack.pop();
+                continue;
+            }
+            let edge = edges[*cursor];
+            *cursor += 1;
+            // Resolve the target to a borrow that lives as long as `graph`, so
+            // it can key the colour map. An edge pointing at a node that does
+            // not exist is a validation error, not this pass's problem.
+            let Some(target) = graph
+                .nodes
+                .iter()
+                .find(|n| n.id == edge.to_node)
+                .map(|n| n.id.as_str())
+            else {
+                continue;
+            };
+            match colours.get(target) {
+                // Still on the stack: this edge points at an ancestor.
+                Some(Colour::Grey) => {
+                    found.insert((edge.from_node.clone(), edge.to_node.clone()));
+                }
+                // Already fully explored: a forward or cross edge, not a cycle.
+                Some(Colour::Black) => {}
+                None => {
+                    colours.insert(target, Colour::Grey);
+                    let next = outgoing(target);
+                    stack.push((target, next, 0));
+                }
+            }
+        }
+    }
+
+    let mut colours: std::collections::HashMap<&str, Colour> = std::collections::HashMap::new();
+    let mut found: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    // The trigger first, so the classification matches the order a run actually
+    // takes: which edge of a cycle is called the back-edge depends on where the
+    // walk enters it.
+    if let Some(trigger) = graph.trigger() {
+        visit(graph, &trigger.id, &mut colours, &mut found);
+    }
+    // Then anything the trigger cannot reach: a detached subgraph may still
+    // contain a cycle, and leaving it uncoloured would let its back-edge be
+    // lowered as a waiting edge.
+    for node in &graph.nodes {
+        visit(graph, &node.id, &mut colours, &mut found);
+    }
+    found
 }
 
 /// Finds a brancher node `B` and one of its (>=2) outgoing ports whose
@@ -415,12 +629,35 @@ fn reaches_via_port(
 /// emitted by an earlier activation and could misroute loops after a node
 /// recovers from an error.
 fn items_update(node_id: &str, items: &[Item], port: Option<&str>) -> tinyagents::Result<Value> {
+    items_update_with_meta(node_id, items, port, None)
+}
+
+/// [`items_update`], plus any extra slot keys the executor asked to record via
+/// [`NodeOutput::meta`] — a node that must remember something across its own
+/// activations, currently only the `loop` node's `iteration` count.
+///
+/// Unlike `items`/`port`, meta keys are written only when supplied. That is
+/// deliberate and the opposite of the `port` rule above: `port` is cleared so a
+/// stale route cannot survive the key-by-key merge, whereas a counter's whole
+/// purpose is to survive it. A node that emits no meta on some activation
+/// therefore leaves the previous value standing rather than resetting it.
+fn items_update_with_meta(
+    node_id: &str,
+    items: &[Item],
+    port: Option<&str>,
+    meta: Option<&Value>,
+) -> tinyagents::Result<Value> {
     let mut slot = Map::new();
     slot.insert("items".to_string(), serde_json::to_value(items)?);
     slot.insert(
         "port".to_string(),
         port.map_or(Value::Null, |port| Value::String(port.to_string())),
     );
+    if let Some(Value::Object(meta)) = meta {
+        for (key, value) in meta {
+            slot.insert(key.clone(), value.clone());
+        }
+    }
     let mut nodes = Map::new();
     nodes.insert(node_id.to_string(), Value::Object(slot));
     let mut root = Map::new();
@@ -447,7 +684,7 @@ fn error_item(node_id: &str, e: &EngineError) -> Item {
 /// not yet implemented surfaces its `Unimplemented` error here.
 pub async fn run(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
 ) -> Result<RunOutcome> {
     run_with_observer(
@@ -470,7 +707,7 @@ pub async fn run(
 /// Same as [`run`].
 pub async fn run_with_observer(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
 ) -> Result<RunOutcome> {
@@ -509,7 +746,7 @@ pub async fn run_with_observer(
 /// Same as [`run`].
 pub async fn run_cancellable(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     token: CancellationToken,
 ) -> Result<RunOutcome> {
@@ -524,7 +761,7 @@ pub async fn run_cancellable(
 /// Same as [`run_cancellable`].
 pub async fn run_cancellable_with_observer(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     token: CancellationToken,
     observer: &Arc<dyn RunObserver>,
@@ -556,6 +793,11 @@ pub async fn run_cancellable_with_observer(
 /// is cut after at most this many levels regardless of how the cycle is formed.
 /// A direct self-reference is additionally caught statically by the node before
 /// any run starts (see [`crate::nodes::integration::SubWorkflowNode`]).
+///
+/// This is the **default**, not a hard ceiling: a graph that legitimately nests
+/// deeper sets `max_sub_workflow_depth` on its trigger config, which is seeded
+/// into the run state and forwarded to every child run so the whole chain
+/// agrees on one bound.
 pub const MAX_SUB_WORKFLOW_DEPTH: u64 = 8;
 
 /// Runs a nested child workflow for a `sub_workflow` node, threading the current
@@ -570,9 +812,10 @@ pub const MAX_SUB_WORKFLOW_DEPTH: u64 = 8;
 /// Same as [`run`].
 pub(crate) async fn run_sub_workflow(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     depth: u64,
+    max_depth: u64,
 ) -> Result<RunOutcome> {
     let checkpointer: Arc<dyn Checkpointer<Value>> =
         Arc::new(InMemoryCheckpointer::<Value>::default());
@@ -586,7 +829,10 @@ pub(crate) async fn run_sub_workflow(
         checkpointer,
         thread_id,
         None,
-        Some(json!({ "sub_workflow_depth": depth })),
+        Some(json!({
+            "sub_workflow_depth": depth,
+            "max_sub_workflow_depth": max_depth,
+        })),
         CancellationToken::new(),
     )
     .await?;
@@ -612,6 +858,7 @@ pub(crate) async fn run_sub_workflow(
 /// # Errors
 /// Returns an [`EngineError`] if the workflow has no trigger or if compilation
 /// fails.
+#[allow(clippy::too_many_arguments)]
 fn build_graph(
     workflow: &CompiledWorkflow,
     capabilities: &Capabilities,
@@ -620,6 +867,7 @@ fn build_graph(
     checkpointer: Arc<dyn Checkpointer<Value>>,
     journal: Option<Arc<dyn GraphEventJournal>>,
     token: CancellationToken,
+    terminal_error: &Arc<Mutex<Option<EngineError>>>,
 ) -> Result<(CompiledGraph<Value, Value>, String)> {
     let graph = &workflow.graph;
 
@@ -655,12 +903,22 @@ fn build_graph(
 
     tracing::info!(node_count = graph.nodes.len(), trigger = %trigger_id, "workflow run starting");
 
-    // How many predecessors each node has. A node with more than one is a
-    // fan-in point: its incoming edges are lowered as waiting edges so it runs
-    // only after every predecessor has completed (the merge barrier).
+    // The edges that close a cycle. Everything below that reasons about fan-in
+    // must ignore these: a back-edge is not a predecessor the node waits for,
+    // it is the node's own re-entry. See [`back_edges`].
+    let loop_edges = back_edges(graph);
+    let is_back_edge = |edge: &crate::model::Edge| {
+        loop_edges.contains(&(edge.from_node.clone(), edge.to_node.clone()))
+    };
+
+    // How many **forward** predecessors each node has. A node with more than one
+    // is a fan-in point: its incoming edges are lowered as waiting edges so it
+    // runs only after every predecessor has completed (the merge barrier).
+    // Back-edges are excluded so a loop head does not barrier on its own
+    // re-entry and deadlock before the first iteration.
     let mut incoming_counts: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
-    for edge in &graph.edges {
+    for edge in graph.edges.iter().filter(|e| !is_back_edge(e)) {
         *incoming_counts.entry(edge.to_node.as_str()).or_default() += 1;
     }
 
@@ -677,6 +935,29 @@ fn build_graph(
         .set_reducer(MergeReducer);
     if let Some(limit) = recursion_limit {
         builder = builder.with_recursion_limit(limit as usize);
+    } else {
+        // tinyagents defaults to 50 super-steps, which is too small for the
+        // advertised default loop cap once the head and body activations are
+        // counted. A declared loop already has its own finite cap, so derive a
+        // conservative graph budget that lets that structured limit win.
+        let loop_budget: u64 = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Loop)
+            .map(|node| {
+                node.config
+                    .get("max_iterations")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(crate::nodes::control_flow::DEFAULT_MAX_ITERATIONS)
+                    .saturating_add(1)
+            })
+            .sum();
+        if loop_budget > 0 {
+            let derived = loop_budget
+                .saturating_mul(graph.nodes.len() as u64)
+                .saturating_add(graph.nodes.len() as u64);
+            builder = builder.with_recursion_limit(derived.min(usize::MAX as u64) as usize);
+        }
     }
     // NOTE: `node_timeout` is intentionally NOT wired via
     // `builder.with_node_timeout(..)`. That tinyagents knob wraps a node
@@ -693,12 +974,26 @@ fn build_graph(
         let incoming: Vec<(String, String)> = graph
             .edges
             .iter()
-            .filter(|e| e.to_node == node.id)
+            .filter(|e| e.to_node == node.id && !is_back_edge(e))
+            .map(|e| (e.from_node.clone(), e.from_port.clone()))
+            .collect();
+        // The same, for the node's back-edges only. A loop head is entered once
+        // through its forward edges (the seed) and re-entered through these.
+        // Keeping the two apart is what makes an iteration see the *body's*
+        // output rather than the trigger's: `collect_input` gathers from every
+        // predecessor whose slot still port-matches, and the seeding
+        // predecessor's slot never goes away, so a single merged list would
+        // silently re-deliver the seed on every pass.
+        let back_incoming: Vec<(String, String)> = graph
+            .edges
+            .iter()
+            .filter(|e| e.to_node == node.id && is_back_edge(e))
             .map(|e| (e.from_node.clone(), e.from_port.clone()))
             .collect();
         let caps = capabilities.clone();
         let observer = observer.clone();
         let steps = steps.clone();
+        let terminal_error = terminal_error.clone();
         let token = token.clone();
         let is_trigger = node.kind == NodeKind::Trigger;
         // How this node drives its successors once it has an update.
@@ -714,9 +1009,11 @@ fn build_graph(
         builder = builder.add_node(node.id.clone(), move |state: Value, ctx| {
             let node = node.clone();
             let incoming = incoming.clone();
+            let back_incoming = back_incoming.clone();
             let caps = caps.clone();
             let observer = observer.clone();
             let steps = steps.clone();
+            let terminal_error = terminal_error.clone();
             let token = token.clone();
             let routing = routing.clone();
             // The resume value delivered to this node on a checkpointed resume, if
@@ -750,7 +1047,9 @@ fn build_graph(
                 // port-command node drives only the successors of the port it
                 // emitted on (`port`, defaulting to `main`); everything else emits
                 // a plain update and follows its static/conditional edge.
-                let emit = |update: Value, port: Option<&str>| match &routing {
+                let emit = |mut update: Value, port: Option<&str>| {
+                    stamp_activation_step(&mut update, &node.id, ctx.step);
+                    match &routing {
                     HandlerRouting::Plain => NodeResult::Update(update),
                     HandlerRouting::FanOut(targets) => {
                         NodeResult::Command(Command::goto(targets.clone()).with_update(update))
@@ -764,6 +1063,7 @@ fn build_graph(
                             .unwrap_or_default();
                         NodeResult::Command(Command::goto(targets).with_update(update))
                     }
+                    }
                 };
 
                 // Cooperative cancellation, checked at the node boundary before
@@ -776,7 +1076,9 @@ fn build_graph(
                 // starting further node work. The engine reports it as cancelled.
                 if token.is_cancelled() {
                     tracing::info!(node = %node.id, "run cancelled; skipping node work");
-                    return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                    let mut update = items_update(&node.id, &[], None)?;
+                    stamp_activation_step(&mut update, &node.id, ctx.step);
+                    return Ok(NodeResult::Update(update));
                 }
 
                 if is_trigger {
@@ -874,7 +1176,28 @@ fn build_graph(
                     }
                 }
 
-                let input = collect_input(&state, &incoming);
+                // Which set of incoming edges this activation draws from. A node
+                // with no back-edges always uses its forward edges. A loop head
+                // uses its forward edges on the first activation (the seed) and
+                // its back-edges on every re-entry, detected by whether it has
+                // already recorded an output slot. Without this the seed's items
+                // are re-delivered alongside the body's on every iteration.
+                let re_entry = !back_incoming.is_empty()
+                    && state
+                        .get("nodes")
+                        .and_then(|nodes| nodes.get(&node.id))
+                        .is_some_and(|slot| !slot.is_null());
+                let input = if re_entry {
+                    let latest_step = back_incoming
+                        .iter()
+                        .filter_map(|(pred, _)| {
+                            state["nodes"][pred]["_activation_step"].as_u64()
+                        })
+                        .max();
+                    collect_input_since(&state, &back_incoming, latest_step)
+                } else {
+                    collect_input(&state, &incoming)
+                };
                 let run_meta = state.get("run").cloned().unwrap_or(Value::Null);
                 // Every completed node's output slot, keyed by id. Handed to the
                 // executor so `=`-expressions can address any upstream node
@@ -1037,7 +1360,12 @@ fn build_graph(
                         observer.on_step_finish(&step);
                         let port = output.port.as_deref();
                         Ok(emit(
-                            items_update(&node.id, &output.items, port)?,
+                            items_update_with_meta(
+                                &node.id,
+                                &output.items,
+                                port,
+                                output.meta.as_ref(),
+                            )?,
                             port,
                         ))
                     }
@@ -1090,7 +1418,31 @@ fn build_graph(
                                 Some("error"),
                             )),
                             // "stop" (default) and any unknown policy fail the run.
-                            _ => Err(TinyAgentsError::Graph(err.to_string())),
+                            //
+                            // Stash the structured error before handing
+                            // tinyagents a string: `TinyAgentsError::Graph` is
+                            // the only channel out of a handler, so without this
+                            // every node failure would reach the caller flattened
+                            // into `EngineError::Capability` and a host could not
+                            // tell a loop that ran away from an HTTP call that
+                            // 500'd. `build_and_run` prefers whatever lands here.
+                            // First writer wins: the failure that ends the run is
+                            // the one worth reporting, and a parallel superstep
+                            // may produce several.
+                            _ => {
+                                let message = err.to_string();
+                                let mut slot =
+                                    terminal_error.lock().expect("terminal error mutex poisoned");
+                                if slot.is_none() {
+                                    *slot = Some(err);
+                                }
+                                drop(slot);
+                                // The message still travels the string channel
+                                // unchanged, so every path that only sees the
+                                // stringified error reads exactly what it did
+                                // before; the sink is strictly additive.
+                                Err(TinyAgentsError::Graph(message))
+                            }
                         }
                     }
                 }
@@ -1205,11 +1557,18 @@ fn build_graph(
                         // (see below) so the all-waiting barrier still clears when
                         // that predecessor's branch is never taken, without ever
                         // weakening the barrier itself.
-                        let is_fan_in = incoming_counts
-                            .get(edge.to_node.as_str())
-                            .copied()
-                            .unwrap_or(0)
-                            > 1;
+                        //
+                        // A back-edge is never lowered as waiting: it is the
+                        // loop head's re-entry, not a predecessor it waits for,
+                        // and hard-waiting on it deadlocks the loop before its
+                        // first iteration (`incoming_counts` already excludes
+                        // it, so this only matters for the edge itself).
+                        let is_fan_in = !is_back_edge(edge)
+                            && incoming_counts
+                                .get(edge.to_node.as_str())
+                                .copied()
+                                .unwrap_or(0)
+                                > 1;
                         if is_fan_in {
                             builder = builder.add_waiting_edge(node.id.clone(), target);
                         } else {
@@ -1257,7 +1616,7 @@ fn build_graph(
         if incoming_counts.get(merge.id.as_str()).copied().unwrap_or(0) <= 1 {
             continue;
         }
-        for predecessor in conditional_predecessors(graph, &merge.id) {
+        for predecessor in conditional_predecessors(graph, &merge.id, &loop_edges) {
             if let Some(brancher) = find_conditional_brancher(graph, &predecessor, &merge.id) {
                 builder = builder.add_barrier_relief(brancher, predecessor, merge.id.clone());
             }
@@ -1280,6 +1639,37 @@ fn build_graph(
     if let Some(journal) = journal {
         tracing::debug!("attaching graph event journal to compiled workflow graph");
         compiled = compiled.with_event_journal(journal);
+    }
+
+    // `max_node_visits` caps how many times any single node may be activated
+    // within one run — the last-resort backstop under a `loop` node's own
+    // `max_iterations`. It exists because the two limits fail differently:
+    // `max_iterations` is per-loop and names the loop that ran away, whereas
+    // this bounds a cycle nobody declared a loop node for (and, unlike
+    // `recursion_limit`, it names the offending node rather than just reporting
+    // that the run took too many super-steps).
+    //
+    // Only set when asked. `RecursionPolicy` also carries `max_total_steps`,
+    // and tinyagents takes `min(recursion_limit, max_total_steps)` — so
+    // installing a default policy here would silently tighten the step budget
+    // of every existing graph.
+    if let Some(max_visits) = trigger
+        .config
+        .get("max_node_visits")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+    {
+        let defaults = tinyagents::graph::RecursionPolicy::default();
+        compiled = compiled.with_recursion_policy(tinyagents::graph::RecursionPolicy {
+            max_visits_per_node: Some(max_visits as usize),
+            // Keep whatever step budget `recursion_limit` asked for; the
+            // policy's own default (1000) must not quietly become a second,
+            // lower ceiling.
+            max_total_steps: recursion_limit.map_or(defaults.max_total_steps, |limit| {
+                defaults.max_total_steps.max(limit as usize)
+            }),
+            ..defaults
+        });
     }
 
     Ok((compiled, trigger_id))
@@ -1316,7 +1706,7 @@ fn default_thread_id(workflow: &CompiledWorkflow) -> Result<String> {
 #[allow(clippy::too_many_arguments)]
 async fn build_and_run(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
     checkpointer: Arc<dyn Checkpointer<Value>>,
@@ -1325,6 +1715,14 @@ async fn build_and_run(
     run_meta_overlay: Option<Value>,
     token: CancellationToken,
 ) -> Result<(CompiledGraph<Value, Value>, String, RunOutcome, GraphRunIds)> {
+    // Declared inputs are resolved FIRST — before the run id is minted, before
+    // the observer is told a run started, and before any graph is built. A
+    // caller that gets an `Input` error can therefore be certain nothing ran and
+    // nothing was observed, which is what lets a host reject a bad call without
+    // recording a phantom run.
+    let RunInput { trigger, inputs } = input.into();
+    let resolved_inputs = crate::model::resolve_inputs(&workflow.graph.inputs, &inputs)?;
+
     // Process-local, monotonic run id — no time/random source.
     let run_id = format!("run-{}", NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed));
     observer.on_run_start(&run_id);
@@ -1334,6 +1732,10 @@ async fn build_and_run(
     // `Mutex` is the simplest correct sink across the `'static + Send + Sync`
     // handler closures, which can't otherwise push to a common `Vec`.
     let steps: Arc<Mutex<Vec<ExecutionStep>>> = Arc::new(Mutex::new(Vec::new()));
+    // Where a run-ending node failure leaves its structured error on the way
+    // out (see the `stop`-policy branch in `build_graph`), so the caller gets
+    // the real `EngineError` instead of its `Display` string.
+    let terminal_error: Arc<Mutex<Option<EngineError>>> = Arc::new(Mutex::new(None));
 
     // Build and compile the graph under the host-supplied checkpointer;
     // `trigger_id` is the graph's entry node.
@@ -1345,12 +1747,35 @@ async fn build_and_run(
         checkpointer,
         journal,
         token.clone(),
+        &terminal_error,
     )?;
 
-    let seed_items = items_update(&trigger_id, &[Item::new(input.clone())], None)
+    let seed_items = items_update(&trigger_id, &[Item::new(trigger.clone())], None)
         .map_err(|e| EngineError::Capability(e.to_string()))?;
-    let mut initial = json!({ "run": { "trigger": input } });
+    // `run.inputs` holds the resolved declared inputs — one entry per
+    // declaration, defaults already applied. `expr_scope_for` lifts it to the
+    // top-level `inputs` scope key, so node config addresses it as
+    // `=inputs.<name>` (and jq programs walking `run` still see it too).
+    let mut initial = json!({ "run": { "trigger": trigger, "inputs": resolved_inputs } });
     merge(&mut initial, seed_items);
+    // The nesting cap for `sub_workflow` chains, read off the trigger config
+    // like every other run-level knob and seeded into the run state so the
+    // `sub_workflow` node can read it back. Carried in run state rather than
+    // consulted from the graph because a *child* run is compiled from the
+    // child's own graph: without this the cap would silently revert to the
+    // default one level down. `run_sub_workflow` forwards it to each child.
+    if let Some(max_depth) = workflow
+        .graph
+        .trigger()
+        .and_then(|t| t.config.get("max_sub_workflow_depth"))
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+    {
+        merge(
+            &mut initial,
+            json!({ "run": { "max_sub_workflow_depth": max_depth } }),
+        );
+    }
     // Optional run-level metadata overlaid onto `run` before the run starts —
     // e.g. the `sub_workflow_depth` counter a nested `sub_workflow` run threads
     // to bound recursion (see [`run_sub_workflow`]). Merged (not overwritten) so
@@ -1377,7 +1802,17 @@ async fn build_and_run(
                 steps: steps.lock().expect("steps mutex poisoned").clone(),
             };
             observer.on_run_finish(&run_record);
-            return Err(EngineError::Capability(e.to_string()));
+            // A node that ended the run stashed its real error on the way out;
+            // prefer it so callers can match on the variant (e.g.
+            // `EngineError::LoopLimit`). Falling back to the stringified driver
+            // error covers failures that came from tinyagents itself — a hit
+            // recursion limit, a checkpointer fault — which have no node error
+            // behind them.
+            let structured = terminal_error
+                .lock()
+                .expect("terminal error mutex poisoned")
+                .take();
+            return Err(structured.unwrap_or_else(|| EngineError::Capability(e.to_string())));
         }
     };
 
@@ -1441,15 +1876,33 @@ async fn build_and_run(
 /// execution of the resumed run fails.
 pub async fn resume(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     newly_approved: Vec<String>,
     capabilities: &Capabilities,
 ) -> Result<RunOutcome> {
-    // Union `newly_approved` into `input["approvals"]`: start from any existing
-    // approvals array (ignoring non-string entries), then append each newly
-    // approved id that is not already present. Reading defensively — a missing or
-    // non-array `approvals` simply yields an empty starting set, never a panic.
-    let mut approvals: Vec<String> = input
+    run(
+        workflow,
+        merge_approvals(input, newly_approved),
+        capabilities,
+    )
+    .await
+}
+
+/// Unions `newly_approved` into the run input's `trigger["approvals"]`, leaving
+/// the declared-input values untouched.
+///
+/// Reads defensively: a missing or non-array `approvals` yields an empty
+/// starting set, and a non-object trigger (which carries no fields to preserve)
+/// is replaced by a fresh object holding just the merged approvals. Declared
+/// inputs ride along unchanged — a resume re-runs the *same* parameterized
+/// workflow, so dropping them would silently change what it does.
+fn merge_approvals(input: impl Into<RunInput>, newly_approved: Vec<String>) -> RunInput {
+    let RunInput {
+        mut trigger,
+        inputs,
+    } = input.into();
+
+    let mut approvals: Vec<String> = trigger
         .get("approvals")
         .and_then(Value::as_array)
         .map(|existing| {
@@ -1466,16 +1919,13 @@ pub async fn resume(
         }
     }
 
-    let mut merged_input = input;
-    if let Value::Object(map) = &mut merged_input {
+    if let Value::Object(map) = &mut trigger {
         map.insert("approvals".to_string(), json!(approvals));
     } else {
-        // A non-object input carries no fields to preserve, so replace it with a
-        // fresh object holding just the merged approvals.
-        merged_input = json!({ "approvals": approvals });
+        trigger = json!({ "approvals": approvals });
     }
 
-    run(workflow, merged_input, capabilities).await
+    RunInput { trigger, inputs }
 }
 
 /// Like [`resume`], but observes `token`: cancelling it winds the resumed run
@@ -1487,36 +1937,18 @@ pub async fn resume(
 /// Same as [`resume`].
 pub async fn resume_cancellable(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     newly_approved: Vec<String>,
     capabilities: &Capabilities,
     token: CancellationToken,
 ) -> Result<RunOutcome> {
-    let mut approvals: Vec<String> = input
-        .get("approvals")
-        .and_then(Value::as_array)
-        .map(|existing| {
-            existing
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    for id in newly_approved {
-        if !approvals.contains(&id) {
-            approvals.push(id);
-        }
-    }
-
-    let mut merged_input = input;
-    if let Value::Object(map) = &mut merged_input {
-        map.insert("approvals".to_string(), json!(approvals));
-    } else {
-        merged_input = json!({ "approvals": approvals });
-    }
-
-    run_cancellable(workflow, merged_input, capabilities, token).await
+    run_cancellable(
+        workflow,
+        merge_approvals(input, newly_approved),
+        capabilities,
+        token,
+    )
+    .await
 }
 
 /// A live, resumable workflow run.
@@ -1601,7 +2033,7 @@ impl ResumableRun {
 /// Same as [`run`].
 pub async fn run_resumable(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
 ) -> Result<ResumableRun> {
     let observer = Arc::new(crate::observability::NoopObserver) as Arc<dyn RunObserver>;
@@ -1654,7 +2086,7 @@ pub async fn run_resumable(
 /// execution (including any node executor error) fails.
 pub async fn run_with_checkpointer(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
@@ -1740,7 +2172,7 @@ pub async fn resume_with_checkpointer(
 /// Same as [`run_with_checkpointer`].
 pub async fn run_with_checkpointer_journaled(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
@@ -1775,7 +2207,7 @@ pub async fn run_with_checkpointer_journaled(
 /// Same as [`run_with_checkpointer_journaled`].
 pub async fn run_with_checkpointer_journaled_observed(
     workflow: &CompiledWorkflow,
-    input: Value,
+    input: impl Into<RunInput>,
     capabilities: &Capabilities,
     checkpointer: Arc<dyn Checkpointer<Value>>,
     thread_id: &str,
@@ -1904,6 +2336,7 @@ async fn resume_with_checkpointer_inner(
     // `resume` loads the state persisted under `thread_id`. Node handlers fire
     // `observer.on_step_finish` for every node that runs after the interrupt
     // boundary, so a host observer sees the resumed steps live.
+    let terminal_error: Arc<Mutex<Option<EngineError>>> = Arc::new(Mutex::new(None));
     let (compiled, _trigger_id) = build_graph(
         workflow,
         capabilities,
@@ -1912,6 +2345,7 @@ async fn resume_with_checkpointer_inner(
         checkpointer,
         journal,
         CancellationToken::new(),
+        &terminal_error,
     )?;
 
     // Approvals recorded for downstream visibility. On resume the interrupted
@@ -1939,8 +2373,17 @@ async fn resume_with_checkpointer_inner(
             thread_id,
             Command::resume(resume_value).with_update(approvals_update),
         )
-        .await
-        .map_err(|e| EngineError::Capability(e.to_string()))?;
+        .await;
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            let structured = terminal_error
+                .lock()
+                .expect("terminal error mutex poisoned")
+                .take();
+            return Err(structured.unwrap_or_else(|| EngineError::Capability(error.to_string())));
+        }
+    };
 
     let pending_approvals: Vec<String> = execution
         .interrupts
@@ -1989,6 +2432,33 @@ mod tests {
     fn default_route_update_explicitly_clears_a_previous_port() {
         let update = items_update("worker", &[], None).expect("serialize update");
         assert_eq!(update["nodes"]["worker"]["port"], Value::Null);
+    }
+
+    #[test]
+    fn loop_reentry_ignores_stale_alternate_return_slots() {
+        let state = json!({
+            "nodes": {
+                "old_arm": {
+                    "items": [{ "json": { "arm": "old" } }],
+                    "port": null,
+                    "_activation_step": 4
+                },
+                "current_arm": {
+                    "items": [{ "json": { "arm": "current" } }],
+                    "port": null,
+                    "_activation_step": 8
+                }
+            }
+        });
+        let incoming = vec![
+            ("old_arm".to_string(), "main".to_string()),
+            ("current_arm".to_string(), "main".to_string()),
+        ];
+
+        let items = collect_input_since(&state, &incoming, Some(8));
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].json["arm"], "current");
     }
 
     #[tokio::test]
@@ -3752,6 +4222,53 @@ mod tests {
             result.is_err(),
             "denying a gate with no error port must fail the run"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_resume_preserves_a_loop_limit_error() {
+        let cp: Arc<dyn Checkpointer<Value>> = Arc::new(InMemoryCheckpointer::<Value>::default());
+        let mut gate = node("gate", NodeKind::OutputParser);
+        gate.config = json!({ "requires_approval": true });
+        let mut loop_node = node("loop", NodeKind::Loop);
+        loop_node.config = json!({ "max_iterations": 1 });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                gate,
+                loop_node,
+                node("work", NodeKind::OutputParser),
+            ],
+            edges: vec![
+                edge("t", "gate"),
+                edge("gate", "loop"),
+                port_edge("loop", "body", "work"),
+                edge("work", "loop"),
+            ],
+            ..Default::default()
+        };
+        let compiled = compile(&graph).expect("compile");
+        let caps = mock_capabilities();
+        let paused =
+            run_with_checkpointer(&compiled, json!({}), &caps, cp.clone(), "thread-loop-limit")
+                .await
+                .expect("pause at approval gate");
+        assert_eq!(paused.pending_approvals, vec!["gate".to_string()]);
+
+        let caps = mock_capabilities();
+        let error = resume_with_checkpointer(
+            &compiled,
+            &caps,
+            cp,
+            "thread-loop-limit",
+            vec!["gate".to_string()],
+        )
+        .await
+        .expect_err("the resumed loop should reach its cap");
+
+        assert!(matches!(
+            error,
+            EngineError::LoopLimit { ref node, limit } if node == "loop" && limit == 1
+        ));
     }
 
     #[tokio::test]

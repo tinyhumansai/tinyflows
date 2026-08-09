@@ -320,6 +320,8 @@ fn standalone_capabilities() -> tinyflows::caps::Capabilities {
         state: Arc::new(MemoryState::default()),
         resolver: Arc::new(NoResolver),
         agent: None,
+        shell: None,
+        memory: None,
     }
 }
 

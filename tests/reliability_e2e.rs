@@ -164,18 +164,17 @@ async fn node_timeout_fires_on_a_slow_capability() {
 
 #[tokio::test]
 async fn recursion_limit_bounds_a_cycle() {
-    // A genuinely cyclic graph: trigger -> a -> b -> trigger (the b->t edge closes
-    // the loop). With a small recursion_limit the run must terminate with an error
+    // A genuinely cyclic graph: trigger -> a -> b -> a (the b->a edge closes the
+    // loop). With a small recursion_limit the run must terminate with an error
     // instead of looping forever. A 10s outer guard ensures the test itself can
     // never hang the suite even if the limit were not enforced.
     //
-    // The back-edge targets the trigger rather than `a` on purpose: a loop closing
-    // on `a` (trigger -> a -> b -> a) gives `a` two predecessors, so the engine
-    // lowers its incoming edges as a fan-in merge barrier (waiting edges). That
-    // barrier deadlocks the loop before it can iterate — the run then settles as
-    // `Ok` with only the trigger having run, and the recursion limit is never
-    // exercised. Closing the loop on the (single-predecessor) trigger keeps every
-    // edge a plain edge, so the graph actually loops and the limit fires.
+    // The back-edge targets `a`, a mid-graph node, on purpose. That gives `a` two
+    // predecessors, and the engine used to lower every such node's incoming edges
+    // as a fan-in merge barrier (waiting edges) — which deadlocked the loop before
+    // it could iterate, settling the run as `Ok` with only the trigger having run
+    // so the recursion limit was never exercised. `back_edges` now excludes the
+    // closing edge from the fan-in count, so this loops for real.
     // The cycle is pure control flow (output_parser passthroughs), so the stock
     // mock capabilities are fine — no slot needs swapping here.
     let caps = mock_capabilities();
@@ -187,7 +186,7 @@ async fn recursion_limit_bounds_a_cycle() {
             node("a", NodeKind::OutputParser, Value::Null),
             node("b", NodeKind::OutputParser, Value::Null),
         ],
-        edges: vec![edge("t", "a"), edge("a", "b"), edge("b", "t")],
+        edges: vec![edge("t", "a"), edge("a", "b"), edge("b", "a")],
         ..Default::default()
     };
 

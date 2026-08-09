@@ -30,6 +30,9 @@ pub enum NodeKind {
     HttpRequest,
     /// Executes sandboxed user code (JavaScript or Python).
     Code,
+    /// Executes an inline POSIX-compatible shell script through the host's
+    /// explicitly configured code capability.
+    Shell,
     /// Two-way conditional branch, emitting on the `true` or `false` port.
     Condition,
     /// Multi-way branch keyed by an expression result.
@@ -38,12 +41,34 @@ pub enum NodeKind {
     Merge,
     /// Fan-out that emits one item per element of a list.
     SplitOut,
+    /// Bounded loop head: emits its input on the `body` port until its
+    /// `max_iterations` cap (or its optional `condition`) says otherwise, then
+    /// emits on `done`. The loop is closed by wiring the last node of the body
+    /// back to this node; that closing edge is a back-edge and the engine
+    /// lowers it accordingly (see [`crate::engine`]), so the head is re-entered
+    /// rather than barriered. The iteration count lives in the node's own run
+    /// state slot, which makes it survive checkpoint/resume and addressable
+    /// from expressions as `=nodes.<id>.iteration`.
+    Loop,
     /// Pure, expression-based data transform over the run state.
     Transform,
     /// Parses and validates an upstream agent's output into a structured shape.
     OutputParser,
     /// Runs another workflow as a nested sub-graph.
     SubWorkflow,
+    /// Reads or writes host-managed memory via the injected
+    /// [`MemoryProvider`](crate::caps::MemoryProvider) capability: `recall` /
+    /// `search` / `flavour` / `people` for reads, `remember` / `forget` for
+    /// writes. Additive kind — see [`crate::validate`] for the hard invariant
+    /// that a `remember`/`forget` operation may never target `scope: "user"`.
+    Memory,
+    /// Commit-on-success exactly-once **filter** half: drops an item whose
+    /// resolved `config.key` was already committed by a prior successful run,
+    /// and otherwise passes it through while recording the key as *tentative*
+    /// (pending the host's commit on run success). See
+    /// [`crate::nodes::control_flow::dedup`] for the full `StateStore` key
+    /// contract this kind depends on.
+    Dedup,
 }
 
 /// How a [`NodeKind::Trigger`] node is fired.
@@ -92,13 +117,17 @@ mod tests {
         assert_wire(&NodeKind::ToolCall, "tool_call");
         assert_wire(&NodeKind::HttpRequest, "http_request");
         assert_wire(&NodeKind::Code, "code");
+        assert_wire(&NodeKind::Shell, "shell");
         assert_wire(&NodeKind::Condition, "condition");
         assert_wire(&NodeKind::Switch, "switch");
         assert_wire(&NodeKind::Merge, "merge");
         assert_wire(&NodeKind::SplitOut, "split_out");
+        assert_wire(&NodeKind::Loop, "loop");
         assert_wire(&NodeKind::Transform, "transform");
         assert_wire(&NodeKind::OutputParser, "output_parser");
         assert_wire(&NodeKind::SubWorkflow, "sub_workflow");
+        assert_wire(&NodeKind::Memory, "memory");
+        assert_wire(&NodeKind::Dedup, "dedup");
     }
 
     #[test]
