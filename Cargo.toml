@@ -29,7 +29,7 @@ async-trait = "0.1"
 thiserror = "2"
 futures-timer = "3"
 futures-util = "0.3"
-getrandom = "0.3"
+getrandom = "0.4"
 tinyagents = "2.1"
 tracing = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
