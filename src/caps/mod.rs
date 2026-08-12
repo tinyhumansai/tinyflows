@@ -7,6 +7,7 @@
 
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
+pub mod shell;
 
 use std::sync::Arc;
 
@@ -14,6 +15,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::Result;
+
+pub use self::shell::{ShellInterpreter, ShellOutcome, ShellRequest, ShellRunner, ShellScript};
 
 /// A chat / LLM provider used by `agent` and `output_parser` nodes.
 #[async_trait]
@@ -246,6 +249,10 @@ pub struct Capabilities {
     /// [`LlmProvider`] completion. `None` on hosts without an agent registry, in
     /// which case `agent` nodes always use [`LlmProvider`].
     pub agent: Option<Arc<dyn AgentRunner>>,
+    /// Optional runner for `shell` nodes. `None` on hosts that do not permit
+    /// workflows to execute shell scripts, in which case a `shell` node fails
+    /// with a capability error rather than silently doing nothing.
+    pub shell: Option<Arc<dyn ShellRunner>>,
     /// Optional host-managed memory access for `memory` nodes. `None` on hosts
     /// without a memory store, in which case a `memory` node fails at run time
     /// with a capability error (there is no meaningful no-op fallback for a

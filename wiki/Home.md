@@ -19,7 +19,7 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
   behind the `mock` feature for tests and examples.
 - **11 node kinds + a trigger.** Native control flow (`condition`, `switch`,
   `merge`, `split_out`, `transform`) and capability-backed effects (`agent`,
-  `tool_call`, `http_request`, `code`, `output_parser`, `sub_workflow`).
+  `tool_call`, `http_request`, `code`, `shell`, `output_parser`, `sub_workflow`).
 - **Real routing.** Linear paths, conditional branching, parallel fan-out, and a
   fan-in merge barrier.
 - **Item-based data flow.** State is a `serde_json::Value` laid out as

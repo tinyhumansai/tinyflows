@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `shell` node kind that runs a shell script — inline via `config.source` or
+  from a file via `config.script_path` — with an optional `interpreter`
+  (`sh`/`bash`), `cwd`, and `env`. A non-zero exit fails the step; a successful
+  run emits `{ exit_code, stdout, stderr, stdout_json }`.
+- A `ShellRunner` capability trait (`caps::shell`) and the optional
+  `Capabilities::shell` slot behind it. The engine never resolves a script path,
+  chooses an environment, or spawns a process: it hands the host a validated
+  `ShellRequest` and the host decides what is reachable. `None` refuses `shell`
+  nodes with a capability error.
+
 - Versioned browser action contracts plus run/tab-bound `ChromeToolInvoker` and
   composable `RoutingToolInvoker` support for explicit `slug: "browser"` nodes.
 - An authenticated loopback companion with pairing-secret rotation, explicit
@@ -17,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A locally bundled MV3 Chrome extension with debugger-based browser actions,
   visible tab-group consent, popup pairing, a workflow side panel, unit tests,
   Playwright coverage, and deterministic release packaging.
+
+### Changed
+
+- **Breaking:** `Capabilities` gained a `shell` field. Hosts constructing the
+  struct literally add `shell: None` (or their own runner).
 
 ## [0.3.0] - YYYY-MM-DD
 

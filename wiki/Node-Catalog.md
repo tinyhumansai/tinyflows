@@ -44,6 +44,7 @@ traits](Capability-Traits).
 | `tool_call` | Invokes one specific integration action | Config `slug`, `args` — via `ToolInvoker` |
 | `http_request` | Outbound HTTP request | Config `method`, `url`, `headers`, `query`, `body` — via `HttpClient` |
 | `code` | Runs sandboxed user code | Config `language` (`javascript`/`python`), `source` — via `CodeRunner` |
+| `shell` | Runs a shell script, inline or from a file | Config `source` **or** `script_path`, plus `interpreter` (`sh`/`bash`), `cwd`, `env` — via `ShellRunner` |
 | `output_parser` | Parses/validates an agent's output into a structured shape | May use `LlmProvider` for auto-fixing; can nest as a sub-agent |
 | `sub_workflow` | Runs another workflow as a nested sub-graph | Config: exactly one of `workflow` (inline) / `workflow_id`; optional `inputs` map for the child's declared inputs |
 
@@ -53,7 +54,7 @@ scope before use, so their parameters can data-bind directly from upstream outpu
 (e.g. `args: { "channel": "=item.channel" }`). Non-`=` values pass through as
 literals.
 
-All 11 node kinds plus the trigger are implemented and dispatched by the engine.
+All 12 node kinds plus the trigger are implemented and dispatched by the engine.
 Per-node error handling (`on_error` stop/continue/route, `retry`, an `error`
 port) and approval gating (`requires_approval`) are configured through the same
 free-form `config`.

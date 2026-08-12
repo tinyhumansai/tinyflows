@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 
 use crate::caps::{
     AgentRunner, Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, MemoryProvider,
-    StateStore, ToolInvoker, WorkflowResolver,
+    ShellOutcome, ShellRequest, ShellRunner, ShellScript, StateStore, ToolInvoker,
+    WorkflowResolver,
 };
 use crate::error::{EngineError, Result};
 use crate::model::WorkflowGraph;
@@ -74,6 +75,36 @@ pub struct MockCode;
 impl CodeRunner for MockCode {
     async fn run(&self, _language: CodeLanguage, _source: &str, input: Value) -> Result<Value> {
         Ok(json!({ "result": input }))
+    }
+}
+
+/// A [`ShellRunner`] that never spawns anything and echoes the request instead.
+///
+/// Always succeeds. Standard output is the script text (inline source, or the
+/// path as written), so a test can assert which script a `shell` node asked
+/// for; standard error carries the interpreter, working directory, and
+/// environment. A test that needs a failing script supplies its own runner —
+/// baking a magic "fail" script into the mock would make an author's real
+/// script mean something different during a dry run.
+#[derive(Debug, Default, Clone)]
+pub struct MockShell;
+
+#[async_trait]
+impl ShellRunner for MockShell {
+    async fn run(&self, request: ShellRequest) -> Result<ShellOutcome> {
+        Ok(ShellOutcome {
+            exit_code: 0,
+            stdout: match &request.script {
+                ShellScript::Inline(source) => source.clone(),
+                ShellScript::Path(path) => path.clone(),
+            },
+            stderr: format!(
+                "{} cwd={} env={}",
+                request.interpreter.as_str(),
+                request.cwd.unwrap_or_default(),
+                json!(request.env),
+            ),
+        })
     }
 }
 
@@ -203,6 +234,7 @@ pub fn mock_capabilities_with_resolver(resolver: impl WorkflowResolver + 'static
         tools: Arc::new(MockTools),
         http: Arc::new(MockHttp),
         code: Arc::new(MockCode),
+        shell: Some(Arc::new(MockShell)),
         state: Arc::new(MockStateStore::default()),
         resolver: Arc::new(resolver),
         // No agent registry by default: `agent` nodes use `MockLlm`. Use
