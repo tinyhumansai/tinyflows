@@ -88,6 +88,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
 
         let output = SplitOutNode.execute(ctx).await.expect("execute");
@@ -110,6 +111,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
 
         let output = SplitOutNode.execute(ctx).await.expect("execute");
@@ -131,6 +133,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
 
         let output = SplitOutNode.execute(ctx).await.expect("execute");
@@ -149,6 +152,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         SplitOutNode.execute(ctx).await.expect("execute").items
     }

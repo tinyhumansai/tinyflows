@@ -91,6 +91,7 @@ mod tests {
             run: &run,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = SwitchNode.execute(ctx).await.expect("execute");
         (out.port.expect("switch always routes to a port"), out.items)
@@ -112,6 +113,7 @@ mod tests {
             run: &run,
             nodes: &nodes,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = SwitchNode.execute(ctx).await.expect("execute");
         assert_eq!(out.port.as_deref(), Some("urgent"));

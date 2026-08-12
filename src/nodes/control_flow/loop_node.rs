@@ -180,6 +180,7 @@ mod tests {
                 run: &Value::Null,
                 nodes: &nodes,
                 caps: &caps,
+                token: crate::engine::CancellationToken::new(),
             })
             .await
     }

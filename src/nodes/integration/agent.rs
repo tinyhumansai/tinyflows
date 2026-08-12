@@ -291,6 +291,7 @@ mod tests {
                 run: &run_meta,
                 nodes: &Value::Null,
                 caps: &caps,
+                token: crate::engine::CancellationToken::new(),
             })
             .await
             .expect("execute");
@@ -306,6 +307,7 @@ mod tests {
                 run: &run_meta,
                 nodes: &Value::Null,
                 caps: &caps,
+                token: crate::engine::CancellationToken::new(),
             })
             .await
             .expect("execute");
@@ -327,6 +329,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items.len(), 1);
@@ -352,6 +355,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items[0].json["json"]["completion"]["prompt"], "X");
@@ -369,6 +373,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items[0].json["json"]["connection"], Value::Null);
@@ -392,6 +397,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items.len(), 1);
@@ -419,6 +425,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps,
+            token: crate::engine::CancellationToken::new(),
         };
         AgentNode
             .execute(ctx)
@@ -579,6 +586,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let err = AgentNode
             .execute(ctx)

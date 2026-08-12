@@ -109,6 +109,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         CodeNode.execute(ctx).await.expect("execute").items
     }

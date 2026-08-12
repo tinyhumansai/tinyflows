@@ -184,16 +184,36 @@ impl NodeExecutor for SubWorkflowNode {
                     // so `=item.x` addresses the element this run is for, and
                     // receives that single item as its input.
                     let scope = crate::nodes::expr_scope_for(ctx, item.json.clone());
-                    let child = run_child(ctx, &scope, std::slice::from_ref(item)).await?;
+                    // `run_child` yields `None` only when the parent cancelled
+                    // this run mid-child (`ctx.token` is then set). The map slots
+                    // exactly one output per input index, so stand in with an
+                    // empty item — the whole node's output is discarded by the
+                    // token check below, so this placeholder never surfaces.
+                    let child = run_child(ctx, &scope, std::slice::from_ref(item))
+                        .await?
+                        .unwrap_or_else(|| crate::data::Item::new(Value::Null));
                     Ok((child, vec![]))
                 })
                 .await?;
+            // Parent-initiated cancel: wind down with no output, mirroring the
+            // top-level cancelled-node contract. `ctx.token` is a one-way flag,
+            // so if any child wound down (returned `None`) it is set here; the
+            // parent's next boundary check sees the same flip and settles
+            // `cancelled = true`.
+            if ctx.token.is_cancelled() {
+                return Ok(NodeOutput::empty());
+            }
             return Ok(NodeOutput::main(items));
         }
 
         let scope = crate::nodes::expr_scope(&ctx);
-        let item = run_child(&ctx, &scope, ctx.input).await?;
-        Ok(NodeOutput::main(vec![item]))
+        match run_child(&ctx, &scope, ctx.input).await? {
+            Some(item) => Ok(NodeOutput::main(vec![item])),
+            // Parent-initiated cancel wound the child down: emit nothing, the
+            // same clean wind-down a top-level cancelled node performs. The
+            // parent's next boundary check settles `cancelled = true`.
+            None => Ok(NodeOutput::empty()),
+        }
     }
 }
 
@@ -203,11 +223,17 @@ impl NodeExecutor for SubWorkflowNode {
 /// `scope` is the expression scope `workflow_id` is resolved against (the whole
 /// input for `once`, the current element for `per_item`), and `child_input` is
 /// the item array seeded into the child run.
+///
+/// Returns `Ok(None)` when the parent run cancelled this child mid-flight
+/// (`ctx.token` is set): the child is a clean cooperative wind-down, not a
+/// failure, so it emits no item and lets the parent settle as cancelled. A child
+/// that stops for any *other* reason (a `requires_approval` pause, or a cancel
+/// arriving through a channel independent of the parent's token) still errors.
 async fn run_child(
     ctx: &NodeContext<'_>,
     scope: &Value,
     child_input: &[crate::data::Item],
-) -> Result<crate::data::Item> {
+) -> Result<Option<crate::data::Item>> {
     // The inline `workflow` graph carries its *own* `=`-expressions, scoped
     // to the CHILD run — it must pass through untouched. Only the fields the
     // sub_workflow node itself reads (here `workflow_id`) are resolved
@@ -271,12 +297,17 @@ async fn run_child(
     // once at the call site.
     let child_inputs = child_inputs(&ctx.node.config, scope)?;
     // Box the recursive engine call so the async future type stays sized.
+    // Forward the parent run's cancellation token: cancelling the parent must
+    // wind down this child too, rather than letting it run on orphaned behind a
+    // fresh token. The child threads it into its own node contexts, so the whole
+    // nesting chain shares one cancellation signal.
     let outcome = Box::pin(crate::engine::run_sub_workflow(
         &compiled,
         crate::engine::RunInput::new(trigger).with_inputs(child_inputs),
         ctx.caps,
         child_depth,
         depth_cap,
+        ctx.token.clone(),
     ))
     .await?;
 
@@ -313,6 +344,28 @@ async fn run_child(
         )));
     }
     if outcome.cancelled {
+        // Two cancellations look the same on the child's `RunOutcome` but mean
+        // opposite things to the parent, so split on *who* cancelled:
+        //
+        // - The parent's own token is set: this is a cooperative wind-down of
+        //   the whole run (the parent is being cancelled and forwarded the same
+        //   token in, per `run_sub_workflow`). Halting with an error here would
+        //   turn a clean cancel into a spurious failure. Emit nothing and let
+        //   the parent settle: its next node-boundary check sees the same
+        //   flipped token and reports `cancelled = true`, exactly as a
+        //   top-level cancelled node does.
+        // - The parent's token is NOT set, yet the child still reports
+        //   cancelled: the child was cancelled through some channel independent
+        //   of this run (none exists today — the only token a child receives is
+        //   the parent's clone — but keep the arm so a future independent-cancel
+        //   path can never be silently treated as a completed child).
+        if ctx.token.is_cancelled() {
+            tracing::debug!(
+                node = %ctx.node.id,
+                "sub_workflow: child wound down under the parent's cancellation; emitting no output"
+            );
+            return Ok(None);
+        }
         return Err(EngineError::Capability(format!(
             "sub_workflow node {:?}: child run was cancelled before completing; the parent \
              run is halted rather than falsely completed",
@@ -320,7 +373,7 @@ async fn run_child(
         )));
     }
 
-    Ok(crate::data::Item::new(outcome.output))
+    Ok(Some(crate::data::Item::new(outcome.output)))
 }
 
 #[cfg(test)]
@@ -362,6 +415,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         SubWorkflowNode
             .execute(ctx)
@@ -384,6 +438,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps,
+            token: crate::engine::CancellationToken::new(),
         };
         SubWorkflowNode.execute(ctx).await.expect("execute")
     }
@@ -647,6 +702,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps,
+            token: crate::engine::CancellationToken::new(),
         };
         SubWorkflowNode.execute(ctx).await
     }

@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::caps::Capabilities;
 use crate::data::Item;
+use crate::engine::CancellationToken;
 use crate::error::Result;
 use crate::model::{Node, NodeKind};
 
@@ -38,6 +39,15 @@ pub struct NodeContext<'a> {
     pub nodes: &'a Value,
     /// Host-provided capabilities.
     pub caps: &'a Capabilities,
+    /// The run's cooperative-cancellation token (see
+    /// [`crate::engine::CancellationToken`]). An **owned clone** of the run
+    /// token, not a borrow — an executor that spawns nested engine work (today
+    /// only [`sub_workflow`](crate::nodes::integration)) must thread a clone
+    /// into that child run, so a parent cancel winds the whole subtree down at
+    /// the next node boundary instead of orphaning it. Executors that touch the
+    /// outside world within a single node need not consult it; the engine
+    /// already checks it at the node boundary before this node runs.
+    pub token: CancellationToken,
 }
 
 /// Builds the expression scope for a node from its runtime [`NodeContext`].
@@ -427,6 +437,7 @@ mod tests {
                     run: &run,
                     nodes: &Value::Null,
                     caps: &caps,
+                    token: crate::engine::CancellationToken::new(),
                 })
                 .await;
             assert!(
@@ -450,6 +461,7 @@ mod tests {
                 run: &run,
                 nodes: &Value::Null,
                 caps: &caps,
+                token: crate::engine::CancellationToken::new(),
             })
             .await
             .expect("execute");
@@ -478,6 +490,7 @@ mod tests {
             run: &run,
             nodes: &nodes_state,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let scope = expr_scope(&ctx);
         // Existing keys unchanged (back-compat).
@@ -507,6 +520,7 @@ mod tests {
             run: &run,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let scope = expr_scope(&ctx);
         assert_eq!(scope["nodes"], json!({}));

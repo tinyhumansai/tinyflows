@@ -808,6 +808,15 @@ pub const MAX_SUB_WORKFLOW_DEPTH: u64 = 8;
 /// child can read it back from `ctx.run` and enforce [`MAX_SUB_WORKFLOW_DEPTH`].
 /// Used only by the `sub_workflow` node's recursive execution.
 ///
+/// `token` is the **parent run's** cancellation token, forwarded so cancelling
+/// the parent winds the whole subtree down: the child observes the same flipped
+/// flag at its next node boundary and returns a cancelled [`RunOutcome`] instead
+/// of running to completion orphaned from the parent. The child in turn hands
+/// this token to its own node contexts, so a deeper `sub_workflow` propagates it
+/// on — the whole nesting chain shares one signal. Historically this seeded a
+/// fresh [`CancellationToken`], which severed cancellation at every sub-workflow
+/// boundary.
+///
 /// # Errors
 /// Same as [`run`].
 pub(crate) async fn run_sub_workflow(
@@ -816,6 +825,7 @@ pub(crate) async fn run_sub_workflow(
     capabilities: &Capabilities,
     depth: u64,
     max_depth: u64,
+    token: CancellationToken,
 ) -> Result<RunOutcome> {
     let checkpointer: Arc<dyn Checkpointer<Value>> =
         Arc::new(InMemoryCheckpointer::<Value>::default());
@@ -833,7 +843,7 @@ pub(crate) async fn run_sub_workflow(
             "sub_workflow_depth": depth,
             "max_sub_workflow_depth": max_depth,
         })),
-        CancellationToken::new(),
+        token,
     )
     .await?;
     Ok(outcome)
@@ -1266,6 +1276,10 @@ fn build_graph(
                         run: &run_meta,
                         nodes: &nodes_state,
                         caps: &caps,
+                        // Handed to the executor so a nested engine call (today the
+                        // `sub_workflow` node) can thread this run's cancellation
+                        // into its child; a plain executor never reads it.
+                        token: token.clone(),
                     };
                     // BUG-8: bound THIS attempt (not the whole retry loop) to
                     // `node_timeout`. Race the attempt future against a
@@ -1386,6 +1400,7 @@ fn build_graph(
                                 run: &run_meta,
                                 nodes: &nodes_state,
                                 caps: &caps,
+                                token: token.clone(),
                             };
                             let scope = crate::nodes::expr_scope(&ctx);
                             crate::expr::resolve_traced(&node.config, &scope).1

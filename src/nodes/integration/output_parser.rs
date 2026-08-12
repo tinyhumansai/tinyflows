@@ -82,6 +82,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = OutputParserNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items, input);
@@ -109,6 +110,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         OutputParserNode.execute(ctx).await.expect("execute").items
     }
@@ -171,6 +173,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps,
+            token: crate::engine::CancellationToken::new(),
         };
         OutputParserNode.execute(ctx).await.map(|o| o.items)
     }

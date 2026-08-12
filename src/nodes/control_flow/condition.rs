@@ -89,6 +89,7 @@ mod tests {
             run: &run,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = ConditionNode.execute(ctx).await.expect("execute");
         (

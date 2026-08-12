@@ -174,6 +174,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let err = ToolCallNode
             .execute(ctx)
@@ -199,6 +200,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items[0].json["json"]["tool"], "x.y");
@@ -223,6 +225,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items[0].json["json"]["args"]["to"], Value::Null);
@@ -243,6 +246,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items.len(), 1);
@@ -269,6 +273,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items.len(), 3, "one output per input item");
@@ -296,6 +301,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items.len(), 1, "once mode emits a single item");

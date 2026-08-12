@@ -86,6 +86,7 @@ mod tests {
             run: &run,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         TransformNode.execute(ctx).await.expect("execute").items
     }
@@ -110,6 +111,7 @@ mod tests {
             run: &run,
             nodes: &nodes,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = TransformNode.execute(ctx).await.expect("execute").items;
         assert_eq!(out[0].json["who"], json!("a@b.com"));

@@ -325,6 +325,7 @@ mod tests {
             run: &run,
             nodes: &Value::Null,
             caps,
+            token: crate::engine::CancellationToken::new(),
         };
         DedupNode.execute(ctx).await.expect("execute")
     }

@@ -404,6 +404,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = MemoryNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items.len(), 2, "per_item default maps over input");
@@ -458,6 +459,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = MemoryNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items[0].json["json"]["opts"]["operation"], "search");
@@ -476,6 +478,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let err = MemoryNode
             .execute(ctx)
@@ -501,6 +504,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let err = MemoryNode
             .execute(ctx)
@@ -543,6 +547,7 @@ mod tests {
                 run: &run_meta,
                 nodes: &Value::Null,
                 caps: &caps,
+                token: crate::engine::CancellationToken::new(),
             };
             let err = MemoryNode
                 .execute(ctx)
@@ -567,6 +572,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let err = MemoryNode
             .execute(ctx)
@@ -591,6 +597,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let err = MemoryNode
             .execute(ctx)
@@ -619,6 +626,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            token: crate::engine::CancellationToken::new(),
         };
         let out = MemoryNode.execute(ctx).await.expect("execute");
         assert_eq!(out.items.len(), 1, "once mode emits a single item");
