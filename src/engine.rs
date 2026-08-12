@@ -1847,12 +1847,24 @@ async fn build_and_run(
     );
 
     // Reaching here means the run settled without a `stop`-policy failure
-    // (those bubble out as `Err` above), so it Completed. Per-step Error status
-    // is recorded independently on nodes handled by `continue`/`route`.
+    // (those bubble out as `Err` above). A node handled by `continue`/`route`
+    // still records a per-step `Error` while the run proceeds, so the terminal
+    // status is derived from the steps rather than assumed clean: any error step
+    // makes this `CompletedWithErrors`, so a host that reads only `status` still
+    // learns a node failed instead of seeing an unqualified success (#661 L1).
+    let collected_steps = steps.lock().expect("steps mutex poisoned").clone();
+    let status = if collected_steps
+        .iter()
+        .any(|step| matches!(step.status, StepStatus::Error))
+    {
+        RunStatus::CompletedWithErrors
+    } else {
+        RunStatus::Completed
+    };
     let run_record = Run {
         id: run_id,
-        status: RunStatus::Completed,
-        steps: steps.lock().expect("steps mutex poisoned").clone(),
+        status,
+        steps: collected_steps,
     };
     observer.on_run_finish(&run_record);
 
@@ -3785,6 +3797,101 @@ mod tests {
         assert!(
             err["message"].as_str().is_some_and(|m| !m.is_empty()),
             "error item must carry a non-empty message, got {err:?}"
+        );
+    }
+
+    /// Captures the terminal [`Run`] so a test can assert its status and which
+    /// nodes it names as failed (#661 L1).
+    #[derive(Default)]
+    struct StatusCapture {
+        status: Mutex<Option<RunStatus>>,
+        failed: Mutex<Vec<String>>,
+    }
+
+    impl RunObserver for StatusCapture {
+        fn on_run_finish(&self, run: &Run) {
+            *self.status.lock().unwrap() = Some(run.status.clone());
+            *self.failed.lock().unwrap() = run
+                .failed_node_ids()
+                .iter()
+                .map(|id| id.to_string())
+                .collect();
+        }
+    }
+
+    async fn observed_status(graph: &WorkflowGraph) -> (RunStatus, Vec<String>) {
+        let compiled = compile(graph).expect("compile");
+        let caps = mock_capabilities();
+        let capture = Arc::new(StatusCapture::default());
+        let observer: Arc<dyn RunObserver> = capture.clone();
+        run_with_observer(&compiled, json!({}), &caps, &observer)
+            .await
+            .expect("run");
+        let status = capture
+            .status
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("run finished");
+        let failed = capture.failed.lock().unwrap().clone();
+        (status, failed)
+    }
+
+    #[tokio::test]
+    async fn a_clean_run_is_completed_and_names_no_failed_node() {
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                node("a", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "a")],
+            ..Default::default()
+        };
+        let (status, failed) = observed_status(&graph).await;
+        assert_eq!(status, RunStatus::Completed);
+        assert!(
+            failed.is_empty(),
+            "a clean run names no failed node: {failed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_error_continue_marks_the_run_completed_with_errors() {
+        // #661 L1: a node that fails under `continue` used to leave the run
+        // reporting an unqualified `Completed`, so a host read success while a
+        // node failed. Now the terminal status says so, and names the node.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "on_error": "continue" });
+        let graph = WorkflowGraph {
+            nodes: vec![node("t", NodeKind::Trigger), tool],
+            edges: vec![edge("t", "x")],
+            ..Default::default()
+        };
+        let (status, failed) = observed_status(&graph).await;
+        assert_eq!(status, RunStatus::CompletedWithErrors);
+        assert_eq!(failed, vec!["x".to_string()], "the failing node is named");
+    }
+
+    #[tokio::test]
+    async fn on_error_route_marks_the_run_completed_with_errors() {
+        // A routed failure also failed the node; the recovery branch handling it
+        // downstream does not erase that the node itself errored.
+        let mut tool = node("x", NodeKind::ToolCall);
+        tool.config = json!({ "on_error": "route" });
+        let graph = WorkflowGraph {
+            nodes: vec![
+                node("t", NodeKind::Trigger),
+                tool,
+                node("recover", NodeKind::OutputParser),
+            ],
+            edges: vec![edge("t", "x"), port_edge("x", "error", "recover")],
+            ..Default::default()
+        };
+        let (status, failed) = observed_status(&graph).await;
+        assert_eq!(status, RunStatus::CompletedWithErrors);
+        assert!(
+            failed.contains(&"x".to_string()),
+            "the routed failure names its node: {failed:?}"
         );
     }
 
