@@ -112,11 +112,21 @@ impl Run {
     /// The ids of the nodes that errored in this run — the [`steps`](Run::steps)
     /// whose [`StepStatus`] is [`StepStatus::Error`], in the order they finished.
     ///
-    /// Empty for a clean [`RunStatus::Completed`]; non-empty exactly when the
-    /// status is [`RunStatus::CompletedWithErrors`] (nodes handled by
-    /// `continue`/`route`) or [`RunStatus::Failed`] (the `stop`-policy node that
-    /// ended the run). Lets a host act on *which* nodes failed without scanning
-    /// every step itself.
+    /// Always empty for a clean [`RunStatus::Completed`], and always non-empty
+    /// for [`RunStatus::CompletedWithErrors`] (that status *is* derived from at
+    /// least one `Error` step: every node a `continue`/`route` policy turned
+    /// into data records one).
+    ///
+    /// For [`RunStatus::Failed`] it names the failing node **only when a node
+    /// caused the failure** — a `stop`-policy node records its `Error` step on
+    /// the way out before ending the run. A `Failed` run that came from a
+    /// driver-level fault with no node behind it (a hit recursion limit, a
+    /// checkpointer error, a tinyagents graph error) records no `Error` step and
+    /// so returns an **empty** vector. So read a non-empty result as "these
+    /// nodes failed" — never read emptiness as "the run succeeded", and never
+    /// use this as a proxy for [`RunStatus::Failed`]; consult the run's
+    /// [`status`](Run::status) for the outcome. Lets a host act on *which* nodes
+    /// failed without scanning every step itself.
     pub fn failed_node_ids(&self) -> Vec<&str> {
         self.steps
             .iter()
