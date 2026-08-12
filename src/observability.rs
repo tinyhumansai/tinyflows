@@ -46,8 +46,18 @@ use serde_json::Value;
 pub enum RunStatus {
     /// The run is still executing (not yet driven to completion).
     Running,
-    /// The run reached a terminal node and completed successfully.
+    /// The run reached a terminal node and every node completed cleanly.
     Completed,
+    /// The run reached a terminal node, but at least one node failed under a
+    /// non-`stop` error policy (`continue` or `route`): its failure was turned
+    /// into data and the run proceeded, so the run did not [`Failed`], yet it
+    /// did not complete cleanly either. Without this a `continue`/`route`
+    /// failure is invisible in the terminal status and a host reads success
+    /// while a node failed (#661 L1). The failing nodes are exactly the
+    /// [`Run::steps`] whose [`StepStatus`] is [`StepStatus::Error`].
+    ///
+    /// [`Failed`]: RunStatus::Failed
+    CompletedWithErrors,
     /// The run ended because a node failed under a `stop` error policy.
     Failed,
 }
@@ -96,6 +106,24 @@ pub struct Run {
     pub status: RunStatus,
     /// The per-node steps, in the order they finished.
     pub steps: Vec<ExecutionStep>,
+}
+
+impl Run {
+    /// The ids of the nodes that errored in this run — the [`steps`](Run::steps)
+    /// whose [`StepStatus`] is [`StepStatus::Error`], in the order they finished.
+    ///
+    /// Empty for a clean [`RunStatus::Completed`]; non-empty exactly when the
+    /// status is [`RunStatus::CompletedWithErrors`] (nodes handled by
+    /// `continue`/`route`) or [`RunStatus::Failed`] (the `stop`-policy node that
+    /// ended the run). Lets a host act on *which* nodes failed without scanning
+    /// every step itself.
+    pub fn failed_node_ids(&self) -> Vec<&str> {
+        self.steps
+            .iter()
+            .filter(|step| matches!(step.status, StepStatus::Error))
+            .map(|step| step.node_id.as_str())
+            .collect()
+    }
 }
 
 /// A host-implemented hook that receives run/step records as a run executes.
