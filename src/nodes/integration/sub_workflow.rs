@@ -1184,10 +1184,19 @@ mod cancellation_propagation_tests {
     // independently-cancelled child fall through as a false completion.
     #[test]
     fn t5_defensive_independent_cancel_arm_is_present() {
+        // Scope the check to the production region — everything before the test
+        // module. `include_str!` pulls the whole file, so an unscoped `contains`
+        // would match the assertion strings *in this test itself* and pass even if
+        // the production arm were deleted. Slicing at `mod tests` (the sole such
+        // marker) makes deleting the arm from `run_child` actually fail this test.
         let src = include_str!("sub_workflow.rs");
+        let production = src
+            .split("mod tests")
+            .next()
+            .expect("source file has a body before its test module");
         assert!(
-            src.contains("if ctx.token.is_cancelled() {")
-                && src.contains("run is halted rather than falsely completed"),
+            production.contains("if ctx.token.is_cancelled() {")
+                && production.contains("run is halted rather than falsely completed"),
             "run_child must keep BOTH the parent-cancel wind-down (Ok(None)) and the \
              defensive independent-cancel error arm"
         );
