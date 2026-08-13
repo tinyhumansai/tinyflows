@@ -159,6 +159,25 @@ pub trait RunObserver: Send + Sync {
         let _ = step;
     }
 
+    /// Called as each item of a per-item node starts.
+    ///
+    /// `index` is the stable input position and `total` is the batch size. The
+    /// callbacks are silent for nodes that execute once, so hosts can use them
+    /// specifically to render fan-out work in flight.
+    fn on_item_start(&self, node_id: &str, index: usize, total: usize) {
+        let _ = (node_id, index, total);
+    }
+
+    /// Called as each item of a per-item node settles.
+    ///
+    /// `ok` describes that item's work before `on_item_error` policy is applied;
+    /// a collected item error therefore reports `false` even when the overall
+    /// node succeeds. Fail-fast cancellation may drop started items before this
+    /// callback can run.
+    fn on_item_finish(&self, node_id: &str, index: usize, total: usize, ok: bool) {
+        let _ = (node_id, index, total, ok);
+    }
+
     /// Called once, after the run settles, with the assembled [`Run`] record.
     fn on_run_finish(&self, run: &Run) {
         let _ = run;
@@ -190,6 +209,8 @@ mod tests {
             duration_ms: 0,
             diagnostics: Vec::new(),
         });
+        observer.on_item_start("n", 0, 1);
+        observer.on_item_finish("n", 0, 1, true);
         observer.on_run_finish(&Run {
             id: "run-0".to_string(),
             status: RunStatus::Completed,

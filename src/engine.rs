@@ -1276,6 +1276,7 @@ fn build_graph(
                         run: &run_meta,
                         nodes: &nodes_state,
                         caps: &caps,
+                        observer: observer.as_ref(),
                         // Handed to the executor so a nested engine call (today the
                         // `sub_workflow` node) can thread this run's cancellation
                         // into its child; a plain executor never reads it.
@@ -1400,6 +1401,7 @@ fn build_graph(
                                 run: &run_meta,
                                 nodes: &nodes_state,
                                 caps: &caps,
+                                observer: observer.as_ref(),
                                 token: token.clone(),
                             };
                             let scope = crate::nodes::expr_scope(&ctx);

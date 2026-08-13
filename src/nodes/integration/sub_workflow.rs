@@ -177,8 +177,12 @@ impl NodeExecutor for SubWorkflowNode {
         if per_item {
             let opts = crate::nodes::map::map_options(&ctx.node.config, &ctx.node.id);
             let ctx = &ctx;
-            let (items, _) =
-                crate::nodes::map::map_items(ctx.input.len(), opts, move |index| async move {
+            let (items, _) = crate::nodes::map::map_items(
+                ctx.input.len(),
+                &ctx.node.id,
+                ctx.observer,
+                opts,
+                move |index| async move {
                     let item = &ctx.input[index];
                     // Each child resolves `workflow_id` against *its own* item,
                     // so `=item.x` addresses the element this run is for, and
@@ -193,8 +197,9 @@ impl NodeExecutor for SubWorkflowNode {
                         .await?
                         .unwrap_or_else(|| crate::data::Item::new(Value::Null));
                     Ok((child, vec![]))
-                })
-                .await?;
+                },
+            )
+            .await?;
             // Parent-initiated cancel: wind down with no output, mirroring the
             // top-level cancelled-node contract. `ctx.token` is a one-way flag,
             // so if any child wound down (returned `None`) it is set here; the
@@ -415,6 +420,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         SubWorkflowNode
@@ -438,6 +444,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         SubWorkflowNode.execute(ctx).await.expect("execute")
@@ -702,6 +709,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         SubWorkflowNode.execute(ctx).await

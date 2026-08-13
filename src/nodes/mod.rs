@@ -39,6 +39,8 @@ pub struct NodeContext<'a> {
     pub nodes: &'a Value,
     /// Host-provided capabilities.
     pub caps: &'a Capabilities,
+    /// Host observer used to report per-item fan-out progress.
+    pub observer: &'a dyn crate::observability::RunObserver,
     /// The run's cooperative-cancellation token (see
     /// [`crate::engine::CancellationToken`]). An **owned clone** of the run
     /// token, not a borrow — an executor that spawns nested engine work (today
@@ -440,6 +442,7 @@ mod tests {
                     run: &run,
                     nodes: &Value::Null,
                     caps: &caps,
+                    observer: &crate::observability::NoopObserver,
                     token: crate::engine::CancellationToken::new(),
                 })
                 .await;
@@ -464,6 +467,7 @@ mod tests {
                 run: &run,
                 nodes: &Value::Null,
                 caps: &caps,
+                observer: &crate::observability::NoopObserver,
                 token: crate::engine::CancellationToken::new(),
             })
             .await
@@ -493,6 +497,7 @@ mod tests {
             run: &run,
             nodes: &nodes_state,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let scope = expr_scope(&ctx);
@@ -523,6 +528,7 @@ mod tests {
             run: &run,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let scope = expr_scope(&ctx);

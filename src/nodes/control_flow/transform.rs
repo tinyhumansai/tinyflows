@@ -86,6 +86,7 @@ mod tests {
             run: &run,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         TransformNode.execute(ctx).await.expect("execute").items
@@ -111,6 +112,7 @@ mod tests {
             run: &run,
             nodes: &nodes,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = TransformNode.execute(ctx).await.expect("execute").items;

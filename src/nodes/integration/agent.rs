@@ -64,16 +64,21 @@ impl NodeExecutor for AgentNode {
             // `config.on_item_error` what a failing turn does to the batch.
             let opts = crate::nodes::map::map_options(&ctx.node.config, &ctx.node.id);
             let ctx = &ctx;
-            let (items, diagnostics) =
-                crate::nodes::map::map_items(ctx.input.len(), opts, move |index| async move {
+            let (items, diagnostics) = crate::nodes::map::map_items(
+                ctx.input.len(),
+                &ctx.node.id,
+                ctx.observer,
+                opts,
+                move |index| async move {
                     let (cfg, diags) = crate::nodes::resolve_config_traced_for_item(
                         ctx,
                         ctx.input[index].json.clone(),
                     );
                     let item = run_turn(ctx, &cfg).await?;
                     Ok((item, diags))
-                })
-                .await?;
+                },
+            )
+            .await?;
             return Ok(NodeOutput::main(items).with_diagnostics(diagnostics));
         }
 
@@ -291,6 +296,7 @@ mod tests {
                 run: &run_meta,
                 nodes: &Value::Null,
                 caps: &caps,
+                observer: &crate::observability::NoopObserver,
                 token: crate::engine::CancellationToken::new(),
             })
             .await
@@ -307,6 +313,7 @@ mod tests {
                 run: &run_meta,
                 nodes: &Value::Null,
                 caps: &caps,
+                observer: &crate::observability::NoopObserver,
                 token: crate::engine::CancellationToken::new(),
             })
             .await
@@ -329,6 +336,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
@@ -355,6 +363,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
@@ -373,6 +382,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
@@ -397,6 +407,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = AgentNode.execute(ctx).await.expect("execute");
@@ -425,6 +436,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         AgentNode
@@ -586,6 +598,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let err = AgentNode

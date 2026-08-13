@@ -91,6 +91,7 @@ mod tests {
             run: &run,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = SwitchNode.execute(ctx).await.expect("execute");
@@ -113,6 +114,7 @@ mod tests {
             run: &run,
             nodes: &nodes,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = SwitchNode.execute(ctx).await.expect("execute");

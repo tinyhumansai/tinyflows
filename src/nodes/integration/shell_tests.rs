@@ -36,6 +36,7 @@ async fn execute_with(caps: Capabilities, config: Value) -> Result<NodeOutput> {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         })
         .await

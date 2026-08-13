@@ -203,6 +203,8 @@ fn error_item(message: &str) -> Item {
 /// error non-deterministic across runs. The other two policies never error.
 pub(crate) async fn map_items<F, Fut>(
     total: usize,
+    node_id: &str,
+    observer: &dyn crate::observability::RunObserver,
     opts: MapOptions,
     f: F,
 ) -> Result<(Vec<Item>, Vec<NullResolution>)>
@@ -218,10 +220,16 @@ where
         opts.concurrency
     };
 
-    // Each future carries its input index so completions can be re-slotted.
+    // Observer calls live inside the future so `buffer_unordered` only reports
+    // work as started when a concurrency slot actually begins polling it.
     let mut stream = futures_util::stream::iter((0..total).map(|index| {
         let fut = f(index);
-        async move { (index, fut.await) }
+        async move {
+            observer.on_item_start(node_id, index, total);
+            let result = fut.await;
+            observer.on_item_finish(node_id, index, total, result.is_ok());
+            (index, result)
+        }
     }))
     .buffer_unordered(in_flight);
 
@@ -335,6 +343,8 @@ mod tests {
         // Later items finish first: item 0 yields the most, item 4 the least.
         let (out, _) = map_items(
             input.len(),
+            "n",
+            &crate::observability::NoopObserver,
             opts(0, ItemErrorPolicy::Collect),
             |index| async move {
                 for _ in 0..(5 - index) * 4 {
@@ -361,6 +371,8 @@ mod tests {
         let input = &input;
         let (out, _) = map_items(
             input.len(),
+            "n",
+            &crate::observability::NoopObserver,
             opts(1, ItemErrorPolicy::Collect),
             move |index| {
                 let g = g.clone();
@@ -387,6 +399,8 @@ mod tests {
         let input = &input;
         let (out, _) = map_items(
             input.len(),
+            "n",
+            &crate::observability::NoopObserver,
             opts(4, ItemErrorPolicy::Collect),
             move |index| {
                 let g = g.clone();
@@ -418,6 +432,8 @@ mod tests {
         let input = &input;
         let (out, _) = map_items(
             input.len(),
+            "n",
+            &crate::observability::NoopObserver,
             opts(0, ItemErrorPolicy::Collect),
             move |index| {
                 let g = g.clone();
@@ -442,6 +458,8 @@ mod tests {
         let input = &input;
         let (out, _) = map_items(
             input.len(),
+            "n",
+            &crate::observability::NoopObserver,
             opts(0, ItemErrorPolicy::Collect),
             |index| async move {
                 if index == 2 {
@@ -473,6 +491,8 @@ mod tests {
         let input = &input;
         let (out, _) = map_items(
             input.len(),
+            "n",
+            &crate::observability::NoopObserver,
             opts(0, ItemErrorPolicy::Skip),
             |index| async move {
                 if index % 2 == 0 {
@@ -499,6 +519,8 @@ mod tests {
         // must win, so the reported error is item 1's.
         let err = map_items(
             input.len(),
+            "n",
+            &crate::observability::NoopObserver,
             opts(0, ItemErrorPolicy::FailFast),
             |index| async move {
                 if index == 4 {
@@ -522,9 +544,13 @@ mod tests {
 
     #[tokio::test]
     async fn empty_input_yields_no_items_and_no_error() {
-        let (out, diags) = map_items(0, opts(0, ItemErrorPolicy::Collect), |_| async {
-            unreachable!("no items to map")
-        })
+        let (out, diags) = map_items(
+            0,
+            "n",
+            &crate::observability::NoopObserver,
+            opts(0, ItemErrorPolicy::Collect),
+            |_| async { unreachable!("no items to map") },
+        )
         .await
         .expect("map");
         assert!(out.is_empty());
@@ -536,6 +562,8 @@ mod tests {
         let input = items(3);
         let (_, diags) = map_items(
             input.len(),
+            "n",
+            &crate::observability::NoopObserver,
             opts(0, ItemErrorPolicy::Collect),
             |index| async move {
                 Ok((

@@ -88,6 +88,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
 
@@ -111,6 +112,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
 
@@ -133,6 +135,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
 
@@ -152,6 +155,7 @@ mod tests {
             run: &Value::Null,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         SplitOutNode.execute(ctx).await.expect("execute").items

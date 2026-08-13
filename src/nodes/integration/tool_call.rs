@@ -47,16 +47,21 @@ impl NodeExecutor for ToolCallNode {
             // flight at once (default 1 — sequential, as before).
             let opts = crate::nodes::map::map_options(&ctx.node.config, &ctx.node.id);
             let ctx = &ctx;
-            let (items, diagnostics) =
-                crate::nodes::map::map_items(ctx.input.len(), opts, move |index| async move {
+            let (items, diagnostics) = crate::nodes::map::map_items(
+                ctx.input.len(),
+                &ctx.node.id,
+                ctx.observer,
+                opts,
+                move |index| async move {
                     let (cfg, diags) = crate::nodes::resolve_config_traced_for_item(
                         ctx,
                         ctx.input[index].json.clone(),
                     );
                     let result = invoke(ctx, &cfg).await?;
                     Ok((Item::new(envelope::wrap(result)), diags))
-                })
-                .await?;
+                },
+            )
+            .await?;
             Ok(NodeOutput::main(items).with_diagnostics(diagnostics))
         } else {
             // Single invocation against the first-item scope (or empty input).
@@ -174,6 +179,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let err = ToolCallNode
@@ -200,6 +206,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
@@ -225,6 +232,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
@@ -246,6 +254,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
@@ -273,6 +282,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");
@@ -301,6 +311,7 @@ mod tests {
             run: &run_meta,
             nodes: &Value::Null,
             caps: &caps,
+            observer: &crate::observability::NoopObserver,
             token: crate::engine::CancellationToken::new(),
         };
         let out = ToolCallNode.execute(ctx).await.expect("execute");

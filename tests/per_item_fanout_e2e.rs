@@ -23,6 +23,7 @@ use tinyflows::caps::{Capabilities, LlmProvider};
 use tinyflows::compiler::compile;
 use tinyflows::engine::run;
 use tinyflows::model::{Edge, Node, NodeKind, TriggerKind, WorkflowGraph};
+use tinyflows::observability::RunObserver;
 
 /// Builds a node with the given id, kind, and config (no ports, no position).
 fn node(id: &str, kind: NodeKind, config: Value) -> Node {
@@ -294,4 +295,75 @@ async fn a_fanned_out_batch_can_opt_back_into_failing_the_node() {
         err.to_string().contains("gamma"),
         "expected the failing item's error, got: {err}"
     );
+}
+
+#[derive(Default)]
+struct ItemObserver {
+    starts: std::sync::Mutex<Vec<(String, usize, usize)>>,
+    finishes: std::sync::Mutex<Vec<(String, usize, usize, bool)>>,
+    live: AtomicUsize,
+    peak_live: AtomicUsize,
+}
+
+impl RunObserver for ItemObserver {
+    fn on_item_start(&self, node_id: &str, index: usize, total: usize) {
+        self.starts
+            .lock()
+            .unwrap()
+            .push((node_id.to_string(), index, total));
+        let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_live.fetch_max(live, Ordering::SeqCst);
+    }
+
+    fn on_item_finish(&self, node_id: &str, index: usize, total: usize, ok: bool) {
+        self.live.fetch_sub(1, Ordering::SeqCst);
+        self.finishes
+            .lock()
+            .unwrap()
+            .push((node_id.to_string(), index, total, ok));
+    }
+}
+
+#[tokio::test]
+async fn a_real_run_reports_each_fanned_out_item_to_the_observer() {
+    let watcher = Arc::new(ItemObserver::default());
+    let observer: Arc<dyn RunObserver> = watcher.clone();
+    let graph = fanout_graph(json!({
+        "prompt": "=item.name",
+        "execution": "per_item",
+        "concurrency": 3,
+    }));
+    let compiled = compile(&graph).expect("compile");
+
+    tinyflows::engine::run_with_observer(
+        &compiled,
+        topics(),
+        &caps_with(Arc::new(ConcurrencyProbe::default())),
+        &observer,
+    )
+    .await
+    .expect("run");
+
+    let starts = watcher.starts.lock().unwrap().clone();
+    let finishes = watcher.finishes.lock().unwrap().clone();
+    assert_eq!(starts.len(), 5);
+    assert_eq!(finishes.len(), 5);
+    assert!(
+        starts
+            .iter()
+            .all(|(node, _, total)| node == "work" && *total == 5)
+    );
+    assert!(
+        finishes
+            .iter()
+            .all(|(node, _, total, ok)| node == "work" && *total == 5 && *ok)
+    );
+    let mut indices = starts
+        .iter()
+        .map(|(_, index, _)| *index)
+        .collect::<Vec<_>>();
+    indices.sort_unstable();
+    assert_eq!(indices, [0, 1, 2, 3, 4]);
+    let peak = watcher.peak_live.load(Ordering::SeqCst);
+    assert!(peak > 1 && peak <= 3, "unexpected live-worker peak: {peak}");
 }
