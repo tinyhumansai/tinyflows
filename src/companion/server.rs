@@ -223,7 +223,9 @@ impl CompanionServer {
     /// This mirrors what [`start_workflow`](Self::start_workflow) does
     /// internally for native runs — an embedding host must call this before
     /// executing a graph that contains browser nodes, or every browser action
-    /// fails with `tab_not_shared`.
+    /// fails with `tab_not_shared`. External runners are not registered in the
+    /// native run table, so their cancellation path must call
+    /// [`cancel_bound_run`](Self::cancel_bound_run) before unbinding.
     pub fn bind_run(
         &self,
         run_id: impl Into<String>,
@@ -240,10 +242,35 @@ impl CompanionServer {
     }
 
     /// Releases a run→tab binding after an external run settles. Idempotent.
+    ///
+    /// This does not cancel in-flight browser actions. On cancellation, call
+    /// [`cancel_bound_run`](Self::cancel_bound_run) instead so the extension and
+    /// pending relay requests are both notified.
     pub fn unbind_run(&self, run_id: &str) {
         if let Ok(mut relay) = self.inner.relay.lock() {
             relay.tabs_mut().unbind_run(run_id);
         }
+    }
+
+    /// Cancels browser work for an externally-owned run and releases its tab
+    /// binding.
+    ///
+    /// An embedding host should call this alongside cancellation of its own
+    /// workflow engine. Unlike [`cancel_workflow`](Self::cancel_workflow), this
+    /// method does not expect the run to exist in the companion's native run
+    /// table. Returns whether the run had a live tab binding.
+    pub async fn cancel_bound_run(&self, run_id: &str) -> bool {
+        let (was_bound, responses) = self
+            .inner
+            .relay
+            .lock()
+            .map(|mut relay| {
+                let was_bound = relay.tabs().binding(run_id).is_some();
+                (was_bound, relay.cancel_run(run_id))
+            })
+            .unwrap_or_default();
+        self.dispatch(responses).await;
+        was_bound
     }
 
     /// Starts a native run bound to one explicit shared tab.
@@ -344,7 +371,10 @@ impl CompanionServer {
         Ok(run_id)
     }
 
-    /// Cancels a live run and its in-flight browser action.
+    /// Cancels a companion-native run and its in-flight browser action.
+    ///
+    /// Runs registered only through [`bind_run`](Self::bind_run) are externally
+    /// owned and must use [`cancel_bound_run`](Self::cancel_bound_run).
     pub async fn cancel_workflow(&self, run_id: &str) -> bool {
         let token = self
             .inner
@@ -354,13 +384,7 @@ impl CompanionServer {
             .and_then(|runs| runs.get(run_id).cloned());
         let Some(token) = token else { return false };
         token.cancel();
-        let responses = self
-            .inner
-            .relay
-            .lock()
-            .map(|mut relay| relay.cancel_run(run_id))
-            .unwrap_or_default();
-        self.dispatch(responses).await;
+        self.cancel_bound_run(run_id).await;
         true
     }
 
@@ -984,9 +1008,49 @@ fn control_error(request_id: String, code: &str, message: &str) -> CompanionCont
 mod tests {
     use super::*;
 
+    fn test_server(workflows_dir: PathBuf) -> CompanionServer {
+        CompanionServer::new(CompanionServerConfig {
+            policy: RelayPolicy::loopback(0),
+            extension_id: "a".repeat(32),
+            pairing_secret: PairingSecret::parse("a".repeat(32)).unwrap(),
+            workflows_dir,
+            capabilities: crate::caps::mock::mock_capabilities(),
+            run_host: None,
+        })
+        .unwrap()
+    }
+
     #[test]
     fn workflow_ids_cannot_escape_the_configured_directory() {
         let error = load_workflow(Path::new("/tmp"), "../secret").unwrap_err();
         assert!(error.to_string().contains("invalid workflow id"));
+    }
+
+    #[tokio::test]
+    async fn external_run_cancellation_clears_its_relay_binding() {
+        let server = test_server(PathBuf::from("."));
+        server
+            .inner
+            .relay
+            .lock()
+            .unwrap()
+            .tabs_mut()
+            .share(7, 1, "https://example.com", "Example")
+            .unwrap();
+        server.bind_run("external-1", 7).unwrap();
+
+        assert!(!server.cancel_workflow("external-1").await);
+        assert!(server.cancel_bound_run("external-1").await);
+        assert!(
+            server
+                .inner
+                .relay
+                .lock()
+                .unwrap()
+                .tabs()
+                .binding("external-1")
+                .is_none()
+        );
+        assert!(!server.cancel_bound_run("external-1").await);
     }
 }
