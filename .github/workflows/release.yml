@@ -31,6 +31,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Build vendored code without leaving the write-capable release token
+          # in git config. The push step authenticates only its two git calls.
+          persist-credentials: false
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
@@ -120,8 +123,13 @@ jobs:
 
       - name: Push release commit and tag
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
+          auth_header="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
           git push origin "${RELEASE_TAG}"
 
