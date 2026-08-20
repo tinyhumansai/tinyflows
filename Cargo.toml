@@ -48,7 +48,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 reqwest = { version = "0.13", default-features = false, features = ["json"], optional = true }
 # `caps::host` only: hashing an author-supplied state key (and namespace) into
 # one safe path component, and staging a script in a temporary directory.
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 tempfile = { version = "3", optional = true }
 # `store` only: the advisory file lock that keeps two processes from deciding
 # the same proposal at once.
@@ -99,7 +99,7 @@ proptest = "1"
 # `host-caps` feature is on (the same rule `caps::mock` follows), so what that
 # feature would switch on has to be present for a test build too. An optional
 # dependency is not activated by `cfg(test)`, hence these.
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile = "3"
 fs2 = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
