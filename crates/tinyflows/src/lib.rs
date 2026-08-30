@@ -24,6 +24,9 @@
 pub mod bindings;
 pub mod caps;
 pub mod catalog;
+/// Topologies this engine's fan-in lowering cannot execute safely, refused
+/// before a run rather than surfacing as dropped data or a hung barrier.
+pub mod compat;
 pub mod compiler;
 pub mod data;
 /// Reading a run's steps for the failures a green outcome hides: null bindings,
