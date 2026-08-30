@@ -127,6 +127,42 @@ fn http_request_normalizes_json_body_named_body_fields_and_headers() {
         "JSON HTTP",
     );
     assert_eq!(cfg["body"], json!({ "ready": true }));
+
+    let cfg = map_http_request(
+        &json!({ "jsonBody": "{\"ready\":true}" }),
+        &mut warnings,
+        "Text JSON HTTP",
+    );
+    assert_eq!(cfg["body"], json!({ "ready": true }));
+
+    let cfg = map_http_request(
+        &json!({ "jsonBody": "={{ $json.payload }}" }),
+        &mut warnings,
+        "Expression JSON HTTP",
+    );
+    assert_eq!(cfg["body"], json!("=.item.payload"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn invalid_textual_json_body_makes_the_http_node_a_placeholder() {
+    let mut warnings = Vec::new();
+    let (kind, cfg) = map_http_request_node(
+        &json!({ "jsonBody": "{not json}" }),
+        &mut warnings,
+        "Broken HTTP",
+    );
+    assert_eq!(kind, NodeKind::Transform);
+    assert_eq!(cfg["_n8n_import"]["untranslated_http_config"], json!(true));
+    assert_eq!(
+        cfg["_n8n_import"]["untranslated"]["jsonBody"],
+        json!("{not json}")
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("placeholder"))
+    );
 }
 
 #[test]
@@ -263,11 +299,85 @@ fn incompatible_n8n_code_is_a_placeholder_not_an_executable_code_node() {
     assert_eq!(cfg["_n8n_import"]["original_type"], json!("code"));
 
     let (kind, _) = map_code_node(
+        &json!({ "jsCode": "const out = transform(input); return out;" }),
+        &mut warnings,
+        "Late return",
+    );
+    assert_eq!(kind, NodeKind::Transform);
+
+    let (kind, _) = map_code_node(
         &json!({ "jsCode": "process.stdin.pipe(process.stdout);" }),
         &mut Vec::new(),
         "Portable",
     );
     assert_eq!(kind, NodeKind::Code);
+
+    for source in [
+        "function id(value) { return value; } module.exports = id(input);",
+        "const word = \"return\"; module.exports = word;",
+        "// return is discussed here\nmodule.exports = input;",
+        "const id = (value) => { return value; }; module.exports = id(input);",
+        "function pick({value}) { return value; } module.exports = pick(input);",
+        "const helper = { pick(value) { return value; } }; module.exports = helper.pick(input);",
+        "module.exports = input.map(function (value) { return value; });",
+        "module.exports = input.values.map(value => { return value; });",
+        "module.exports = /return/.test(input);",
+        "function test(value) { return /$json/.test(value); } module.exports = test(input);",
+        "const items = input.values; module.exports = items;",
+        "function map(items) { return items.length; } module.exports = map(input);",
+    ] {
+        let (kind, _) = map_code_node(&json!({ "jsCode": source }), &mut Vec::new(), "Portable");
+        assert_eq!(kind, NodeKind::Code, "source was downgraded: {source}");
+    }
+
+    let (kind, _) = map_code_node(
+        &json!({ "jsCode": "console.log(`${$json.id}`);" }),
+        &mut Vec::new(),
+        "n8n template",
+    );
+    assert_eq!(kind, NodeKind::Transform);
+
+    let (kind, _) = map_code_node(
+        &json!({ "jsCode": "const f = x => x; if (ok) { return value; }" }),
+        &mut Vec::new(),
+        "Top-level return after arrow",
+    );
+    assert_eq!(kind, NodeKind::Transform);
+
+    let (kind, _) = map_code_node(
+        &json!({ "jsCode": "obj.function(); if (ok) { return value; }" }),
+        &mut Vec::new(),
+        "Function property before top-level return",
+    );
+    assert_eq!(kind, NodeKind::Transform);
+
+    let (kind, _) = map_code_node(
+        &json!({ "jsCode": "console.log(`${/* } */ $json.id}`);" }),
+        &mut Vec::new(),
+        "n8n template with comment",
+    );
+    assert_eq!(kind, NodeKind::Transform);
+
+    let (kind, _) = map_code_node(
+        &json!({ "jsCode": "console.log(items.length); process.stdin.pipe(process.stdout);" }),
+        &mut Vec::new(),
+        "Unbound items global",
+    );
+    assert_eq!(kind, NodeKind::Transform);
+
+    let (kind, _) = map_code_node(
+        &json!({ "pythonCode": "def identity(value): return value\nprint(identity(input()))" }),
+        &mut Vec::new(),
+        "Portable Python helper",
+    );
+    assert_eq!(kind, NodeKind::Code);
+
+    let (kind, _) = map_code_node(
+        &json!({ "jsCode": "function count(items) { return items.length; } console.log(items.length);" }),
+        &mut Vec::new(),
+        "Function-local then global items",
+    );
+    assert_eq!(kind, NodeKind::Transform);
 }
 
 #[test]
@@ -332,54 +442,5 @@ fn schedule_trigger_maps_a_cron_expression_rule() {
     );
 }
 
-#[test]
-fn schedule_trigger_maps_a_fixed_unit_interval_rule() {
-    let mut warnings = Vec::new();
-    let cfg = trigger_config(
-        "schedule",
-        &json!({
-            "rule": { "interval": [{ "field": "hours", "hoursInterval": 2 }] }
-        }),
-        &mut warnings,
-        "ScheduleTrigger",
-    );
-    assert_eq!(
-        cfg["schedule"],
-        json!({ "kind": "every", "every_ms": 7200000.0 })
-    );
-}
-
-#[test]
-fn unrecognized_schedule_shape_warns_instead_of_guessing() {
-    let mut warnings = Vec::new();
-    let cfg = trigger_config(
-        "schedule",
-        &json!({ "rule": { "interval": [{ "field": "weekday", "weekday": 1 }] } }),
-        &mut warnings,
-        "Weekly",
-    );
-    assert!(cfg.get("schedule").is_none());
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Weekly") && w.contains("could not be translated"))
-    );
-}
-
-#[test]
-fn multiple_schedule_intervals_warn_instead_of_dropping_cadences() {
-    let mut warnings = Vec::new();
-    let cfg = trigger_config(
-        "schedule",
-        &json!({ "rule": { "interval": [
-            { "field": "hours", "hoursInterval": 2 },
-            { "field": "hours", "hoursInterval": 6 }
-        ] } }),
-        &mut warnings,
-        "Several cadences",
-    );
-    assert!(cfg.get("schedule").is_none());
-    assert!(warnings.iter().any(|warning| {
-        warning.contains("Several cadences") && warning.contains("could not be translated")
-    }));
-}
+include!("node_mapping/http_regression_tests.rs");
+include!("node_mapping/schedule_tests.rs");

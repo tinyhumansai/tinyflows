@@ -85,9 +85,9 @@ fn a_real_expression_is_not_mistaken_for_prose() {
 #[test]
 fn reading_an_agents_output_without_the_envelope_is_refused() {
     let graph = graph(json!([
-        { "id": "fetch", "kind": "agent", "name": "Fetch", "config": { "prompt": "get it" } },
+        { "id": "fetch-agent", "kind": "agent", "name": "Fetch", "config": { "prompt": "get it" } },
         { "id": "notify", "kind": "tool_call", "name": "Notify",
-          "config": { "slug": "demo:echo", "args": { "text": "=nodes.fetch.item.title" } } },
+          "config": { "slug": "demo:echo", "args": { "text": "=nodes.fetch-agent.item.title" } } },
     ]));
 
     let failures = failures(&graph);
@@ -96,7 +96,7 @@ fn reading_an_agents_output_without_the_envelope_is_refused() {
     assert!(failures[0].contains("args.text"), "{failures:?}");
     // The message has to carry the correction, not just the complaint.
     assert!(
-        failures[0].contains("=nodes.fetch.item.json.title"),
+        failures[0].contains("=nodes.fetch-agent.item.json.title"),
         "{failures:?}"
     );
 }
@@ -167,15 +167,19 @@ fn a_binding_to_a_node_that_does_not_exist_is_left_to_the_engine() {
 #[test]
 fn an_expression_that_is_not_a_node_binding_is_not_second_guessed() {
     let graph = graph(json!([
+        { "id": "fetch", "kind": "agent", "name": "Fetch", "config": {} },
         { "id": "notify", "kind": "tool_call", "name": "Notify",
           "config": { "slug": "demo:echo",
                       "args": { "text": "=.item.text | ascii_downcase",
-                                "count": "=run.trigger.n" } } },
+                                "count": "=run.trigger.n",
+                                "fallback": "=nodes.fetch.item.missing // \"fallback\"" } } },
     ]));
 
     // A gate that guessed at arbitrary jq would refuse graphs that work.
     assert!(failures(&graph).is_empty(), "{:?}", failures(&graph));
 }
+
+include!("indexed_binding_tests.rs");
 
 // ---- the error surface ----
 

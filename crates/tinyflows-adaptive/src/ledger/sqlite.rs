@@ -85,14 +85,15 @@ const DDL: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS ix_variants_parent ON variants(scope_key, parent)",
     "CREATE TABLE IF NOT EXISTS episodes (
-        id         TEXT PRIMARY KEY,
+        id         TEXT NOT NULL,
         scope_key  TEXT NOT NULL DEFAULT '',
         goal       TEXT NOT NULL,
         status     TEXT NOT NULL,
         attempt    INTEGER NOT NULL DEFAULT 0,
         stalled    INTEGER NOT NULL DEFAULT 0,
         started_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (scope_key, id)
     )",
     "CREATE INDEX IF NOT EXISTS ix_episodes_scope ON episodes(scope_key, updated_at)",
     // One row per step, never one blob per attempt: a looped node produces a
@@ -322,6 +323,7 @@ impl SqliteLedger {
         for statement in MIGRATIONS {
             let _ = conn.execute(statement, []);
         }
+        migrate_episode_identity(&conn)?;
         Ok(Self {
             conn: std::sync::Arc::new(Mutex::new(conn)),
             scope: None,
@@ -356,6 +358,40 @@ impl SqliteLedger {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()))
     }
+}
+
+/// Rebuild the pre-tenancy episodes table whose primary key was only `id`.
+fn migrate_episode_identity(conn: &Connection) -> Result<()> {
+    let scoped_primary_key: i64 = conn.query_row(
+        "SELECT pk FROM pragma_table_info('episodes') WHERE name = 'scope_key'",
+        [],
+        |row| row.get(0),
+    )?;
+    if scoped_primary_key != 0 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE episodes_scoped (
+            id TEXT NOT NULL,
+            scope_key TEXT NOT NULL DEFAULT '',
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            stalled INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (scope_key, id)
+         );
+         INSERT INTO episodes_scoped
+            SELECT id, scope_key, goal, status, attempt, stalled, started_at, updated_at
+            FROM episodes;
+         DROP TABLE episodes;
+         ALTER TABLE episodes_scoped RENAME TO episodes;
+         CREATE INDEX ix_episodes_scope ON episodes(scope_key, updated_at);
+         COMMIT;",
+    )?;
+    Ok(())
 }
 
 fn next_seq(conn: &Connection, table: &str) -> Result<i64> {
@@ -419,529 +455,7 @@ fn read_episode(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Episode>> {
     })())
 }
 
-#[async_trait]
-impl Ledger for SqliteLedger {
-    fn scope(&self) -> Option<&str> {
-        self.scope.as_deref()
-    }
-
-    async fn append(&self, row: &LedgerRow) -> Result<String> {
-        let conn = self.guard()?;
-        let seq = next_seq(&conn, "ledger_rows")?;
-        let id = new_id("ldg", seq);
-        conn.execute(
-            "INSERT INTO ledger_rows(id, episode, attempt, approach_sig, approach_desc,
-                                     workflow_id, outcome, cause, cost_usd, at,
-                                     satisfied, advanced, scope_key, seq)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-            params![
-                id,
-                row.episode,
-                i64::from(row.attempt),
-                row.approach_sig,
-                row.approach_desc,
-                row.workflow_id,
-                row.outcome,
-                row.cause,
-                row.cost_usd,
-                row.at,
-                i64::from(row.satisfied),
-                i64::from(row.advanced),
-                self.bucket(),
-                seq,
-            ],
-        )?;
-        Ok(id)
-    }
-
-    async fn rows(&self, episode: &str) -> Result<Vec<LedgerRow>> {
-        let conn = self.guard()?;
-        // Scoped as well as keyed by episode. An episode id is opaque and a
-        // service may hand one straight through from a request path, so this
-        // must not be the one read where guessing an id is enough.
-        let mut stmt = conn.prepare(
-            "SELECT * FROM ledger_rows WHERE episode = ?1 AND scope_key = ?2 ORDER BY seq",
-        )?;
-        let found = stmt
-            .query_map(params![episode, self.bucket()], read_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(found)
-    }
-
-    async fn promote(&self, lesson: &Lesson, cites: &[String]) -> Result<String> {
-        let conn = self.guard()?;
-        let seq = next_seq(&conn, "lessons")?;
-        let id = new_id("les", seq);
-        conn.execute(
-            "INSERT INTO lessons(id, kind, trigger, mechanism, claim, applied, helped,
-                                 scope_key, seq)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![
-                id,
-                serde_json::to_string(&lesson.kind)
-                    .map_err(|e| LedgerError::Corrupt(e.to_string()))?
-                    .trim_matches('"'),
-                lesson.trigger,
-                lesson.mechanism,
-                lesson.claim,
-                i64::from(lesson.applied),
-                i64::from(lesson.helped),
-                // The handle's, never the argument's.
-                self.bucket(),
-                seq,
-            ],
-        )?;
-        for row_id in cites {
-            conn.execute(
-                "INSERT OR IGNORE INTO lesson_evidence(lesson_id, row_id) VALUES(?1,?2)",
-                params![id, row_id],
-            )?;
-        }
-        Ok(id)
-    }
-
-    async fn lessons(&self, kind: Option<LessonKind>) -> Result<Vec<Lesson>> {
-        let conn = self.guard()?;
-        // This bucket plus global. An unscoped handle's bucket is global, so
-        // the two halves coincide and it sees exactly what it wrote.
-        let mut stmt = conn
-            .prepare("SELECT * FROM lessons WHERE scope_key = ?1 OR scope_key = '' ORDER BY seq")?;
-        let all = stmt
-            .query_map([self.bucket()], |r| {
-                let scope: String = r.get("scope_key")?;
-                Ok(Lesson {
-                    id: r.get("id")?,
-                    kind: LessonKind::parse(&r.get::<_, String>("kind")?),
-                    trigger: r.get("trigger")?,
-                    mechanism: r.get("mechanism")?,
-                    claim: r.get("claim")?,
-                    applied: r.get::<_, i64>("applied")?.try_into().unwrap_or(0),
-                    helped: r.get::<_, i64>("helped")?.try_into().unwrap_or(0),
-                    scope_key: (!scope.is_empty()).then_some(scope),
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(match kind {
-            Some(want) => all.into_iter().filter(|l| l.kind == want).collect(),
-            None => all,
-        })
-    }
-
-    async fn evidence(&self, lesson_id: &str) -> Result<Vec<LedgerRow>> {
-        let conn = self.guard()?;
-        let mut stmt = conn.prepare(
-            "SELECT r.* FROM ledger_rows r
-             JOIN lesson_evidence e ON e.row_id = r.id
-             WHERE e.lesson_id = ?1 AND r.scope_key = ?2 ORDER BY r.seq",
-        )?;
-        let found = stmt
-            .query_map(params![lesson_id, self.bucket()], read_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(found)
-    }
-
-    async fn score_lesson(&self, lesson_id: &str, helped: bool) -> Result<()> {
-        let conn = self.guard()?;
-        conn.execute(
-            // Constrained to what this handle can see — the id arrives from
-            // model output, and naming another tenant's lesson must not move
-            // its score.
-            "UPDATE lessons SET applied = applied + 1, helped = helped + ?2
-             WHERE id = ?1 AND (scope_key = ?3 OR scope_key = '')",
-            params![lesson_id, i64::from(helped), self.bucket()],
-        )?;
-        Ok(())
-    }
-
-    async fn score_workflow(&self, workflow_id: &str, helped: bool) -> Result<()> {
-        let conn = self.guard()?;
-        // Upsert: the first run of a workflow is the common case and must not
-        // need a separate registration step.
-        conn.execute(
-            "INSERT INTO workflow_scores(scope_key, workflow_id, applied, helped)
-             VALUES(?1, ?2, 1, ?3)
-             ON CONFLICT(scope_key, workflow_id) DO UPDATE SET
-                applied = applied + 1,
-                helped  = helped + ?3",
-            params![self.bucket(), workflow_id, i64::from(helped)],
-        )?;
-        Ok(())
-    }
-
-    async fn workflow_score(&self, workflow_id: &str) -> Result<Score> {
-        let conn = self.guard()?;
-        let found = conn
-            .query_row(
-                "SELECT applied, helped FROM workflow_scores
-                 WHERE scope_key = ?1 AND workflow_id = ?2",
-                params![self.bucket(), workflow_id],
-                |r| {
-                    Ok(Score {
-                        applied: r.get::<_, i64>(0)?.try_into().unwrap_or(0),
-                        helped: r.get::<_, i64>(1)?.try_into().unwrap_or(0),
-                    })
-                },
-            )
-            .optional()?;
-        Ok(found.unwrap_or_default())
-    }
-
-    async fn link_variant(&self, parent: &str, variant: &str) -> Result<()> {
-        let conn = self.guard()?;
-        conn.execute(
-            "INSERT OR IGNORE INTO variants(scope_key, variant, parent) VALUES(?1,?2,?3)",
-            params![self.bucket(), variant, parent],
-        )?;
-        Ok(())
-    }
-
-    async fn parent_of(&self, id: &str) -> Result<Option<String>> {
-        let conn = self.guard()?;
-        let found = conn
-            .query_row(
-                "SELECT parent FROM variants WHERE scope_key = ?1 AND variant = ?2",
-                params![self.bucket(), id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(found)
-    }
-
-    async fn save_episode(&self, episode: &Episode) -> Result<()> {
-        let conn = self.guard()?;
-        conn.execute(
-            "INSERT INTO episodes(id, scope_key, goal, status, attempt, stalled,
-                                  started_at, updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(id) DO UPDATE SET
-                goal = ?3, status = ?4, attempt = ?5, stalled = ?6, updated_at = ?8",
-            params![
-                episode.id,
-                self.bucket(),
-                serde_json::to_string(&episode.goal)
-                    .map_err(|e| LedgerError::Corrupt(e.to_string()))?,
-                serde_json::to_string(&episode.status)
-                    .map_err(|e| LedgerError::Corrupt(e.to_string()))?,
-                i64::from(episode.attempt),
-                i64::from(episode.stalled),
-                episode.started_at,
-                episode.updated_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    async fn episode(&self, id: &str) -> Result<Option<Episode>> {
-        let conn = self.guard()?;
-        let found = conn
-            .query_row(
-                "SELECT * FROM episodes WHERE id = ?1 AND scope_key = ?2",
-                params![id, self.bucket()],
-                read_episode,
-            )
-            .optional()?;
-        found.transpose()
-    }
-
-    async fn save_steps(&self, row_id: &str, steps: &[crate::execute::StepRecord]) -> Result<()> {
-        let conn = self.guard()?;
-        // Replace, not overlay: `INSERT OR REPLACE` only touches the sequence
-        // numbers present in `steps`, so a shorter re-save would leave the old
-        // tail behind and `steps()` would stitch two attempts together.
-        conn.execute(
-            "DELETE FROM attempt_steps WHERE scope_key = ?1 AND row_id = ?2",
-            params![self.bucket(), row_id],
-        )?;
-        for (seq, step) in steps.iter().enumerate() {
-            conn.execute(
-                "INSERT OR REPLACE INTO attempt_steps(scope_key, row_id, seq, node_id, status,
-                                                      output, duration_ms, null_bindings,
-                                                      transcript)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![
-                    self.bucket(),
-                    row_id,
-                    i64::try_from(seq).unwrap_or(i64::MAX),
-                    step.node_id,
-                    serde_json::to_string(&step.status)
-                        .map_err(|e| LedgerError::Corrupt(e.to_string()))?
-                        .trim_matches('"'),
-                    serde_json::to_string(&step.output)
-                        .map_err(|e| LedgerError::Corrupt(e.to_string()))?,
-                    i64::try_from(step.duration_ms).unwrap_or(i64::MAX),
-                    serde_json::to_string(&step.null_bindings)
-                        .map_err(|e| LedgerError::Corrupt(e.to_string()))?,
-                    serde_json::to_string(&step.transcript)
-                        .map_err(|e| LedgerError::Corrupt(e.to_string()))?,
-                ],
-            )?;
-        }
-        Ok(())
-    }
-
-    async fn steps(&self, row_id: &str) -> Result<Vec<crate::execute::StepRecord>> {
-        let conn = self.guard()?;
-        let mut stmt = conn.prepare(
-            "SELECT node_id, status, output, duration_ms, null_bindings, transcript
-             FROM attempt_steps
-             WHERE scope_key = ?1 AND row_id = ?2 ORDER BY seq",
-        )?;
-        let found = stmt
-            .query_map(params![self.bucket(), row_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        found
-            .into_iter()
-            .map(
-                |(node_id, status, output, duration_ms, bindings, transcript)| {
-                    Ok(crate::execute::StepRecord {
-                        node_id,
-                        status: if status == "error" {
-                            crate::execute::StepOutcome::Error
-                        } else {
-                            crate::execute::StepOutcome::Success
-                        },
-                        output: serde_json::from_str(&output)
-                            .map_err(|e| LedgerError::Corrupt(e.to_string()))?,
-                        duration_ms: u64::try_from(duration_ms).unwrap_or(0),
-                        null_bindings: serde_json::from_str(&bindings)
-                            .map_err(|e| LedgerError::Corrupt(e.to_string()))?,
-                        transcript: serde_json::from_str(&transcript)
-                            .map_err(|e| LedgerError::Corrupt(e.to_string()))?,
-                    })
-                },
-            )
-            .collect()
-    }
-
-    async fn episodes(&self, running_only: bool, page: super::Page) -> Result<Vec<Episode>> {
-        let conn = self.guard()?;
-        let mut stmt = conn
-            .prepare("SELECT * FROM episodes WHERE scope_key = ?1 ORDER BY updated_at DESC, id")?;
-        let all = stmt
-            .query_map([self.bucket()], read_episode)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let kept: Result<Vec<Episode>> = all
-            .into_iter()
-            .filter(|e| {
-                !running_only || e.as_ref().is_ok_and(|e| e.status == EpisodeStatus::Running)
-            })
-            .collect();
-        Ok(page.apply(kept?))
-    }
-
-    async fn children_of(&self, id: &str) -> Result<Vec<String>> {
-        let conn = self.guard()?;
-        let mut stmt = conn.prepare(
-            "SELECT variant FROM variants WHERE scope_key = ?1 AND parent = ?2 ORDER BY variant",
-        )?;
-        let found = stmt
-            .query_map(params![self.bucket(), id], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        Ok(found)
-    }
-}
-
+include!("sqlite/ledger_impl.rs");
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ledger::conformance;
-
-    #[tokio::test]
-    async fn passes_the_conformance_suite() {
-        let store = SqliteLedger::in_memory().expect("open in-memory ledger");
-        conformance::run_all(&store).await;
-    }
-
-    #[tokio::test]
-    async fn passes_the_tenant_isolation_suite() {
-        let store = SqliteLedger::in_memory().expect("open in-memory ledger");
-        let a = store.for_tenant("user-a");
-        let b = store.for_tenant("user-b");
-        conformance::run_tenants(&store, &a, &b).await;
-    }
-
-    #[tokio::test]
-    async fn a_scoped_handle_shares_the_connection_rather_than_the_file() {
-        // Two handles for the SAME tenant must see each other's writes — that
-        // is what "shares" means. Probing it across scopes would now fail by
-        // design, because rows carry the bucket that wrote them.
-        let store = SqliteLedger::in_memory().expect("open in-memory ledger");
-        let one = store.for_tenant("user-a");
-        let two = store.for_tenant("user-a");
-        one.append(&conformance::row("ep-shared", 1, "authored"))
-            .await
-            .expect("append");
-        assert_eq!(two.rows("ep-shared").await.expect("rows").len(), 1);
-        assert!(
-            store.rows("ep-shared").await.expect("rows").is_empty(),
-            "and the global bucket is its own, not a union"
-        );
-    }
-
-    #[tokio::test]
-    async fn opening_a_path_creates_the_directory_holding_it() {
-        // A first run against `/var/lib/whatever/ledger.db` must not fail
-        // because nobody made the folder.
-        let root = std::env::temp_dir().join(format!("adaptive-mkdir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let path = root.join("deep").join("nested").join("ledger.db");
-
-        let store = SqliteLedger::open(&path).expect("open");
-        store
-            .append(&conformance::row("ep-mkdir", 1, "authored"))
-            .await
-            .expect("append");
-        assert!(path.exists(), "{}", path.display());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn the_environment_moves_the_ledger_without_a_rebuild() {
-        let fallback = std::path::Path::new("/srv/app/ledger.db");
-        assert_eq!(
-            chosen_path(Some("/mnt/data/ledger.db"), fallback),
-            std::path::PathBuf::from("/mnt/data/ledger.db")
-        );
-    }
-
-    #[test]
-    fn an_unset_environment_falls_back_to_the_path_in_the_code() {
-        let fallback = std::path::Path::new("/srv/app/ledger.db");
-        assert_eq!(chosen_path(None, fallback), fallback);
-    }
-
-    #[test]
-    fn a_blank_variable_reads_as_unset_rather_than_as_an_empty_path() {
-        // What a shell leaves behind when a value was meant to be interpolated
-        // and was not. Opening "" fails in a way that names nothing useful.
-        let fallback = std::path::Path::new("/srv/app/ledger.db");
-        assert_eq!(chosen_path(Some(""), fallback), fallback);
-        assert_eq!(chosen_path(Some("   "), fallback), fallback);
-    }
-
-    fn fake_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
-        let owned: Vec<(String, String)> = pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        move |key: &str| owned.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
-    }
-
-    #[test]
-    fn each_platform_uses_its_own_documented_directory() {
-        let home = fake_env(&[("HOME", "/home/ada")]);
-        assert_eq!(
-            data_dir(Platform::Xdg, &home),
-            Some("/home/ada/.local/share".into())
-        );
-        assert_eq!(
-            data_dir(Platform::MacOs, &fake_env(&[("HOME", "/Users/ada")])),
-            Some("/Users/ada/Library/Application Support".into())
-        );
-        assert_eq!(
-            data_dir(
-                Platform::Windows,
-                &fake_env(&[("LOCALAPPDATA", "C:\\Users\\ada\\AppData\\Local")])
-            ),
-            Some("C:\\Users\\ada\\AppData\\Local".into())
-        );
-    }
-
-    #[test]
-    fn xdg_data_home_wins_over_the_spec_s_own_fallback() {
-        let env = fake_env(&[("XDG_DATA_HOME", "/data"), ("HOME", "/home/ada")]);
-        assert_eq!(data_dir(Platform::Xdg, &env), Some("/data".into()));
-    }
-
-    #[test]
-    fn windows_uses_the_local_profile_not_the_roaming_one() {
-        // A roaming profile syncs between machines, and a SQLite file copied
-        // mid-write between two that both think they own it is a corrupted
-        // database. Setting only APPDATA must therefore find nothing.
-        let roaming = fake_env(&[("APPDATA", "C:\\Users\\ada\\AppData\\Roaming")]);
-        assert_eq!(data_dir(Platform::Windows, &roaming), None);
-    }
-
-    #[test]
-    fn the_conventional_path_is_namespaced_by_project_and_named_for_the_crate() {
-        let env = fake_env(&[("HOME", "/home/ada")]);
-        assert_eq!(
-            default_path(Platform::Xdg, &env).expect("path"),
-            std::path::PathBuf::from("/home/ada/.local/share/tinyflows/adaptive.db")
-        );
-    }
-
-    #[test]
-    fn the_variable_still_wins_over_the_convention() {
-        let env = fake_env(&[(DB_PATH_VAR, "/mnt/data/ledger.db"), ("HOME", "/home/ada")]);
-        assert_eq!(
-            default_path(Platform::Xdg, &env).expect("path"),
-            std::path::PathBuf::from("/mnt/data/ledger.db")
-        );
-    }
-
-    #[test]
-    fn nowhere_conventional_is_an_error_that_says_what_to_set() {
-        // A daemon under a user with no home. Guessing would put a database
-        // somewhere nobody looks, and losing it silently is the failure this
-        // whole crate is written to avoid.
-        let err = default_path(Platform::Xdg, &fake_env(&[])).expect_err("no home");
-        assert!(err.to_string().contains(DB_PATH_VAR), "{err}");
-    }
-
-    #[test]
-    fn a_configured_path_is_trimmed() {
-        let fallback = std::path::Path::new("/srv/app/ledger.db");
-        assert_eq!(
-            chosen_path(Some("  /mnt/data/ledger.db\n"), fallback),
-            std::path::PathBuf::from("/mnt/data/ledger.db")
-        );
-    }
-
-    #[tokio::test]
-    async fn a_reopened_ledger_still_has_its_rows() {
-        // The whole point of the sqlite backend over the in-memory one.
-        let dir = std::env::temp_dir().join(format!("adaptive-ledger-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("ledger.db");
-        let _ = std::fs::remove_file(&path);
-
-        {
-            let store = SqliteLedger::open(&path).expect("open");
-            store
-                .append(&conformance::row("ep", 1, "authored"))
-                .await
-                .expect("append");
-        }
-        let reopened = SqliteLedger::open(&path).expect("reopen");
-        assert_eq!(reopened.rows("ep").await.expect("rows").len(), 1);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn insertion_order_survives_a_timestamp_tie() {
-        // Two attempts finishing in the same second is common; ordering by `at`
-        // would make the exclusion list arbitrary.
-        let store = SqliteLedger::in_memory().expect("open");
-        for sig in ["first", "second", "third"] {
-            let mut r = conformance::row("tie", 1, sig);
-            r.at = "2026-01-01T00:00:00Z".to_string();
-            store.append(&r).await.expect("append");
-        }
-        assert_eq!(
-            store.tried("tie").await.expect("tried"),
-            vec!["first", "second", "third"]
-        );
-    }
-}
+#[path = "sqlite_tests.rs"]
+mod tests;

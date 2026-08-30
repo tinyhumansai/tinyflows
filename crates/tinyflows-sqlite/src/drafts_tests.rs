@@ -154,12 +154,21 @@ fn concurrent_updates_to_different_fields_do_not_lose_either_patch() {
 
 #[test]
 fn inactive_draft_locks_are_pruned_instead_of_accumulating() {
+    let root = PathBuf::from(format!("/draft-lock-prune-{}", Uuid::new_v4()));
     for index in 0..32 {
-        let lock = lock_for(Path::new(&format!("/drafts/{index}.json")));
+        let lock = lock_for(&root.join(format!("{index}.json")));
         drop(lock);
     }
-    let final_lock = lock_for(Path::new("/drafts/final.json"));
+    let final_lock = lock_for(&root.join("final.json"));
     let registry = DRAFT_LOCKS.get().expect("lock registry");
-    assert_eq!(registry.lock().unwrap().len(), 1);
+    assert_eq!(
+        registry
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|path| path.starts_with(&root))
+            .count(),
+        1
+    );
     drop(final_lock);
 }

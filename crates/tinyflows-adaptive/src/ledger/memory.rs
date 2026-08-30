@@ -171,11 +171,13 @@ impl Ledger for MemoryLedger {
             .filter(|(lesson, _)| lesson == lesson_id)
             .map(|(_, row)| row.as_str())
             .collect();
-        let bucket = self.bucket();
         Ok(inner
             .rows
             .iter()
-            .filter(|(scope, r)| scope == &bucket && cited.contains(&r.id.as_str()))
+            .filter(|(scope, r)| {
+                self.visible((!scope.is_empty()).then_some(scope.as_str()))
+                    && cited.contains(&r.id.as_str())
+            })
             .map(|(_, r)| r.clone())
             .collect())
     }
@@ -254,7 +256,11 @@ impl Ledger for MemoryLedger {
             ..episode.clone()
         };
         let mut inner = self.guard();
-        match inner.episodes.iter_mut().find(|e| e.id == episode.id) {
+        match inner
+            .episodes
+            .iter_mut()
+            .find(|e| e.id == episode.id && e.scope_key.as_deref() == self.scope.as_deref())
+        {
             Some(existing) => {
                 // `started_at` and the scope are facts about creation, not
                 // progress, so an update leaves them alone — matching mongo's
