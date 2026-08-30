@@ -57,6 +57,14 @@ pub mod migrate;
 pub mod model;
 pub mod nodes;
 pub mod observability;
+/// Proving a graph's outbound arguments can resolve, by running it against
+/// mocks before an author is allowed to save it.
+///
+/// Behind `mock` because that is where the schema-aware doubles it runs on
+/// live — the check *is* a mock run, so there is nothing to compile without
+/// them.
+#[cfg(any(test, feature = "mock"))]
+pub mod preflight;
 /// Stored workflows and their run history: the durable model around a graph,
 /// and a file-backed store for it. Behind the `store` feature.
 #[cfg(any(test, feature = "store"))]
