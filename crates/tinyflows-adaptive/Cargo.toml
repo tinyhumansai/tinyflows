@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 description = "An adaptive loop over the tinyflows engine: select or author a workflow, run it, judge it, learn."
 
 [dependencies]
-tinyflows = { path = "../..", features = ["store"] }
+tinyflows = { path = "../tinyflows", features = ["store"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
@@ -27,7 +27,7 @@ sqlite = ["dep:rusqlite"]
 mongo = ["dep:mongodb"]
 
 [dev-dependencies]
-tinyflows = { path = "../..", features = ["store", "mock"] }
+tinyflows = { path = "../tinyflows", features = ["store", "mock"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [lints.rust]

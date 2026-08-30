@@ -236,6 +236,41 @@ pub struct NoopObserver;
 
 impl RunObserver for NoopObserver {}
 
+/// A [`RunObserver`] that keeps every finished step.
+///
+/// The reason to keep them is `ExecutionStep::diagnostics`: the engine records
+/// there which `=`-expressions resolved to null while it was resolving a node's
+/// config, and that is the one place a graph's real wiring failure is visible.
+/// A run does not fail on a null — null is a legal value — so the only way to
+/// learn that a step ran on nothing is to watch it go by.
+///
+/// Steps are pushed synchronously from `on_step_finish`, so once the run future
+/// resolves, every step it will ever record is already here.
+#[derive(Debug, Default)]
+pub struct CapturingObserver {
+    steps: std::sync::Mutex<Vec<ExecutionStep>>,
+}
+
+impl RunObserver for CapturingObserver {
+    fn on_step_finish(&self, step: &ExecutionStep) {
+        self.steps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(step.clone());
+    }
+}
+
+impl CapturingObserver {
+    /// A snapshot of every step recorded so far.
+    #[must_use]
+    pub fn steps(&self) -> Vec<ExecutionStep> {
+        self.steps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
 #[cfg(test)]
 #[path = "observability_tests.rs"]
 mod tests;

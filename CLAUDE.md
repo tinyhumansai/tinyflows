@@ -12,6 +12,28 @@ persistence) goes through **capability traits** the embedding app implements.
 OpenHuman is the first downstream host; tinyflows is published to crates.io and
 consumed there via a thin adapter seam.
 
+## Workspace layout
+
+The repository is a **virtual workspace** — there is no root package. Every
+crate lives in `crates/`, one directory per package, each directory named for
+the package it holds. This is the same shape every other `tiny*` repository
+uses, so a reader who knows one knows them all.
+
+| Crate | What it owns |
+| --- | --- |
+| `crates/tinyflows` | The engine. One graph: validate → compile → run. Published to crates.io. |
+| `crates/tinyflows-catalog` | The saved-flow model *around* a graph — flows, revisions, runs, drafts, suggestions — the in-process run/build cancellation registries, the format importers (n8n), and the save/run safety predicates. Storage-free. |
+| `crates/tinyflows-sqlite` | SQLite implementations of the catalog and of the engine's checkpoint store, plus the JSON draft store. Every entry point takes a directory, never a host config type. |
+| `crates/tinyflows-copilot` | The authoring copilot's *words*: the `workflow_builder` / `flow_discovery` standing archetypes, and the turn brief that opens a builder turn. Names no tool trait, no agent registry, no model client. |
+| `crates/tinyflows-adaptive` | The adaptive loop over the engine: select or author a workflow, run it, judge it, learn. |
+
+**Where a new thing goes.** Ask what it depends on, not what it is about. If it
+needs storage, it is not `tinyflows-catalog`. If it needs a tool trait or a model
+client, it is not `tinyflows-copilot` — that constraint is the whole reason the
+copilot is reusable. If it needs to know which trigger kinds a particular host
+dispatches, or what a `tool_call` slug resolves to, it is not in this repository
+at all: it is a host overlay.
+
 ## Architecture (pipeline)
 
 ```
@@ -44,6 +66,20 @@ model::WorkflowGraph  →  validate  →  compiler::compile  →  engine::run
 - `gates/` — authoring gates: what is *guaranteed* wrong with a graph, refused
   before a write rather than surfacing as a silent null at run time. Only the
   host-agnostic ones; a host adds its own via `store::HostPolicy::check_graph`.
+- `compat.rs` — topologies this engine's fan-in lowering cannot execute safely,
+  refused before a run. A third question the other two do not ask: not "is this
+  a well-formed graph" (`validate`) or "are its bindings resolvable" (`gates`),
+  but "can this implementation actually run it". Fails closed.
+- `preflight.rs` (behind `mock`) — the same class of failure as `gates`, caught
+  by *running* the graph against the schema-aware mocks and reading the engine's
+  own per-step null-resolution diagnostics. Three kinds of null are deliberately
+  not reported — trigger-scoped, opaque upstream tool output, and a run that
+  never settled — because each one is a correct graph.
+- `caps/mock_schema_aware.rs` (behind `mock`) — mocks that answer the shape a
+  node *declared* rather than echoing the request. Kept apart from `caps/mock`
+  because they answer different questions: an echo is what an engine test wants
+  and what a graph dry run must not have, since it fails a good graph's own
+  `output_parser` sub-port.
 - `nodes/` — `NodeExecutor` trait + dispatch; `control_flow.rs` (if/switch/merge/
   split_out/…) and `integration.rs` (agent/tool_call/http_request/code/…).
 - `compiler.rs` — compiles a validated graph into runnable form.
@@ -68,6 +104,13 @@ model::WorkflowGraph  →  validate  →  compiler::compile  →  engine::run
   records, so neither sits behind a feature; both are re-exported from
   `store::types` for callers that always reached them there.
 - `error.rs` — shared error types across validate/compile/execute (thiserror).
+
+**Where an authoring check belongs.** Three homes, and the distinction is what
+it costs, not what it is about: `gates` is a pure function of the graph and runs
+on every write; `compat` is likewise pure but answers for the *engine* rather
+than the graph; `preflight` runs the thing. A check that needs a host's
+vocabulary — which agent ids resolve, which tool slugs exist, which integrations
+are connected — belongs in none of them and stays in the host.
 - `lib.rs` — crate surface + module declarations; `main.rs` — thin binary stub.
 
 ## Conventions & invariants (respect these)

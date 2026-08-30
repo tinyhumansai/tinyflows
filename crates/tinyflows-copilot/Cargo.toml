@@ -1,0 +1,28 @@
+# The authoring copilot: what to tell a model that is building a workflow, and
+# how to phrase the turn that asks it.
+#
+# This is the half of a flow-authoring assistant that does not depend on which
+# harness runs it. The standing prompts teach the graph DSL, the node
+# vocabulary, the binding syntax and the propose-only persistence contract —
+# all facts about tinyflows, not about a host — and `builder` turns one
+# authoring request into the brief that opens a turn.
+#
+# What is deliberately absent is the harness. This crate names no tool trait, no
+# agent registry and no model client: it produces strings and parses requests,
+# and a host wires that to whatever runs its turns. That is what lets the same
+# copilot brief drive a desktop panel, a remote orchestrator and a CLI without
+# any of them agreeing on an agent framework.
+[package]
+name = "tinyflows-copilot"
+version = "0.1.0"
+description = "Prompt and turn-brief construction for a tinyflows authoring copilot, independent of any agent harness"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

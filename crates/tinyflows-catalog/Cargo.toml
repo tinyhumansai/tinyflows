@@ -1,0 +1,37 @@
+# The saved-flow catalog: the domain model around a `WorkflowGraph` that any
+# host storing workflows needs, and the format importers that produce one.
+#
+# `tinyflows` itself owns one graph and how to run it. This crate owns the
+# record *around* a graph — its identity, revisions, runs, drafts and
+# suggestions — plus the in-process registries that let a run or an authoring
+# build be cancelled while it is in flight. None of that is host-specific, and
+# every host that persists workflows had to reinvent it.
+#
+# Deliberately storage-free: it defines the shapes and the traits, never a
+# database. `tinyflows-sqlite` is one implementation; a host with its own
+# catalog table implements the same traits and takes nothing from it.
+[package]
+name = "tinyflows-catalog"
+version = "0.1.0"
+description = "The saved-workflow catalog model for tinyflows: flows, revisions, runs, drafts, suggestions, and format importers"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+tinyflows = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `run_registry` / `build_registry` only: the cancellation token a live run or
+# an authoring build is cancelled through. No tokio runtime is required — the
+# registries are plain maps and the token is runtime-agnostic.
+tokio-util = { version = "0.7", default-features = false }
+# Diagnostics only: the registries and the importers log what they refuse and
+# why. No subscriber is installed here — a host that installs none pays nothing.
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

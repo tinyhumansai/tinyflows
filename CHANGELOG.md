@@ -7,7 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The repository is a virtual workspace; every crate lives under `crates/`.**
+  The engine moved from the repository root to `crates/tinyflows` (with its
+  `tests/`, `examples/`, `protocol/` and `extension/`), and `crates/adaptive`
+  was renamed `crates/tinyflows-adaptive` to match its package name. A host
+  taking this repository by path must repoint at
+  `<checkout>/crates/tinyflows`; nothing about the published crate's contents
+  or its API changed. This is the layout every other `tiny*` repository uses.
+
 ### Added
+
+- **`crates/tinyflows-catalog`** — the saved-workflow model *around* a graph:
+  `Flow` and its revision history, `FlowRun` and its steps, authoring drafts and
+  suggestions, the run and build cancellation registries, the n8n importer, and
+  the save/run safety predicates (`graph_policy`). Storage-free by construction:
+  it defines shapes and rules and names no database. Every host that keeps a
+  library of workflows rather than a single one had to reinvent this.
+
+- **`crates/tinyflows-sqlite`** — one backend for that catalog: the `flows.db`
+  schema and queries, a JSON-file draft store, and the durable run
+  checkpointer in its own `checkpoints.db` (kept separate because checkpoints
+  are written at engine cadence while the catalog is read by every listing).
+  Every entry point takes a directory, never a host config type.
+
+- **`crates/tinyflows-copilot`** — the authoring copilot's *words*: the
+  `workflow_builder` and `flow_discovery` standing archetypes, and the turn
+  brief that opens a builder turn. It names no tool trait, no agent registry and
+  no model client, which is what lets a desktop panel, a remote orchestrator and
+  a CLI share one copilot.
+
+- **`compat`** — topologies this engine's fan-in lowering cannot execute safely,
+  refused before a run. A third question `validate` and `gates` do not ask: not
+  "is this a well-formed graph" or "are its bindings resolvable", but "can this
+  implementation actually run it". A fan-in predecessor behind two branching
+  decisions gets a relief that either fires early, silently dropping the
+  predecessor's data, or never fires at all — and which of the two happens
+  depends on node declaration order. Fails closed.
+
+- **`preflight`** (behind `mock`) — proves a graph's outbound `tool_call`
+  arguments can carry a value, by running it against the schema-aware mocks and
+  reading the engine's own per-step null-resolution diagnostics. Three classes of
+  null are deliberately *not* reported, because each one is a correct graph:
+  trigger-scoped data (the sandbox runs on an empty payload), opaque upstream
+  tool output (a mock cannot produce a provider's real fields), and a run that
+  never settled.
+
+- **`caps::mock_schema_aware`** (behind `mock`) — `SchemaAwareMockLlm` and
+  `SchemaAwareMockAgentRunner`, which answer the shape a node *declared* rather
+  than echoing the request. Kept apart from `caps::mock` because they answer a
+  different question: an echo is what an engine test wants, and what a graph dry
+  run must not have — it satisfies no declared schema, so the `agent` node's own
+  `output_parser` sub-port fails a perfectly good graph.
+
+- **`observability::CapturingObserver`** — a `RunObserver` that keeps every
+  finished step, for the `ExecutionStep::diagnostics` a run does not fail on.
+
+- **`gates`: a tool-call argument bound to an agent field that is not
+  addressable is now refused.** An `agent` node produces exactly what its
+  `output_parser.schema` declares, so reading an undeclared property — or any
+  property from an agent that declares no schema at all — resolves to null every
+  time. Scoped to a `tool_call`'s `args`, and only for a binding that went
+  through the envelope, so the envelope gate reports its own failures once.
 
 - **`RunInput::with_run_id`** — a host names a run with a durable,
   server-generated id, seeded into the run state as `run.id`. The engine's own
@@ -295,6 +357,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** `Capabilities` gained a `shell` field. Hosts constructing the
   struct literally add `shell: None` (or their own runner).
+
+### Fixed
+
+- **`gates` no longer refuses a prose `prompt` beside real `messages`.** Both
+  completion paths fall through to a non-empty `messages` array once the prompt
+  resolves to null, so the prompt is vestigial and the node runs correctly. The
+  refusal was a false positive, which is the kind that teaches an author to
+  route around a gate.
 
 ## [0.3.0] - YYYY-MM-DD
 

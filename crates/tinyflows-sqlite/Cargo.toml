@@ -1,0 +1,51 @@
+# SQLite implementations of the tinyflows catalog and of the engine's
+# checkpoint store.
+#
+# Split from `tinyflows-catalog` on purpose: the catalog is the vocabulary, this
+# is one backend for it. A host with its own database takes the catalog crate
+# and leaves this one, and neither the model nor the engine grows a rusqlite
+# dependency because this crate exists.
+#
+# Every entry point takes a directory path, never a host config type. The
+# databases (`flows.db`, `checkpoints.db`) and the JSON draft files are created
+# under it on first use.
+[package]
+name = "tinyflows-sqlite"
+version = "0.1.0"
+description = "SQLite-backed flow catalog, draft store and graph checkpointer for tinyflows"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+tinyflows = { workspace = true }
+tinyflows-catalog = { version = "0.1.0", path = "../tinyflows-catalog" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = "1.0"
+async-trait = { workspace = true }
+# `checkpoint` only: every SQLite call is a blocking one, moved off the async
+# executor with `spawn_blocking` rather than held on it.
+tokio = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+# Diagnostics only: what was written, skipped, or found corrupt on disk.
+tracing = { workspace = true }
+
+[features]
+default = []
+# Off by default; exposes the two fixture-only writers (`force_run_status_for_test`,
+# `force_corrupt_graph_json_for_test`) that stage states no production path can
+# produce — a terminal run flipped back to `running`, a `graph_json` column that
+# does not deserialize. They are always available inside this crate's own tests;
+# the feature is what lets a *host*'s test suite stage the same states without a
+# weaker production write existing for it.
+test-fixtures = []
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

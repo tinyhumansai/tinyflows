@@ -11,6 +11,13 @@ pub mod approval;
 pub mod host;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
+// Kept apart from `mock` because it answers a different question. `mock` echoes,
+// which is what an *engine* test wants; this synthesises the shape a node
+// declared, which is what a *graph* dry run wants. Mixing them would make it a
+// coin flip which one a caller reached for, and the wrong choice fails a good
+// graph.
+#[cfg(any(test, feature = "mock"))]
+pub mod mock_schema_aware;
 pub mod schema;
 pub mod shell;
 pub mod tasks;
