@@ -35,76 +35,116 @@ pub use run_steps::*;
 pub use runs::*;
 pub use suggestions::*;
 
-/// Tracks which flows database files have already had their schema DDL (the
-/// `CREATE TABLE`/`CREATE INDEX` batch, `PRAGMA journal_mode = WAL`, and the
-/// `add_column_if_missing` migration probe) run against them in this process
-/// (R-m8). `with_connection` deliberately keeps opening a fresh, lightweight
+/// Diagnostic marker recording which flows database files this process has
+/// initialized (R-m8). It no longer *gates* the DDL — the on-disk
+/// `PRAGMA user_version` does that (see [`ensure_schema_initialized`]) — it only
+/// distinguishes an ordinary first-ever init (path absent ⇒ silent) from a
+/// database this process already initialized whose schema has since drifted on
+/// disk (path present, version stale ⇒ worth a warning).
+///
+/// `with_connection` deliberately keeps opening a fresh, lightweight
 /// `rusqlite::Connection` per call — `Connection` is `!Sync`, so caching a
 /// single shared one would need a process-wide mutex that serializes every
 /// caller, including the concurrent-writer scenario [`upsert_flow_run_step`]'s
 /// `BEGIN IMMEDIATE` fix (R-m1) depends on being able to run from independent
-/// connections. What actually repeats needlessly on every open is the DDL
+/// connections. What actually repeated needlessly on every open was the DDL
 /// batch itself — including once per node per live run via
-/// `upsert_flow_run_step`. Gating just that batch behind a per-path
-/// "already initialized" set keeps it to one execution per process per
-/// database file while every call still gets its own connection.
+/// `upsert_flow_run_step`; the version gate now keeps it to one execution per
+/// process per database file while every call still gets its own connection.
 ///
 /// Keyed by path rather than a single flag: tests each open an independent
 /// per-`TempDir` workspace within the same test binary, and a bare
-/// `OnceLock<()>` would silently skip schema creation for every database path
-/// after the first test to run in the process.
+/// `OnceLock<()>` would report the wrong marker for every database path after
+/// the first opened in the process.
 static INITIALIZED_SCHEMAS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
-/// Runs the one-time schema DDL + migrations against `conn` unless `db_path`
-/// has already been initialized in this process (see [`INITIALIZED_SCHEMAS`]).
-/// Only marks `db_path` as initialized *after* [`init_schema`] succeeds, so a
-/// transient failure (e.g. disk I/O) is retried on the next call rather than
-/// permanently wedging the store into believing a schema exists that was
-/// never created.
+/// On-disk schema version stamped into `flows.db`'s `PRAGMA user_version` by
+/// [`init_schema`] and checked by [`ensure_schema_initialized`]. **Bump this
+/// whenever a table or `add_column_if_missing` migration is added to
+/// [`init_schema`]** so a database replaced at runtime with an older/partial
+/// schema is re-migrated rather than trusted.
 ///
-/// **Trust, but verify.** A cache hit is confirmed against the file actually on
-/// disk before it is honoured. Before this gating existed, the DDL ran on every
+/// Distinct from `tinyflows::model::CURRENT_SCHEMA_VERSION`, which versions the
+/// graph JSON payload — this versions the SQLite file's own schema.
+const FLOWS_DB_SCHEMA_VERSION: i64 = 1;
+
+/// Ensures the schema on `conn` (a connection to `db_path`) is present and fully
+/// migrated, running the DDL + migrations at most once per process per path.
+///
+/// **The on-disk `PRAGMA user_version` is the authority, and the fast path is
+/// lock-free.** [`init_schema`] stamps [`FLOWS_DB_SCHEMA_VERSION`] only after a
+/// full, successful migration, so a connection whose `user_version` already
+/// matches is known-good and returns without touching any process-global state —
+/// the common case (an already-initialized store) never acquires the
+/// initialization mutex. This matters here specifically: `with_connection` (and
+/// so this check) runs once per node per live run via `upsert_flow_run_step`,
+/// not just at store open, so keeping the hot path lock-free is load-bearing.
+/// Reading `user_version` is a single database-header read, far cheaper than the
+/// ~11-statement DDL batch it replaces.
+///
+/// **Initialization is serialized and atomic per process.** Only a version
+/// *mismatch* takes the [`INITIALIZED_SCHEMAS`] lock, and `user_version` is
+/// re-read under it, so two first callers racing on the same fresh path run the
+/// DDL exactly once — the loser observes the winner's stamp on the recheck and
+/// returns. Independent database paths contend only during that rare init
+/// window, never on the hot path.
+///
+/// **Trust, but verify.** Before this gating existed the DDL ran on every
 /// `with_connection` call, so a database deleted or replaced at runtime — a
 /// workspace reset, a manual deletion, a disk-recovery restore — self-healed on
-/// the very next call: `Connection::open` silently creates a fresh empty file,
-/// and `CREATE TABLE IF NOT EXISTS` immediately repopulated it. Caching removes
-/// that safety net: the set still says "initialized" while the file behind it is
-/// empty, so every subsequent query fails with `no such table` until the process
-/// restarts. One indexed `sqlite_master` lookup is far cheaper than the ~11
-/// statement DDL batch and restores the self-healing, so it is paid on each hit
-/// rather than trusting a cache entry that the filesystem may have invalidated.
+/// the next call: `Connection::open` creates a fresh empty file and
+/// `CREATE TABLE IF NOT EXISTS` repopulates it. The version gate restores that
+/// for the *whole* schema, not just one table's presence: a stale/zero
+/// `user_version` — a fresh file, or an older/partial schema swapped in under a
+/// live process (`flow_definitions` present but missing a migrated column such
+/// as `require_approval` / `graph_hash`, or one of the other tables) — falls
+/// through to the idempotent [`init_schema`] and is re-migrated rather than
+/// trusted and later failing with `no such table` / `no such column`. A
+/// single-table `sqlite_master` probe could not catch column drift.
+///
+/// [`INITIALIZED_SCHEMAS`] no longer gates the DDL — the on-disk version does —
+/// and is kept purely as a **diagnostic marker**: a path present in the set
+/// whose on-disk version no longer matches was initialized by *this* process and
+/// has since been deleted or replaced, which is worth a warning; a path absent
+/// from the set is an ordinary first-ever init and stays silent.
 fn ensure_schema_initialized(conn: &Connection, db_path: &Path) -> Result<()> {
-    use rusqlite::OptionalExtension;
+    let is_current = || -> bool {
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0)
+            == FLOWS_DB_SCHEMA_VERSION
+    };
 
-    let initialized = INITIALIZED_SCHEMAS.get_or_init(|| Mutex::new(HashSet::new()));
-    {
-        let guard = initialized
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.contains(db_path) {
-            let schema_present: bool = conn
-                .query_row(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'flow_definitions'",
-                    [],
-                    |_| Ok(true),
-                )
-                .optional()
-                .context("Failed to probe flows schema presence")?
-                .unwrap_or(false);
-            if schema_present {
-                return Ok(());
-            }
-            tracing::warn!(
-                target: "flows",
-                db = %db_path.display(),
-                "[flows] schema cached as initialized but the database has no tables (deleted or replaced at runtime?) — re-running schema init"
-            );
-        }
+    // Lock-free fast path: an already-migrated database carries
+    // FLOWS_DB_SCHEMA_VERSION in its header, so the common case never acquires
+    // the process-global initialization mutex.
+    if is_current() {
+        return Ok(());
     }
-    init_schema(conn)?;
+
+    // Mismatch ⇒ (re-)initialization is required. Serialize it so two first
+    // callers for the same path cannot both run the DDL, and re-read the version
+    // under the lock — another thread may have migrated between the lock-free
+    // read above and acquiring the guard.
+    let initialized = INITIALIZED_SCHEMAS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = initialized
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if is_current() {
+        return Ok(());
+    }
+
+    // Diagnostic only (see the doc comment): a cached path whose on-disk schema
+    // no longer matches was deleted or replaced under a live process — a
+    // first-ever init leaves the path absent and stays silent.
+    if guard.contains(db_path) {
+        tracing::warn!(
+            target: "flows",
+            db = %db_path.display(),
+            "[flows] a database this process already initialized no longer matches the expected schema version (deleted or replaced at runtime?) — re-running schema init"
+        );
+    }
+
+    init_schema(conn)?;
     guard.insert(db_path.to_path_buf());
     Ok(())
 }
@@ -112,8 +152,11 @@ fn ensure_schema_initialized(conn: &Connection, db_path: &Path) -> Result<()> {
 /// The actual schema DDL: 5 `CREATE TABLE IF NOT EXISTS` + 6 `CREATE INDEX IF
 /// NOT EXISTS` + `PRAGMA journal_mode = WAL` (a persistent db-file setting,
 /// not per-connection — safe, and now guaranteed, to run only once) plus the
-/// `require_approval` post-hoc column migration. Split out of
+/// `require_approval` / `graph_hash` post-hoc column migrations. Split out of
 /// `with_connection` so [`ensure_schema_initialized`] can gate it (R-m8).
+/// Stamps [`FLOWS_DB_SCHEMA_VERSION`] into `user_version` last, so the gate can
+/// distinguish a fully-migrated database from an older/partial one on a
+/// cache hit.
 fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -200,6 +243,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
     // a hard refusal, so upgrading mid-park cannot strand an in-flight
     // approval.
     add_column_if_missing(conn, "flow_runs", "graph_hash", "TEXT")?;
+
+    // Stamp the schema version last, so [`ensure_schema_initialized`] only
+    // trusts a cache hit whose on-disk schema is fully migrated. Bump
+    // FLOWS_DB_SCHEMA_VERSION whenever a table or `add_column_if_missing`
+    // migration is added above.
+    conn.pragma_update(None, "user_version", FLOWS_DB_SCHEMA_VERSION)
+        .context("Failed to stamp flows schema version")?;
 
     Ok(())
 }
