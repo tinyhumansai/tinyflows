@@ -123,3 +123,66 @@ fn schema_reinitializes_when_the_database_file_is_deleted_at_runtime() {
     let (flows_final, _) = list_flows(&dir).unwrap();
     assert_eq!(flows_final.len(), 1);
 }
+
+/// Companion to the deletion test: a database *replaced* at runtime with an
+/// older/partial schema (rather than deleted) must also be re-migrated, not
+/// trusted. This is the case a single-table `sqlite_master` presence probe
+/// could not catch — `flow_definitions` is still there, so the probe would
+/// honour the cache and the next read of a migrated column would fail with
+/// `no such column`. The `PRAGMA user_version` gate detects the drift.
+#[test]
+fn older_on_disk_schema_under_a_cached_path_is_remigrated() {
+    let tmp = TempDir::new().unwrap();
+    let dir = test_dir(&tmp);
+
+    // First use creates the full (versioned) schema and caches the path.
+    let original = create_flow(
+        &dir,
+        "v1".to_string(),
+        trigger_graph(),
+        true, // require_approval — the migrated column we'll drop below
+        true,
+    )
+    .unwrap();
+    assert!(original.require_approval);
+
+    // Simulate a workspace restore of an OLDER database swapped in under the
+    // same (already-cached) path: drop a migrated column and clear the version
+    // stamp, exactly as a pre-migration database would look on disk.
+    let db_path = dir.join("flows.db");
+    {
+        let raw = rusqlite::Connection::open(&db_path).unwrap();
+        raw.execute_batch(
+            "ALTER TABLE flow_definitions DROP COLUMN require_approval;
+             PRAGMA user_version = 0;",
+        )
+        .unwrap();
+    }
+
+    // The path is still cached. With the old single-table `sqlite_master` probe
+    // this database would be trusted and `list_flows` (which selects
+    // `require_approval`) would fail with `no such column`. The version check
+    // detects the drift and re-migrates via the idempotent `init_schema`.
+    let (listed, skipped) = list_flows(&dir)
+        .expect("an older on-disk schema under a cached path must be re-migrated, not trusted");
+    assert_eq!(skipped, 0);
+    assert_eq!(
+        listed.len(),
+        1,
+        "the pre-existing row survives DROP COLUMN and the schema is repaired"
+    );
+    assert_eq!(listed[0].id, original.id);
+    // The migrated column is back, reading its default for the pre-existing row.
+    let reloaded = get_flow(&dir, &original.id).unwrap().unwrap();
+    assert!(
+        !reloaded.require_approval,
+        "the re-added column defaults to 0 for the pre-existing row"
+    );
+
+    // And the store is fully usable again, not merely readable.
+    let recreated = create_flow(&dir, "v2".to_string(), trigger_graph(), false, true)
+        .expect("writes must work against the re-migrated schema");
+    assert_ne!(recreated.id, original.id);
+    let (flows_final, _) = list_flows(&dir).unwrap();
+    assert_eq!(flows_final.len(), 2);
+}
