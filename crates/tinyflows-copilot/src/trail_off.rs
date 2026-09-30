@@ -142,7 +142,6 @@ fn question_mark_outside_code_with_state(text: &str, mut open_run_len: Option<us
     let chars: Vec<char> = text.chars().collect();
     // `Some(n)` while scanning is inside a code span opened by a run of `n`
     // backticks; that span closes only on the next run of exactly `n`.
-    let mut open_run_len: Option<usize> = None;
     let mut i = 0;
     while i < chars.len() {
         if chars[i] == '`' {
