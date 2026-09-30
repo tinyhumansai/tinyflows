@@ -168,7 +168,9 @@ fn locate_graph_error(migrated: &Value, err: &serde_json::Error) -> String {
     if let Some(fields) = skeleton.as_object_mut() {
         for field in ELEMENT_ARRAYS {
             if let Some(slot) = fields.get_mut(*field) {
-                *slot = Value::Array(Vec::new());
+                if slot.is_array() {
+                    *slot = Value::Array(Vec::new());
+                }
             }
         }
     }

@@ -551,6 +551,8 @@ fn skipping_the_envelope_is_refused_even_when_the_schema_matches() {
 
     let failures = failures(&graph);
     assert_eq!(failures.len(), 1, "{failures:?}");
-    assert!(failures[0].contains("json"), "{failures:?}");
-    assert!(failures[0].contains("summarize"), "{failures:?}");
+    assert!(
+        failures[0].contains("Fix: `=nodes.summarize.item.json.channel`."),
+        "{failures:?}"
+    );
 }
