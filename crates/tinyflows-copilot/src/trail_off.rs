@@ -47,7 +47,11 @@ pub fn text_looks_like_question(text: &str) -> bool {
     };
     let paragraph_start = trimmed.len() - paragraph.len();
     let prefix = &trimmed[..paragraph_start];
-    question_mark_outside_code_with_state(paragraph, code_span_state(prefix))
+    question_mark_outside_code_with_state(
+        paragraph,
+        code_span_state(prefix),
+        tilde_fence_state(prefix),
+    )
 }
 
 /// Returns the last non-blank paragraph of `text` — a maximal run of
@@ -111,7 +115,25 @@ fn last_paragraph(text: &str) -> Option<&str> {
 /// sentence-terminal via [`is_sentence_terminal_question_mark`].
 #[must_use]
 pub fn question_mark_outside_code(text: &str) -> bool {
-    question_mark_outside_code_with_state(text, None)
+    question_mark_outside_code_with_state(text, None, None)
+}
+
+fn tilde_fence_state(text: &str) -> Option<usize> {
+    let mut open_len = None;
+    for line in text.lines() {
+        let leading = line.bytes().take_while(|byte| *byte == b' ').count();
+        if leading > 3 { continue; }
+        let rest = &line[leading..];
+        let run = rest.bytes().take_while(|byte| *byte == b'~').count();
+        if run < 3 { continue; }
+        match open_len {
+            Some(open) if run >= open && rest[run..].trim().is_empty() => open_len = None,
+            Some(_) => {},
+            None if !rest[run..].contains('~') => open_len = Some(run),
+            None => {},
+        }
+    }
+    open_len
 }
 
 fn code_span_state(text: &str) -> Option<usize> {
@@ -137,12 +159,38 @@ fn code_span_state(text: &str) -> Option<usize> {
     open_run_len
 }
 
-fn question_mark_outside_code_with_state(text: &str, mut open_run_len: Option<usize>) -> bool {
+fn question_mark_outside_code_with_state(
+    text: &str,
+    mut open_run_len: Option<usize>,
+    mut tilde_fence: Option<usize>,
+) -> bool {
     let chars: Vec<char> = text.chars().collect();
+    let mut line_start = 0;
     // `Some(n)` while scanning is inside a code span opened by a run of `n`
     // backticks; that span closes only on the next run of exactly `n`.
     let mut i = 0;
     while i < chars.len() {
+        if i == line_start {
+            let mut end = i;
+            while end < chars.len() && chars[end] != '\n' { end += 1; }
+            let line: String = chars[i..end].iter().collect();
+            let leading = line.bytes().take_while(|byte| *byte == b' ').count();
+            let rest = if leading <= 3 { &line[leading..] } else { "" };
+            let run = rest.bytes().take_while(|byte| *byte == b'~').count();
+            if let Some(open) = tilde_fence {
+                if run >= open && rest[run..].trim().is_empty() {
+                    tilde_fence = None;
+                }
+                i = end;
+                line_start = end + 1;
+                continue;
+            } else if run >= 3 && !rest[run..].contains('~') {
+                tilde_fence = Some(run);
+                i = end;
+                line_start = end + 1;
+                continue;
+            }
+        }
         if chars[i] == '`' {
             let start = i;
             while i < chars.len() && chars[i] == '`' {
@@ -163,6 +211,7 @@ fn question_mark_outside_code_with_state(text: &str, mut open_run_len: Option<us
             return true;
         }
         i += 1;
+        if chars[i - 1] == '\n' { line_start = i; }
     }
     false
 }

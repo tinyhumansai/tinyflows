@@ -77,6 +77,12 @@ fn text_looks_like_question_ignores_question_mark_inside_code() {
         "Here's the query:\n\n```sql\n\nSELECT * FROM t WHERE id = ?\n```"
     ));
     assert!(!text_looks_like_question(
+        "~~~sql\nSELECT * FROM t WHERE id = ?\n~~~"
+    ));
+    assert!(!text_looks_like_question(
+        "~~~sql\nSELECT * FROM t WHERE id = ?"
+    ));
+    assert!(!text_looks_like_question(
         "```sql\nSELECT * FROM t WHERE id = ?"
     ));
 }
