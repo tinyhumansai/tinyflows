@@ -1,5 +1,5 @@
-use serde_json::json;
 use super::*;
+use serde_json::json;
 
 // ---- main-port labels, loop back-edges, router exhaustiveness ----
 //

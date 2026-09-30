@@ -122,14 +122,18 @@ fn code_span_state(text: &str) -> Option<usize> {
     while i < chars.len() {
         if chars[i] == '`' {
             let start = i;
-            while i < chars.len() && chars[i] == '`' { i += 1; }
+            while i < chars.len() && chars[i] == '`' {
+                i += 1;
+            }
             let run_len = i - start;
             open_run_len = match open_run_len {
                 None => Some(run_len),
                 Some(n) if n == run_len => None,
                 Some(n) => Some(n),
             };
-        } else { i += 1; }
+        } else {
+            i += 1;
+        }
     }
     open_run_len
 }
