@@ -45,9 +45,9 @@ pub fn text_looks_like_question(text: &str) -> bool {
     let Some(paragraph) = last_paragraph(trimmed) else {
         return false;
     };
-    let paragraph_start = trimmed.rfind(&paragraph).expect("paragraph came from text");
+    let paragraph_start = trimmed.len() - paragraph.len();
     let prefix = &trimmed[..paragraph_start];
-    question_mark_outside_code_with_state(&paragraph, code_span_state(prefix))
+    question_mark_outside_code_with_state(paragraph, code_span_state(prefix))
 }
 
 /// Returns the last non-blank paragraph of `text` — a maximal run of
@@ -65,22 +65,21 @@ pub fn text_looks_like_question(text: &str) -> bool {
 ///
 /// Working line-by-line via [`str::lines`] (which normalizes CRLF) and
 /// treating any all-whitespace line as blank fixes both.
-fn last_paragraph(text: &str) -> Option<String> {
-    let mut collected: Vec<&str> = Vec::new();
-    for line in text.lines().rev() {
-        if line.trim().is_empty() {
-            if collected.is_empty() {
-                continue; // still skipping trailing blank lines
-            }
-            break; // blank line marks the start of the paragraph above
-        }
-        collected.push(line);
+fn last_paragraph(text: &str) -> Option<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        let content_end = start + line.trim_end_matches('\n').len();
+        lines.push((start, content_end, line.trim().is_empty()));
+        start += line.len();
     }
-    if collected.is_empty() {
-        return None;
+
+    let last_nonblank = lines.iter().rposition(|(_, _, blank)| !blank)?;
+    let mut first = last_nonblank;
+    while first > 0 && !lines[first - 1].2 {
+        first -= 1;
     }
-    collected.reverse();
-    Some(collected.join("\n"))
+    Some(&text[lines[first].0..lines[last_nonblank].1])
 }
 
 /// Does `text` contain at least one *sentence-terminal* `?` that isn't

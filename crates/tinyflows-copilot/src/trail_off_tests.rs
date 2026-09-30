@@ -109,6 +109,12 @@ fn text_looks_like_question_treats_crlf_and_whitespace_lines_as_paragraph_breaks
     assert!(!text_looks_like_question(
         "Which channel should I post to?\r\n\r\nPosted the update just now."
     ));
+    // A CRLF paragraph with multiple nonblank lines must retain its original
+    // bytes when locating the final paragraph (rather than searching for an
+    // LF-normalized copy that is absent from the input).
+    assert!(text_looks_like_question(
+        "Context\r\nWhich channel should I post to?"
+    ));
     // Whitespace-only blank line (not perfectly empty) must also count as a
     // paragraph break.
     assert!(!text_looks_like_question(
