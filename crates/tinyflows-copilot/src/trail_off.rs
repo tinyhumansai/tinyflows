@@ -122,15 +122,19 @@ fn tilde_fence_state(text: &str) -> Option<usize> {
     let mut open_len = None;
     for line in text.lines() {
         let leading = line.bytes().take_while(|byte| *byte == b' ').count();
-        if leading > 3 { continue; }
+        if leading > 3 {
+            continue;
+        }
         let rest = &line[leading..];
         let run = rest.bytes().take_while(|byte| *byte == b'~').count();
-        if run < 3 { continue; }
+        if run < 3 {
+            continue;
+        }
         match open_len {
             Some(open) if run >= open && rest[run..].trim().is_empty() => open_len = None,
-            Some(_) => {},
+            Some(_) => {}
             None if !rest[run..].contains('~') => open_len = Some(run),
-            None => {},
+            None => {}
         }
     }
     open_len
@@ -172,7 +176,9 @@ fn question_mark_outside_code_with_state(
     while i < chars.len() {
         if i == line_start {
             let mut end = i;
-            while end < chars.len() && chars[end] != '\n' { end += 1; }
+            while end < chars.len() && chars[end] != '\n' {
+                end += 1;
+            }
             let line: String = chars[i..end].iter().collect();
             let leading = line.bytes().take_while(|byte| *byte == b' ').count();
             let rest = if leading <= 3 { &line[leading..] } else { "" };
@@ -211,7 +217,9 @@ fn question_mark_outside_code_with_state(
             return true;
         }
         i += 1;
-        if chars[i - 1] == '\n' { line_start = i; }
+        if chars[i - 1] == '\n' {
+            line_start = i;
+        }
     }
     false
 }
