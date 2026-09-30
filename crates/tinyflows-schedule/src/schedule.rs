@@ -74,6 +74,9 @@ pub fn validate_schedule(schedule: &Schedule, now: DateTime<Utc>) -> Result<()> 
             if *every_ms == 0 {
                 anyhow::bail!("Invalid schedule: every_ms must be > 0");
             }
+            // Validate against the same conversion and checked arithmetic used
+            // when computing the next run, so persisted schedules are usable.
+            let _ = next_run_for_schedule(schedule, now)?;
             Ok(())
         }
     }

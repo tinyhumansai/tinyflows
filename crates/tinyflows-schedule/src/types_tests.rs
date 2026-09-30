@@ -59,6 +59,23 @@ fn session_target_serializes_lowercase() {
     );
 }
 
+#[test]
+fn cron_job_patch_preserves_absent_and_explicitly_cleared_agent_ids() {
+    let unrelated = CronJobPatch {
+        enabled: Some(false),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(unrelated).unwrap();
+    assert!(value.get("agent_id").is_none());
+
+    let clear = CronJobPatch {
+        agent_id: Some(None),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(clear).unwrap();
+    assert_eq!(value["agent_id"], serde_json::Value::Null);
+}
+
 // ── Schedule ───────────────────────────────────────────────────
 
 #[test]

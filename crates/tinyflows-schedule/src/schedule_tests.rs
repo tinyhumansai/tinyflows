@@ -159,6 +159,15 @@ fn validate_schedule_rejects_every_zero() {
 }
 
 #[test]
+fn validate_schedule_rejects_every_intervals_that_cannot_advance() {
+    let now = Utc::now();
+    for every_ms in [i64::MAX as u64 + 1, u64::MAX] {
+        let schedule = Schedule::Every { every_ms };
+        assert!(validate_schedule(&schedule, now).is_err());
+    }
+}
+
+#[test]
 fn validate_schedule_accepts_valid_cron() {
     let now = Utc::now();
     let schedule = Schedule::Cron {
