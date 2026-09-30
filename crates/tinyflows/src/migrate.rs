@@ -211,6 +211,19 @@ fn locate_graph_error(migrated: &Value, err: &serde_json::Error) -> String {
 /// keys parse (no `deny_unknown_fields`) and are skipped.
 fn locate_top_level_error(migrated: &Value, err: &serde_json::Error) -> String {
     if let Some(fields) = migrated.as_object() {
+        // A malformed collection can coexist with malformed members in a
+        // different collection. Report the collection shape before probing
+        // individual member collections, independent of JSON map key order.
+        for key in ELEMENT_ARRAYS {
+            if let Some(value) = fields.get(*key).filter(|value| !value.is_array()) {
+                let probe =
+                    Value::Object([((*key).to_string(), value.clone())].into_iter().collect());
+                if let Err(inner) = serde_json::from_value::<WorkflowGraph>(probe) {
+                    return format!("{key}: {inner}");
+                }
+            }
+        }
+
         for (key, value) in fields {
             let probe = Value::Object([(key.clone(), value.clone())].into_iter().collect());
             if let Err(inner) = serde_json::from_value::<WorkflowGraph>(probe) {

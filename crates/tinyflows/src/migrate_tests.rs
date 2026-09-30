@@ -322,6 +322,18 @@ fn deserialize_graph_falls_back_when_no_member_is_at_fault() {
 }
 
 #[test]
+fn deserialize_graph_prefers_a_malformed_collection_over_an_invalid_member_elsewhere() {
+    let err = deserialize_graph(json!({
+        "nodes": "not an array",
+        "edges": [{ "from_port": "main" }]
+    }))
+    .expect_err("both the nodes collection and an edge member are malformed");
+
+    assert!(err.starts_with("nodes: "), "got: {err}");
+    assert!(!err.contains("edges[0]"), "got: {err}");
+}
+
+#[test]
 fn deserialize_graph_reports_a_non_object_graph_without_inventing_a_location() {
     let err = deserialize_graph(json!("this is a string, not a workflow graph"))
         .expect_err("a non-object graph must not deserialize");
