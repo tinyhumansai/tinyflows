@@ -37,27 +37,17 @@ pub fn text_looks_like_question(text: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    if trimmed.ends_with('?') {
-        return true;
-    }
-    // The question may not be the literal last character (trailing markdown
-    // like a closing code fence or list marker on its own line) — fall back
-    // to the last non-blank line.
-    if trimmed
-        .lines()
-        .rfind(|line| !line.trim().is_empty())
-        .is_some_and(|last_line| last_line.trim_end().ends_with('?'))
-    {
-        return true;
-    }
     // Final-paragraph scan: a question can sit mid-paragraph, followed by a
     // further trailing sentence on the SAME line/paragraph ("...ID? You can
     // find it under Profile > Copy member ID."). Take the last non-blank
     // paragraph and accept it if it contains a `?` that isn't inside inline
     // code / a code fence.
-    last_paragraph(trimmed)
-        .as_deref()
-        .is_some_and(question_mark_outside_code)
+    let Some(paragraph) = last_paragraph(trimmed) else {
+        return false;
+    };
+    let paragraph_start = trimmed.len() - paragraph.len();
+    let prefix = &trimmed[..paragraph_start];
+    question_mark_outside_code_with_state(&paragraph, code_span_state(prefix))
 }
 
 /// Returns the last non-blank paragraph of `text` — a maximal run of
@@ -122,6 +112,29 @@ fn last_paragraph(text: &str) -> Option<String> {
 /// sentence-terminal via [`is_sentence_terminal_question_mark`].
 #[must_use]
 pub fn question_mark_outside_code(text: &str) -> bool {
+    question_mark_outside_code_with_state(text, None)
+}
+
+fn code_span_state(text: &str) -> Option<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut open_run_len = None;
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '`' {
+            let start = i;
+            while i < chars.len() && chars[i] == '`' { i += 1; }
+            let run_len = i - start;
+            open_run_len = match open_run_len {
+                None => Some(run_len),
+                Some(n) if n == run_len => None,
+                Some(n) => Some(n),
+            };
+        } else { i += 1; }
+    }
+    open_run_len
+}
+
+fn question_mark_outside_code_with_state(text: &str, mut open_run_len: Option<usize>) -> bool {
     let chars: Vec<char> = text.chars().collect();
     // `Some(n)` while scanning is inside a code span opened by a run of `n`
     // backticks; that span closes only on the next run of exactly `n`.
