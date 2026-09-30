@@ -48,6 +48,26 @@ fn runs_closer_than_does_not_depend_on_the_instant_it_starts_from() {
     }
 }
 
+#[test]
+fn runs_closer_than_scans_through_the_next_annual_dst_transition() {
+    let schedule = Schedule::Cron {
+        expr: "0 0,59 1,3 * * *".into(),
+        tz: Some("America/New_York".into()),
+        active_hours: None,
+    };
+    let from = Utc.with_ymd_and_hms(2025, 4, 1, 0, 0, 0).unwrap();
+    let hit = runs_closer_than(&schedule, from, MIN_AGENT_JOB_INTERVAL)
+        .expect("the spring-forward one-minute gap must be found");
+    assert_eq!(hit.gap(), ChronoDuration::minutes(1));
+    assert_eq!(
+        hit,
+        TooFrequent::ConsecutiveRuns {
+            first: Utc.with_ymd_and_hms(2026, 3, 8, 6, 59, 0).unwrap(),
+            second: Utc.with_ymd_and_hms(2026, 3, 8, 7, 0, 0).unwrap(),
+        }
+    );
+}
+
 /// The closest pair is reported, not the first one under the floor: `1,3,4,30`
 /// has :01 → :03 (2 min) before :03 → :04 (1 min), and the message must name
 /// the latter. Ties keep the earliest pair.

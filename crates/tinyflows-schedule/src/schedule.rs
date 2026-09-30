@@ -16,14 +16,13 @@ pub const MIN_AGENT_JOB_INTERVAL: ChronoDuration = ChronoDuration::minutes(5);
 /// Upper bound on cron candidates walked while looking for an occurrence that
 /// falls inside `active_hours`. `next_run_for_schedule` gets a fresh budget
 /// per call; a `runs_closer_than` scan shares one across all of its steps.
-const ACTIVE_WINDOW_CANDIDATE_LIMIT: usize = 100_000;
+const ACTIVE_WINDOW_CANDIDATE_LIMIT: usize = 600_000;
 
 /// How many consecutive occurrences [`runs_closer_than`] walks before it
-/// concludes a cron schedule keeps its distance. Every gap an hour- or
-/// day-periodic expression can produce shows up well inside this many runs
-/// (a schedule that respects a 5-minute floor fires at most 288 times a day),
-/// so the verdict does not depend on the instant the scan starts from.
-const RUN_GAP_SCAN_OCCURRENCES: usize = 1_000;
+/// concludes a cron schedule keeps its distance. A full leap year at the
+/// minimum allowed cadence has at most 105,408 runs (288 per day), so this
+/// covers annual timezone transitions regardless of where the scan starts.
+const RUN_GAP_SCAN_OCCURRENCES: usize = 105_500;
 
 pub fn next_run_for_schedule(schedule: &Schedule, from: DateTime<Utc>) -> Result<DateTime<Utc>> {
     match schedule {
