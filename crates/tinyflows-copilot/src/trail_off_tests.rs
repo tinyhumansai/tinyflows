@@ -73,6 +73,10 @@ fn text_looks_like_question_ignores_question_mark_inside_code() {
     assert!(!text_looks_like_question(
         "Here's the query:\n\n```sql\nSELECT * FROM t WHERE id = ?\n```"
     ));
+    assert!(!text_looks_like_question(
+        "Here's the query:\n\n```sql\n\nSELECT * FROM t WHERE id = ?\n```"
+    ));
+    assert!(!text_looks_like_question("```sql\nSELECT * FROM t WHERE id = ?"));
 }
 
 /// Codex review follow-up: a `?` mid-token that isn't a real question mark —

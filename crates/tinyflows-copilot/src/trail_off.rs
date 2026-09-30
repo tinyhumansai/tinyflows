@@ -45,7 +45,7 @@ pub fn text_looks_like_question(text: &str) -> bool {
     let Some(paragraph) = last_paragraph(trimmed) else {
         return false;
     };
-    let paragraph_start = trimmed.len() - paragraph.len();
+    let paragraph_start = trimmed.rfind(&paragraph).expect("paragraph came from text");
     let prefix = &trimmed[..paragraph_start];
     question_mark_outside_code_with_state(&paragraph, code_span_state(prefix))
 }
