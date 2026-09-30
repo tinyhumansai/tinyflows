@@ -32,6 +32,11 @@ tokio-util = { version = "0.7", default-features = false }
 # Diagnostics only: the registries and the importers log what they refuse and
 # why. No subscriber is installed here — a host that installs none pays nothing.
 tracing = { workspace = true }
+# `graph_hash` only: the SHA-256 that pins a graph's content for approval
+# resume. Hex-encoded, so the digest is the same string a host persisted before
+# this moved here.
+sha2 = { workspace = true }
+hex = "0.4"
 
 [dev-dependencies]
 serde_json = { workspace = true }

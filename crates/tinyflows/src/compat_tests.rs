@@ -173,6 +173,70 @@ fn an_inline_sub_workflow_child_is_walked_and_its_refusal_is_attributed() {
     );
 }
 
+/// Inline children recurse: an unsafe grandchild is reported through both
+/// enclosing `sub_workflow` nodes, so the author can follow the chain from the
+/// graph they are editing down to the node that is actually at fault.
+#[test]
+fn nested_inline_sub_workflows_are_walked_and_attributed_through_each_level() {
+    let unsafe_child = json!({
+        "name": "unsafe",
+        "nodes": [
+            { "id": "start", "kind": "trigger", "name": "Trigger" },
+            { "id": "outer", "kind": "condition", "name": "Outer", "config": { "field": "o" } },
+            { "id": "inner", "kind": "condition", "name": "Inner", "config": { "field": "i" } },
+            { "id": "outer_else", "kind": "output_parser", "name": "Outer else" },
+            { "id": "inner_else", "kind": "output_parser", "name": "Inner else" },
+            { "id": "a", "kind": "output_parser", "name": "A" },
+            { "id": "c", "kind": "output_parser", "name": "C" },
+            { "id": "m", "kind": "merge", "name": "Merge" }
+        ],
+        "edges": [
+            { "from_node": "start", "from_port": "main", "to_node": "outer" },
+            { "from_node": "start", "from_port": "main", "to_node": "c" },
+            { "from_node": "outer", "from_port": "true", "to_node": "inner" },
+            { "from_node": "outer", "from_port": "false", "to_node": "outer_else" },
+            { "from_node": "inner", "from_port": "true", "to_node": "a" },
+            { "from_node": "inner", "from_port": "false", "to_node": "inner_else" },
+            { "from_node": "a", "from_port": "main", "to_node": "m" },
+            { "from_node": "c", "from_port": "main", "to_node": "m" }
+        ]
+    });
+    let middle = json!({
+        "nodes": [
+            { "id": "middle-trigger", "kind": "trigger", "name": "Trigger" },
+            { "id": "inner-child", "kind": "sub_workflow", "name": "Inner child",
+              "config": { "workflow": unsafe_child } }
+        ],
+        "edges": [
+            { "from_node": "middle-trigger", "from_port": "main", "to_node": "inner-child" }
+        ]
+    });
+    let parent = graph(json!({
+        "nodes": [
+            { "id": "parent-trigger", "kind": "trigger", "name": "Trigger" },
+            { "id": "middle-child", "kind": "sub_workflow", "name": "Middle child",
+              "config": { "workflow": middle } }
+        ],
+        "edges": [
+            { "from_node": "parent-trigger", "from_port": "main", "to_node": "middle-child" }
+        ]
+    }));
+
+    let found = errors(&parent);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].code, UNSUPPORTED_NESTED_CONDITIONAL_FAN_IN);
+    assert!(
+        found[0].message.contains("middle-child"),
+        "{}",
+        found[0].message
+    );
+    assert!(
+        found[0].message.contains("inner-child"),
+        "{}",
+        found[0].message
+    );
+}
+
 /// The depth budget is the run's, not the child's, which is why it can be
 /// passed in: a host resolving a *saved* child mid-chain has to check it to the
 /// remaining depth the root allows.

@@ -1,0 +1,28 @@
+# Pure scheduling logic for timed jobs: the `Schedule` / `ActiveHours` model
+# (with its persisted wire shape), cron-expression normalisation, time-zone and
+# active-window aware next-run computation, and the minimum-cadence check.
+#
+# Deliberately no scheduler runtime, store, clock or config here: a host owns
+# when to poll, where jobs are kept and what a run does. This crate only
+# answers "given this schedule and this instant, when next?".
+[package]
+name = "tinyflows-schedule"
+version = "0.1.0"
+description = "Cron/interval/one-shot schedule model and next-run computation for tinyflows hosts"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+serde = { workspace = true }
+chrono = { workspace = true }
+anyhow = "1.0"
+cron = "0.12"
+chrono-tz = "0.10"
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
