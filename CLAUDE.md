@@ -26,6 +26,7 @@ uses, so a reader who knows one knows them all.
 | `crates/tinyflows-sqlite` | SQLite implementations of the catalog and of the engine's checkpoint store, plus the JSON draft store. Every entry point takes a directory, never a host config type. |
 | `crates/tinyflows-copilot` | The authoring copilot's *words*: the `workflow_builder` / `flow_discovery` standing archetypes, and the turn brief that opens a builder turn. Names no tool trait, no agent registry, no model client. |
 | `crates/tinyflows-adaptive` | The adaptive loop over the engine: select or author a workflow, run it, judge it, learn. |
+| `crates/tinyflows-schedule` | Schedule model and pure next-run logic (cron / interval / one-shot, time zones, active hours, cadence floor). No runtime, store or config. |
 
 **Where a new thing goes.** Ask what it depends on, not what it is about. If it
 needs storage, it is not `tinyflows-catalog`. If it needs a tool trait or a model

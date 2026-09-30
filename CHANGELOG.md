@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`crates/tinyflows-schedule`** — the schedule model (`Schedule`,
+  `ActiveHours`, the job/run records) and its pure logic: cron-expression
+  normalisation, time-zone and active-window aware next-run computation,
+  validation and the minimum-cadence check. Extracted from OpenHuman's `cron`
+  domain; the serde shapes are byte-identical and pinned by literal-JSON
+  fixtures. No runtime, store or config.
 - **`tinyflows_catalog::graph_hash::compute_graph_hash`** — the content pin over
   a graph plus its `require_approval` flag that a parked run records and a
   resume re-checks. Extracted from OpenHuman; the digest is byte-identical to
