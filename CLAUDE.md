@@ -83,6 +83,11 @@ model::WorkflowGraph  →  validate  →  compiler::compile  →  engine::run
   `output_parser` sub-port.
 - `nodes/` — `NodeExecutor` trait + dispatch; `control_flow.rs` (if/switch/merge/
   split_out/…) and `integration.rs` (agent/tool_call/http_request/code/…).
+- `postcondition.rs` — a node's declared `config.postcondition`: a mechanical
+  predicate (`non_empty` / `field_present` / `non_empty_list`) the engine checks
+  on every emitted item before an attempt counts as a success. A failing output
+  is a failed attempt, so `retry` and `on_error` apply; an unknown predicate
+  fails closed.
 - `compiler.rs` — compiles a validated graph into runnable form.
 - `engine.rs` — `engine::run`, drives a compiled workflow to completion.
 - `graph/` — the in-crate state-graph runtime `engine.rs` lowers onto (builder,

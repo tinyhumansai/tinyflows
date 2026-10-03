@@ -291,10 +291,15 @@ impl HandlerData {
                 None => Some(executor_for(&node.kind).execute(ctx).await),
             };
             match attempt_result {
-                Some(Ok(ok)) => {
-                    output = Some(ok);
-                    break;
-                }
+                // A declared postcondition the output fails makes this a
+                // failed attempt, so `retry` and `on_error` apply to it.
+                Some(Ok(ok)) => match crate::postcondition::enforce(&node, &ok) {
+                    Ok(()) => {
+                        output = Some(ok);
+                        break;
+                    }
+                    Err(err) => last_err = Some(err),
+                },
                 Some(Err(err)) => last_err = Some(err),
                 // A timed-out attempt counts as a failed attempt: record
                 // it as an error so the retry/`on_error` logic treats it

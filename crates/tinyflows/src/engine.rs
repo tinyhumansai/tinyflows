@@ -313,3 +313,7 @@ mod lane_context_tests;
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "engine_postcondition_tests.rs"]
+mod postcondition_tests;

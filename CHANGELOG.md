@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Node postconditions (`tinyflows::postcondition`).** A node may declare
+  `config.postcondition = { "require": ..., "field": ... }` — `non_empty`,
+  `field_present` or `non_empty_list` — and the engine checks it against every
+  emitted item before the attempt counts as a success. A failing output is a
+  failed attempt: retried under `retry.max_attempts`, then handed to
+  `on_error`. An unrecognised predicate or an unreadable declaration fails the
+  node rather than silently passing; `validate_all` refuses both at author
+  time. Ported from OpenCompany's host-side agent gate.
 - **`crates/tinyflows-schedule`** — the schedule model (`Schedule`,
   `ActiveHours`, the job/run records) and its pure logic: cron-expression
   normalisation, time-zone and active-window aware next-run computation,

@@ -3,9 +3,10 @@
 //! The half of [`validate_all`](super::validate_all) that reads a node's
 //! `config` object rather than the graph's shape: the `sub_workflow` child
 //! reference, per-item fan-out selectors, `memory` scope rules, the `dedup`
-//! key, and the `approval` enums. Every check here is about one node in
-//! isolation — nothing in this module looks at an edge — which is what makes it
-//! a module of its own rather than an arbitrary cut through `validate_all`.
+//! key, the `approval` enums, and a declared `postcondition`. Every check here
+//! is about one node in isolation — nothing in this module looks at an edge —
+//! which is what makes it a module of its own rather than an arbitrary cut
+//! through `validate_all`.
 
 use serde_json::Value;
 
@@ -16,6 +17,20 @@ use super::kind_name;
 
 /// Appends every per-kind config error the graph carries, in node order.
 pub(super) fn validate_node_configs(graph: &WorkflowGraph, errors: &mut Vec<ValidationError>) {
+    // A declared `postcondition` the engine could never evaluate as written —
+    // an unknown predicate, a `field_present` with no field, an expression as
+    // the field — would fail the node on every run. Say so where the message
+    // can name the node. See `crate::postcondition`.
+    for node in &graph.nodes {
+        let declared = crate::postcondition::Postcondition::from_config(&node.config);
+        if let Some(Err(reason)) = declared.map(|read| read.and_then(|p| p.validate())) {
+            errors.push(ValidationError::InvalidNodeConfig {
+                node: node.id.clone(),
+                reason,
+            });
+        }
+    }
+
     // Per-kind config checks. A `sub_workflow` node must reference its child
     // exactly one way: an inline `workflow` graph OR a `workflow_id` reference,
     // never both and never neither (the reference form is resolved at run time

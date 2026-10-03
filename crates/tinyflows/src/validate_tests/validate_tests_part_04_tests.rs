@@ -228,3 +228,49 @@ fn a_scatter_whose_only_path_ends_in_void_is_still_rejected() {
         "{errors:?}"
     );
 }
+
+// --- `postcondition` ---
+
+fn gated(postcondition: serde_json::Value) -> WorkflowGraph {
+    let mut work = node("work", NodeKind::Transform);
+    work.config = serde_json::json!({ "postcondition": postcondition });
+    WorkflowGraph {
+        nodes: vec![node("t", NodeKind::Trigger), work],
+        edges: vec![void_edge("t", "work")],
+        ..Default::default()
+    }
+}
+
+fn postcondition_reason(graph: &WorkflowGraph) -> Option<String> {
+    validate_all(graph).into_iter().find_map(|e| match e {
+        ValidationError::InvalidNodeConfig { node, reason }
+            if node == "work" && reason.contains("postcondition") =>
+        {
+            Some(reason)
+        }
+        _ => None,
+    })
+}
+
+#[test]
+fn a_well_formed_postcondition_validates() {
+    let graph = gated(serde_json::json!({ "require": "field_present", "field": "json.id" }));
+    assert!(validate_all(&graph).is_empty(), "{:?}", validate_all(&graph));
+}
+
+#[test]
+fn an_unknown_postcondition_requirement_is_refused_at_the_door() {
+    let reason = postcondition_reason(&gated(serde_json::json!({ "require": "nonempty" })));
+    assert!(reason.is_some_and(|r| r.contains("nonempty")));
+}
+
+#[test]
+fn a_field_present_postcondition_without_a_field_is_refused() {
+    let graph = gated(serde_json::json!({ "require": "field_present" }));
+    assert!(postcondition_reason(&graph).is_some());
+}
+
+#[test]
+fn a_postcondition_that_is_not_an_object_is_refused() {
+    assert!(postcondition_reason(&gated(serde_json::json!("non_empty"))).is_some());
+}

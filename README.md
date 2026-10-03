@@ -68,6 +68,10 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 - Per-node error handling: `on_error` policy (`stop` / `continue` / `route`),
   bounded `retry`, and an `error` output port for routing failures to a recovery
   sub-graph.
+- Node postconditions: `config.postcondition = { "require": "non_empty" }` (or
+  `field_present` / `non_empty_list` with a dotted `field`) is checked against
+  every emitted item, so an empty or misshapen output is a failed attempt that
+  `retry` and `on_error` handle instead of flowing downstream.
 - Human-in-the-loop approval gating: a node with `requires_approval` pauses the
   run and is surfaced via `RunOutcome::pending_approvals`; `engine::resume`
   approves and continues. A host can also drive durable, cross-process resume by
