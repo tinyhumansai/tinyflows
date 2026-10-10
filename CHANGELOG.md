@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`tinyflows-drivers` (new, unpublished crate).** `DriverStateStore`
   implements the engine's `StateStore` and `DriverCheckpointer` the graph
   `Checkpointer` over a `tinystoragedrivers` document port (git dependency at
-  `v0.4.0`, so a host that vendors the storage crates once can `[patch]` it).
+  `v0.5.0`, so a host that vendors the storage crates once can `[patch]` it).
   The checkpointer stores one document per checkpoint with a per-thread
   compare-and-swap sequence, merges pending writes under compare-and-swap,
   pushes namespace-scoped reads down to one indexed query, reads a whole
@@ -90,6 +90,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A nested inline `sub_workflow` case in the engine-compatibility tests.
 
 ### Changed
+
+- **`tinystoragedrivers` moves to `v0.5.0`** in `tinyflows-drivers`,
+  `tinyflows-sqlite` and `tinyflows-adaptive`. That release adds
+  driver-enforced write fencing (`Fence`, `StorageBackend::for_scope_fenced`,
+  `ErrorKind::Fenced`). The change is additive, and nothing here changes. A
+  host that `[patch]`es the storage crates must vendor `v0.5.0` or later.
 
 - **The repository is a virtual workspace; every crate lives under `crates/`.**
   The engine moved from the repository root to `crates/tinyflows` (with its

@@ -44,7 +44,7 @@ schedule = ["dep:tinyflows-schedule", "dep:anyhow", "dep:chrono", "dep:uuid"]
 test-fixtures = ["catalog"]
 
 [dependencies]
-tinystoragedrivers-core = { git = "https://github.com/tinyhumansai/tinystoragedrivers", tag = "v0.4.0" }
+tinystoragedrivers-core = { git = "https://github.com/tinyhumansai/tinystoragedrivers", tag = "v0.5.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
