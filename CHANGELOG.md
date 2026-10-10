@@ -99,6 +99,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<checkout>/crates/tinyflows`; nothing about the published crate's contents
   or its API changed. This is the layout every other `tiny*` repository uses.
 
+### Fixed
+
+- **5-field cron weekdays now use POSIX numbering** (`tinyflows-schedule`).
+  `normalize_expression` handed a standard crontab's weekday field to the
+  `cron` crate unchanged, but the crate numbers Sunday as 1 where crontab uses
+  0 (and 7). Every numbered weekday fired a day early: `0 16 * * 5` ran on
+  Thursday, `1-5` meant Sunday–Thursday, and `0`, the usual way to write
+  Sunday, was rejected. The weekday field of a 5-field expression is now
+  translated (`5` → Friday, `0`/`7` → Sunday, ranges, lists and steps
+  included; day names unchanged) and a number outside 0–7 is an error. 6- and
+  7-field expressions are crate-native and keep the crate's numbering.
+  Existing 5-field schedules with a numbered weekday will fire on the day they
+  were written for, one day later than before.
+
 ### Added
 
 - **`migrate::deserialize_graph`** — `migrate` plus deserialization into a

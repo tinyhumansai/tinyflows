@@ -136,6 +136,10 @@ pub struct ActiveHours {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Schedule {
     Cron {
+        /// A standard 5-field crontab (`min hour dom mon dow`, weekdays 0–7
+        /// with 0 and 7 = Sunday) or a crate-native 6/7-field expression
+        /// with a leading seconds column (weekdays 1–7, 1 = Sunday). See
+        /// [`crate::schedule::normalize_expression`].
         expr: String,
         #[serde(default)]
         tz: Option<String>,

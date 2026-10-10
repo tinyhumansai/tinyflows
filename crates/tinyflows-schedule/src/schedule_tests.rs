@@ -37,6 +37,8 @@ fn normalize_expression_accepts_standard_5_field_crontab() {
         normalize_expression("*/5 * * * *").unwrap(),
         "0 */5 * * * *"
     );
+    // …and the POSIX weekday (5 = Friday) becomes the crate's (6 = Friday).
+    assert_eq!(normalize_expression("0 16 * * 5").unwrap(), "0 0 16 * * 6");
 }
 
 #[test]

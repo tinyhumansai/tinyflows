@@ -1,3 +1,4 @@
+use crate::posix_weekday::posix_to_crate_weekdays;
 use crate::types::{ActiveHours, Schedule};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, NaiveTime, Timelike, Utc};
@@ -348,13 +349,28 @@ impl ActiveWindow {
     }
 }
 
+/// Rewrites a cron expression into the `cron` crate's 6/7-field form.
+///
+/// A standard 5-field crontab (`minute hour day month weekday`) gets a `0`
+/// seconds column, and its weekday field is translated from POSIX numbering
+/// (0–7, both 0 and 7 = Sunday) to the crate's (1–7, 1 = Sunday), so
+/// `0 16 * * 5` still means Friday at 16:00. Day names pass through. A
+/// weekday number outside 0–7 is an error.
+///
+/// A 6- or 7-field expression (`second minute hour day month weekday [year]`)
+/// is crate-native and returned as is, weekday numbering included.
 pub fn normalize_expression(expression: &str) -> Result<String> {
     let expression = expression.trim();
-    let field_count = expression.split_whitespace().count();
+    let fields: Vec<&str> = expression.split_whitespace().collect();
+    let field_count = fields.len();
 
     match field_count {
         // standard crontab syntax: minute hour day month weekday
-        5 => Ok(format!("0 {expression}")),
+        5 => {
+            let weekday = posix_to_crate_weekdays(fields[4])
+                .map_err(|err| anyhow::anyhow!("Invalid cron expression: {expression} ({err})"))?;
+            Ok(format!("0 {} {weekday}", fields[..4].join(" ")))
+        }
         // crate-native syntax includes seconds (+ optional year)
         6 | 7 => Ok(expression.to_string()),
         _ => anyhow::bail!(
@@ -370,3 +386,7 @@ mod tests;
 #[cfg(test)]
 #[path = "schedule_gap_tests.rs"]
 mod gap_tests;
+
+#[cfg(test)]
+#[path = "schedule_weekday_tests.rs"]
+mod weekday_tests;
