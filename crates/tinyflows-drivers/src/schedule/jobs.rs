@@ -45,6 +45,7 @@ fn updated_job_doc(job: &CronJob, previous: &Value) -> Result<Value> {
 /// A fresh job of `job_type` on `schedule`, due at its next occurrence.
 fn new_job(job_type: JobType, schedule: Schedule, now: DateTime<Utc>) -> Result<CronJob> {
     Ok(CronJob {
+        policy: Default::default(),
         id: Uuid::new_v4().to_string(),
         expression: schedule_cron_expression(&schedule).unwrap_or_default(),
         next_run: next_run_for_schedule(&schedule, now)?,
@@ -326,6 +327,15 @@ impl CronDocuments {
     /// Enabled jobs due at `now`, earliest first, at most the store's batch
     /// size. A read: see the module docs on two schedulers sharing a database.
     pub async fn due_jobs(&self, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
+        self.due_jobs_excluding(now, &[]).await
+    }
+
+    /// Due jobs excluding examined identities before the configured batch limit.
+    pub async fn due_jobs_excluding(
+        &self,
+        now: DateTime<Utc>,
+        excluded: &[String],
+    ) -> Result<Vec<CronJob>> {
         self.ensure().await?;
         // Due by milliseconds; nanoseconds only order jobs due within the
         // current millisecond, so a nanosecond value saturated outside
@@ -335,7 +345,11 @@ impl CronDocuments {
         let same_ms = Filter::eq("next_run_ms", now_ms);
         let due = Filter::lt("next_run_ms", now_ms).or(same_ms
             .and(Filter::lte("next_run_ns", nanos(now)).or(Filter::exists("next_run_ns", false))));
-        let query = Query::filter(Filter::eq("enabled", true).and(due))
+        let mut filter = Filter::eq("enabled", true).and(due);
+        for id in excluded {
+            filter = filter.and(Filter::ne("_id", id.as_str()));
+        }
+        let query = Query::filter(filter)
             .sort(Sort::asc("next_run_ms"))
             .sort(Sort::asc("next_run_ns"))
             .sort(Sort::asc("_id"))

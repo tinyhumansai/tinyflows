@@ -49,6 +49,9 @@ pub(super) fn apply_patch(mut job: CronJob, patch: CronJobPatch) -> Result<CronJ
     if let Some(agent_id) = patch.agent_id {
         job.agent_id = agent_id;
     }
+    if let Some(policy) = patch.policy {
+        job.policy = policy;
+    }
     if let Some(origin) = patch.origin {
         job.origin = origin;
     }

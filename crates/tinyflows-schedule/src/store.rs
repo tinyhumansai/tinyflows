@@ -19,7 +19,7 @@ pub const TRUNCATED_OUTPUT_MARKER: &str = "\n...[truncated]";
 
 /// Everything an agent job is created with. [`AgentJobSpec::new`] gives an
 /// enabled, isolated job with no name, model, definition or origin.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentJobSpec {
     pub name: Option<String>,
     pub schedule: Schedule,

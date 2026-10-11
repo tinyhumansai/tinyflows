@@ -27,6 +27,7 @@ fn a_new_spec_is_an_enabled_isolated_job() {
 #[test]
 fn only_a_flow_jobs_command_is_pinned() {
     let mut job = CronJob {
+        policy: Default::default(),
         id: "flow:a".into(),
         expression: "0 9 * * *".into(),
         schedule: Schedule::Cron {

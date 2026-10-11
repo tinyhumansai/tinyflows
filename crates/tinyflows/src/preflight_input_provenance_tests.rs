@@ -49,6 +49,8 @@ async fn bracketed_runtime_scope_and_identity_child_mappings_remain_opaque() {
     for (mapping, argument) in [
         ("=.[\"run\"].payload", "=inputs.payload.subject"),
         ("=.", "=inputs.payload.run.subject"),
+        ("=.[\"r\"+\"un\"].payload", "=inputs.payload.subject"),
+        ("=.[(\"r\"+\"un\")].payload", "=inputs.payload.subject"),
     ] {
         child.nodes[1].config["args"]["subject"] = json!(argument);
         let parent = graph(

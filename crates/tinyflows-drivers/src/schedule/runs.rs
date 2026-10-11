@@ -19,6 +19,17 @@ use super::{
 /// The counter document run numbers are drawn from.
 const RUN_COUNTER: &str = "runs";
 
+struct HistoryWrite<'a> {
+    job_id: &'a str,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    status: &'a str,
+    output: Option<&'a str>,
+    duration_ms: i64,
+    delivery_status: Option<DeliveryStatus>,
+    expected_creation: Option<DateTime<Utc>>,
+}
+
 impl CronDocuments {
     /// Records a run's outcome on the job (`last_run`, `last_status`, bounded
     /// `last_output`) without touching `next_run` or `enabled`. A missing job
@@ -137,6 +148,49 @@ impl CronDocuments {
         duration_ms: i64,
         delivery_status: Option<DeliveryStatus>,
     ) -> Result<()> {
+        self.append_history(HistoryWrite {
+            job_id,
+            started_at,
+            finished_at,
+            status,
+            output,
+            duration_ms,
+            delivery_status,
+            expected_creation: None,
+        })
+        .await
+    }
+
+    /// Append a scheduler outcome only to the dispatch-time job creation.
+    /// A removed or re-created job is rejected without writing its history.
+    pub async fn record_claimed_run(
+        &self,
+        record: &tinyflows_schedule::runtime::RunRecord,
+    ) -> Result<()> {
+        self.append_history(HistoryWrite {
+            job_id: &record.job_id,
+            started_at: record.started_at,
+            finished_at: record.finished_at,
+            status: &record.status,
+            output: Some(&record.output),
+            duration_ms: (record.finished_at - record.started_at).num_milliseconds(),
+            delivery_status: record.delivery_status.clone(),
+            expected_creation: Some(record.job_created_at),
+        })
+        .await
+    }
+
+    async fn append_history(&self, write: HistoryWrite<'_>) -> Result<()> {
+        let HistoryWrite {
+            job_id,
+            started_at,
+            finished_at,
+            status,
+            output,
+            duration_ms,
+            delivery_status,
+            expected_creation,
+        } = write;
         tracing::debug!(
             target: "cron",
             %job_id,
@@ -148,6 +202,16 @@ impl CronDocuments {
         // A run belongs to a job that exists, as the SQLite foreign key
         // enforces, and to that job's incarnation.
         let job = self.job_doc(job_id).await?;
+        if let Some(expected) = expected_creation {
+            let created = job
+                .get("created_at")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("cron store: missing job creation identity"))?;
+            anyhow::ensure!(
+                DateTime::parse_from_rfc3339(created)?.with_timezone(&Utc) == expected,
+                "cron run belongs to a removed job creation"
+            );
+        }
         let fired = incarnation(&job).map(str::to_string);
         let seq = self.next_run_number().await?;
         let doc = run_to_doc(

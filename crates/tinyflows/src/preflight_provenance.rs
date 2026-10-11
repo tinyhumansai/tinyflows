@@ -48,6 +48,7 @@ impl<'a> Provenance<'a> {
                         | NodeKind::Condition
                         | NodeKind::Switch
                         | NodeKind::Merge
+                        | NodeKind::Loop
                         | NodeKind::Dedup
                 ) {
                     let predecessors: Vec<_> = graph
@@ -67,10 +68,11 @@ impl<'a> Provenance<'a> {
                             .retain(|field| predecessor.known.contains(field));
                     }
                     // TransformNode overlays only `set`, preserving all other fields.
-                    let overlay = (node.kind == NodeKind::Transform)
-                        .then(|| node.config.get("set"))
-                        .flatten();
-                    if let Some(Value::Object(fields)) = overlay {
+                    if let Some(Value::Object(fields)) = node
+                        .config
+                        .get("set")
+                        .filter(|_| node.kind == NodeKind::Transform)
+                    {
                         for (field, value) in fields {
                             output.paths.retain(|path| path.first() != Some(field));
                             if value.as_str().is_some_and(|expression| {

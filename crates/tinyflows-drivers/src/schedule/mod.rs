@@ -66,8 +66,10 @@ mod claims;
 mod codec;
 mod jobs;
 mod patch;
+mod policy;
 mod removal;
 mod runs;
+mod runtime;
 #[cfg(test)]
 mod test_support;
 
@@ -142,6 +144,7 @@ impl CronDocuments {
                 .await
                 .map_err(storage_error)?;
         }
+        self.migrate_policies().await?;
         Ok(())
     }
 }

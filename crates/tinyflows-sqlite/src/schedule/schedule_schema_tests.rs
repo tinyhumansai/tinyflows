@@ -125,6 +125,8 @@ fn schema_created_on_a_fresh_database_matches_the_pinned_layout() {
             "last_output",
             "agent_id",
             "origin",
+            "retries",
+            "single_flight",
         ]
         .iter()
         .map(|s| s.to_string())

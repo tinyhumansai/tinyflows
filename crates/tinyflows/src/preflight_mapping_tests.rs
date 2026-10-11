@@ -67,3 +67,31 @@ async fn bracketed_runtime_scope_and_identity_child_mappings_remain_opaque() {
         assert!(errors.is_empty(), "{mapping}: {errors:?}");
     }
 }
+
+#[tokio::test]
+async fn passthrough_control_flow_preserves_unknown_fields_and_literal_overlays() {
+    for (kind, port) in [
+        ("condition", "false"),
+        ("switch", "default"),
+        ("merge", "main"),
+    ] {
+        let g = graph(
+            json!([
+                trigger(),
+                {"id":"shape","kind":"transform","name":"Shape","config":{"set":{"body":null}}},
+                {"id":"relay","kind":kind,"name":"Relay","config":{"field":"missing"}},
+                {"id":"send","kind":"tool_call","name":"Send","config":{"slug":"provider:send","args":{
+                    "subject":"=item.subject", "body":"=item.body"
+                }}}
+            ]),
+            json!([
+                {"from_node":"t","to_node":"shape"},
+                {"from_node":"shape","to_node":"relay"},
+                {"from_node":"relay","from_port":port,"to_node":"send"}
+            ]),
+        );
+        let errors = unresolvable_tool_args(&g, &[]).await;
+        assert_eq!(errors.len(), 1, "{kind}: {errors:?}");
+        assert!(errors[0].contains("arg `body`"), "{kind}: {errors:?}");
+    }
+}

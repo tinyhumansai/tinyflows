@@ -72,6 +72,9 @@ fn set(doc: &mut Map<String, Value>, field: &str, value: Option<Value>) {
 /// The document for `job`.
 pub(super) fn job_to_doc(job: &CronJob) -> Result<Value> {
     let mut doc = Map::new();
+    if !job.policy.is_default() {
+        doc.insert("policy".into(), serde_json::to_value(job.policy)?);
+    }
     doc.insert("expression".into(), json!(job.expression));
     doc.insert("command".into(), json!(job.command));
     doc.insert(
@@ -182,6 +185,11 @@ pub(super) fn doc_to_job(stored: &Versioned<Value>) -> Result<CronJob> {
     };
     let owned = |field: &str| optional(doc, field).map(|value| value.map(str::to_string));
     Ok(CronJob {
+        policy: doc
+            .get("policy")
+            .map(|p| serde_json::from_value(p.clone()))
+            .transpose()?
+            .unwrap_or_default(),
         id: stored.id.clone(),
         expression: required(doc, "expression")?.to_string(),
         schedule,

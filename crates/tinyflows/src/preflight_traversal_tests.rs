@@ -188,3 +188,41 @@ async fn child_mock_runs_inherit_the_root_nesting_budget() {
         );
     }
 }
+
+#[tokio::test]
+async fn child_mock_runs_inherit_the_root_depth_cap_and_current_depth() {
+    let mut nested = graph(json!([trigger()]), json!([]));
+    for _ in 0..1 {
+        nested = graph(
+            json!([trigger(), {"id":"child","kind":"sub_workflow","name":"Child","config":{"workflow":nested}}]),
+            json!([{"from_node":"t","to_node":"child"}]),
+        );
+    }
+    let child = graph(
+        json!([
+            {"id":"t","kind":"trigger","name":"Start","config":{"max_sub_workflow_depth":1}},
+            {"id":"nested","kind":"sub_workflow","name":"Nested","config":{"workflow":nested}},
+            {"id":"shape","kind":"transform","name":"Shape","config":{"set":{"subject":null}}},
+            {"id":"send","kind":"tool_call","name":"Send","config":{"slug":"provider:send","args":{"subject":"=item.subject"}}}
+        ]),
+        json!([
+            {"from_node":"t","to_node":"nested"},
+            {"from_node":"nested","to_node":"shape"},
+            {"from_node":"shape","to_node":"send"}
+        ]),
+    );
+    let root = graph(
+        json!([
+            {"id":"t","kind":"trigger","name":"Start","config":{"max_sub_workflow_depth":3}},
+            {"id":"child","kind":"sub_workflow","name":"Child","config":{"workflow":child}}
+        ]),
+        json!([{"from_node":"t","to_node":"child"}]),
+    );
+    let errors = unresolvable_tool_args(&root, &[]).await;
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("arg `subject`"), "{errors:?}");
+    assert!(
+        errors[0].contains("Inline sub_workflow node 'child'"),
+        "{errors:?}"
+    );
+}

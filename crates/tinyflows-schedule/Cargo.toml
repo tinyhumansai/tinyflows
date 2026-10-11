@@ -1,10 +1,4 @@
-# Pure scheduling logic for timed jobs: the `Schedule` / `ActiveHours` model
-# (with its persisted wire shape), cron-expression normalisation, time-zone and
-# active-window aware next-run computation, and the minimum-cadence check.
-#
-# Deliberately no scheduler runtime, store, clock or config here: a host owns
-# when to poll, where jobs are kept and what a run does. This crate only
-# answers "given this schedule and this instant, when next?".
+# Schedule model, validation and generic scheduler runtime over host ports.
 [package]
 name = "tinyflows-schedule"
 version = "0.1.0"
@@ -17,6 +11,9 @@ homepage.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 serde = { workspace = true }
 chrono = { workspace = true }
 anyhow = "1.0"

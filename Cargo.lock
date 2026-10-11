@@ -2877,14 +2877,23 @@ dependencies = [
 name = "tinyflows-module"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "chrono",
+ "serde",
  "serde_json",
  "tempfile",
  "tinybus",
  "tinybus-module",
  "tinyflows",
  "tinyflows-bus",
+ "tinyflows-drivers",
+ "tinyflows-schedule",
+ "tinyflows-sqlite",
+ "tinystoragedrivers-core",
  "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2892,12 +2901,15 @@ name = "tinyflows-schedule"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "chrono-tz",
  "cron",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

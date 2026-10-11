@@ -11,6 +11,17 @@ use tinyflows_schedule::{CronJob, CronRun, DeliveryStatus, Schedule, next_run_fo
 use tinyflows_schedule::truncate_cron_output;
 pub use tinyflows_schedule::{MAX_CRON_OUTPUT_BYTES, TRUNCATED_OUTPUT_MARKER};
 
+struct HistoryWrite<'a> {
+    job_id: &'a str,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    status: &'a str,
+    output: Option<&'a str>,
+    duration_ms: i64,
+    delivery_status: Option<DeliveryStatus>,
+    expected_creation: Option<DateTime<Utc>>,
+}
+
 /// Records a run's outcome on the job row (`last_run`, `last_status`,
 /// bounded `last_output`) without touching `next_run` or `enabled`.
 pub fn record_last_run(
@@ -108,6 +119,53 @@ pub fn record_run_with_delivery(
     duration_ms: i64,
     delivery_status: Option<DeliveryStatus>,
 ) -> Result<()> {
+    append_history(
+        opts,
+        HistoryWrite {
+            job_id,
+            started_at,
+            finished_at,
+            status,
+            output,
+            duration_ms,
+            delivery_status,
+            expected_creation: None,
+        },
+    )
+}
+
+/// Append a scheduler outcome only to the dispatch-time job creation.
+/// A removed or re-created job is rejected without writing its history.
+pub fn record_claimed_run(
+    opts: &CronStoreOptions,
+    record: &tinyflows_schedule::runtime::RunRecord,
+) -> Result<()> {
+    append_history(
+        opts,
+        HistoryWrite {
+            job_id: &record.job_id,
+            started_at: record.started_at,
+            finished_at: record.finished_at,
+            status: &record.status,
+            output: Some(&record.output),
+            duration_ms: (record.finished_at - record.started_at).num_milliseconds(),
+            delivery_status: record.delivery_status.clone(),
+            expected_creation: Some(record.job_created_at),
+        },
+    )
+}
+
+fn append_history(opts: &CronStoreOptions, write: HistoryWrite<'_>) -> Result<()> {
+    let HistoryWrite {
+        job_id,
+        started_at,
+        finished_at,
+        status,
+        output,
+        duration_ms,
+        delivery_status,
+        expected_creation,
+    } = write;
     tracing::debug!(
         target: "cron",
         %job_id,
@@ -121,6 +179,17 @@ pub fn record_run_with_delivery(
         // if the DELETE fails, the INSERT is rolled back and the run table
         // cannot grow unboundedly.
         let tx = conn.unchecked_transaction()?;
+        if let Some(expected) = expected_creation {
+            let created: String = tx.query_row(
+                "SELECT created_at FROM cron_jobs WHERE id=?1",
+                [job_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                DateTime::parse_from_rfc3339(&created)?.with_timezone(&Utc) == expected,
+                "cron run belongs to a removed job creation"
+            );
+        }
 
         tx.execute(
             "INSERT INTO cron_runs (job_id, started_at, finished_at, status, output, duration_ms,

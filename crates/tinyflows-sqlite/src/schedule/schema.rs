@@ -13,7 +13,7 @@ use tinyflows_schedule::{CronJob, DeliveryConfig, JobOrigin, JobType, Schedule, 
 pub(super) const JOB_COLUMNS: &str =
     "id, expression, command, schedule, job_type, prompt, name, session_target, model,
      enabled, delivery, delete_after_run, created_at, next_run, last_run, last_status, last_output,
-     agent_id, origin";
+     agent_id, origin, retries, single_flight";
 
 pub(super) fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronJob> {
     let expression: String = row.get(1)?;
@@ -31,6 +31,12 @@ pub(super) fn map_cron_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Cron
     let origin = decode_origin(origin_raw.as_deref()).map_err(sql_conversion_error)?;
 
     Ok(CronJob {
+        policy: tinyflows_schedule::JobPolicy {
+            retries: row
+                .get::<_, Option<i64>>(19)?
+                .map(|n| u32::try_from(n.max(0)).unwrap_or(u32::MAX)),
+            single_flight: row.get::<_, i64>(20)? != 0,
+        },
         id: row.get(0)?,
         expression,
         schedule,
@@ -225,10 +231,35 @@ pub fn with_connection<T>(
         add_column_if_missing(conn, "cron_jobs", "agent_id", "TEXT")?;
         add_column_if_missing(conn, "cron_jobs", "origin", "TEXT")?;
         add_column_if_missing(conn, "cron_runs", "delivery_status", "TEXT")?;
+        add_column_if_missing(conn, "cron_jobs", "retries", "INTEGER")?;
+        add_column_if_missing(
+            conn,
+            "cron_jobs",
+            "single_flight",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        migrate_policies(conn)?;
         ensure_flow_command_index(conn)?;
 
         f(conn)
     })
+}
+
+/// Atomically import legacy host policies before dropping their separate table.
+/// Defaults on new columns leave old seeded/system jobs unchanged.
+fn migrate_policies(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cron_job_policies')", [], |r| r.get(0))?;
+    if exists {
+        tx.execute_batch("UPDATE cron_jobs SET
+            retries = (SELECT CASE WHEN retries IS NULL THEN NULL ELSE MIN(4294967295, MAX(0, retries)) END FROM cron_job_policies p WHERE p.job_id=cron_jobs.id),
+            single_flight = (SELECT single_flight != 0 FROM cron_job_policies p WHERE p.job_id=cron_jobs.id)
+            WHERE EXISTS(SELECT 1 FROM cron_job_policies p WHERE p.job_id=cron_jobs.id);
+            DROP TABLE cron_job_policies;")?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Creates the `idx_cron_jobs_flow_command` partial unique index, first

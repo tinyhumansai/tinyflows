@@ -7,13 +7,9 @@ pub enum JobType {
     #[default]
     Shell,
     Agent,
-    /// A `flows::Flow` schedule trigger binding (issue B2). The job's
-    /// `command` column carries the bound flow's id (there is no shell
-    /// command / agent prompt to run); on fire the scheduler publishes
-    /// `DomainEvent::FlowScheduleTick { flow_id }` instead of running
-    /// anything itself — `flows::bus::FlowTriggerSubscriber` does the actual
-    /// dispatch. Created by `flows::ops::flows_set_enabled` (via
-    /// `cron::add_flow_schedule_job`), never via the `cron_add` agent tool.
+    /// A flow schedule trigger binding. The job's
+    /// `command` column carries the bound flow id. The runtime dispatches
+    /// it directly through `runtime::TriggerSink`, without a host event bus.
     Flow,
 }
 
@@ -136,6 +132,10 @@ pub struct ActiveHours {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Schedule {
     Cron {
+        /// A standard 5-field crontab (`min hour dom mon dow`, weekdays 0–7
+        /// with 0 and 7 = Sunday) or a crate-native 6/7-field expression
+        /// with a leading seconds column (weekdays 1–7, 1 = Sunday). See
+        /// [`crate::schedule::normalize_expression`].
         expr: String,
         #[serde(default)]
         tz: Option<String>,
@@ -283,8 +283,26 @@ fn default_true() -> bool {
     true
 }
 
+/// Per-job retry override and single-flight missed-slot recording.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPolicy {
+    /// None uses scheduler defaults; Some(0) runs exactly once.
+    pub retries: Option<u32>,
+    /// Record recurring slots skipped while the same job is already running.
+    pub single_flight: bool,
+}
+impl JobPolicy {
+    /// Whether serialization can omit this historically compatible policy.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
+    #[serde(default, skip_serializing_if = "JobPolicy::is_default")]
+    /// Retry override and single-flight semantics, defaulting for older jobs.
+    pub policy: JobPolicy,
     pub id: String,
     pub expression: String,
     pub schedule: Schedule,
@@ -312,6 +330,23 @@ pub struct CronJob {
     /// Absent on jobs that predate origin capture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<JobOrigin>,
+}
+
+impl CronJob {
+    /// Compare the inputs that determine execution and delivery, excluding
+    /// display names and last-run bookkeeping that may change independently.
+    pub fn same_execution_definition(&self, other: &Self) -> bool {
+        self.command == other.command
+            && self.prompt == other.prompt
+            && self.job_type == other.job_type
+            && self.session_target == other.session_target
+            && self.model == other.model
+            && self.agent_id == other.agent_id
+            && self.delivery == other.delivery
+            && self.origin == other.origin
+            && self.policy == other.policy
+            && self.delete_after_run == other.delete_after_run
+    }
 }
 
 /// What happened to a run's result after the run finished.
@@ -392,6 +427,9 @@ where
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CronJobPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Replace the complete job policy; None leaves it unchanged.
+    pub policy: Option<JobPolicy>,
     pub schedule: Option<Schedule>,
     pub command: Option<String>,
     pub prompt: Option<String>,

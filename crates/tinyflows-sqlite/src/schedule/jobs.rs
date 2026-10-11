@@ -346,22 +346,28 @@ pub fn dedup_named_jobs(opts: &CronStoreOptions) -> Result<usize> {
 
 /// Returns enabled jobs due at `now`, earliest first, at most `max_tasks`.
 pub fn due_jobs(opts: &CronStoreOptions, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
+    due_jobs_excluding(opts, now, &[])
+}
+
+/// Due jobs excluding examined identities before the configured batch limit.
+pub fn due_jobs_excluding(
+    opts: &CronStoreOptions,
+    now: DateTime<Utc>,
+    excluded: &[String],
+) -> Result<Vec<CronJob>> {
     let lim = i64::try_from(opts.max_tasks.max(1)).context("Scheduler max_tasks overflows i64")?;
+    let excluded = serde_json::to_string(excluded)?;
     with_connection(opts, |conn| {
         let mut stmt = conn.prepare(&format!(
             "SELECT {JOB_COLUMNS} FROM cron_jobs
                  WHERE enabled = 1 AND next_run <= ?1
+                   AND id NOT IN (SELECT value FROM json_each(?2))
                  ORDER BY next_run ASC
-                 LIMIT ?2"
+                 LIMIT ?3"
         ))?;
-
-        let rows = stmt.query_map(params![now.to_rfc3339(), lim], map_cron_job_row)?;
-
-        let mut jobs = Vec::new();
-        for row in rows {
-            jobs.push(row?);
-        }
-        Ok(jobs)
+        let rows = stmt.query_map(params![now.to_rfc3339(), excluded, lim], map_cron_job_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     })
 }
 
@@ -411,6 +417,9 @@ pub fn update_job(opts: &CronStoreOptions, job_id: &str, patch: CronJobPatch) ->
     if let Some(agent_id) = patch.agent_id {
         job.agent_id = agent_id;
     }
+    if let Some(policy) = patch.policy {
+        job.policy = policy;
+    }
     if let Some(origin) = patch.origin {
         job.origin = origin;
     }
@@ -441,7 +450,7 @@ pub fn update_job(opts: &CronStoreOptions, job_id: &str, patch: CronJobPatch) ->
             "UPDATE cron_jobs
              SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4, prompt = ?5, name = ?6,
                  session_target = ?7, model = ?8, enabled = ?9, delivery = ?10, delete_after_run = ?11,
-                 next_run = ?12, agent_id = ?14, origin = ?15
+                 next_run = ?12, agent_id = ?14, origin = ?15, retries = ?16, single_flight = ?17
              WHERE id = ?13",
             params![
                 job.expression,
@@ -459,6 +468,8 @@ pub fn update_job(opts: &CronStoreOptions, job_id: &str, patch: CronJobPatch) ->
                 job.id,
                 job.agent_id,
                 encode_origin(job.origin.as_ref())?,
+                job.policy.retries.map(i64::from),
+                i64::from(job.policy.single_flight),
             ],
         )
         .context("Failed to update cron job")?;

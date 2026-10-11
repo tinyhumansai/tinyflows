@@ -88,3 +88,46 @@ async fn compare_and_swap_skips_missing_documents_and_declined_changes() {
         .unwrap_err();
     assert_eq!(error.to_string(), "refused");
 }
+
+#[tokio::test]
+async fn legacy_policy_documents_move_into_jobs_without_losing_seeded_fields() {
+    use tinystoragedrivers_core::CollectionSpec;
+    let store = store();
+    let job = store
+        .add_shell_job(Some("system".into()), daily(), "system:seeded")
+        .await
+        .unwrap();
+    let before = store.docs.get(JOBS, &job.id).await.unwrap().unwrap();
+    store
+        .docs
+        .ensure_collection(&CollectionSpec::new("cron_job_policies"))
+        .await
+        .unwrap();
+    store
+        .docs
+        .put(
+            "cron_job_policies",
+            &job.id,
+            json!({"retries": 0, "single_flight": true}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let _ = store.get_job(&job.id).await.unwrap();
+    let mut after = store.docs.get(JOBS, &job.id).await.unwrap().unwrap().doc;
+    let policy = after
+        .as_object_mut()
+        .unwrap()
+        .remove("policy")
+        .unwrap_or_default();
+    assert_eq!(policy, json!({"retries": 0, "single_flight": true}));
+    assert_eq!(after, before.doc);
+    assert!(
+        store
+            .docs
+            .get("cron_job_policies", &job.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
