@@ -298,9 +298,11 @@ fn root_selector(body: &str, mut start: usize) -> Option<(usize, Option<String>)
                 b']' => {
                     depth -= 1;
                     if depth == 0 {
-                        let selector = format!("={}", &body[start + 1..end]);
-                        let value = crate::expr::resolve(&Value::String(selector), &json!({}));
-                        return Some((end + 1, value.as_str().map(str::to_owned)));
+                        // Only a literal selector proves the addressed scope.
+                        // Evaluating a computed selector against empty mocks can
+                        // choose a different branch than real caller data does.
+                        let scope = serde_json::from_str::<String>(&body[start + 1..end]).ok();
+                        return Some((end + 1, scope));
                     }
                 }
                 _ => {}
