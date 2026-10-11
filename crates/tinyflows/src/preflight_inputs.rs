@@ -192,6 +192,28 @@ pub(super) fn scope_reads(expression: &str) -> Vec<(String, Vec<String>)> {
     let mut reads = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
+        let nested_dot =
+            i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'_' | b']'));
+        if bytes[i] == b'.' && !nested_dot {
+            if let Some((end, scope)) = root_selector(body, i + 1) {
+                match scope {
+                    Some(scope)
+                        if matches!(
+                            scope.as_str(),
+                            "inputs" | "run" | "item" | "items" | "nodes"
+                        ) =>
+                    {
+                        let path =
+                            input_path(&format!("=inputs{}", &body[end..])).unwrap_or_default();
+                        reads.push((scope, path));
+                    }
+                    None => reads.push(("run".into(), vec![])),
+                    _ => {}
+                }
+                i = end;
+                continue;
+            }
+        }
         if bytes[i] == b'"' || bytes[i] == b'\'' {
             let quote = bytes[i];
             let start = i;
@@ -245,4 +267,46 @@ pub(super) fn scope_reads(expression: &str) -> Vec<(String, Vec<String>)> {
         }
     }
     reads
+}
+
+/// Resolve a root jq selector when it is constant; unknown selectors can read any runtime scope.
+fn root_selector(body: &str, mut start: usize) -> Option<(usize, Option<String>)> {
+    let bytes = body.as_bytes();
+    while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+        start += 1;
+    }
+    if bytes.get(start) != Some(&b'[') {
+        return None;
+    }
+    let mut depth = 1;
+    let mut quote = None;
+    let mut end = start + 1;
+    while end < bytes.len() {
+        let byte = bytes[end];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' {
+                end += 2;
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+        } else {
+            match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let selector = format!("={}", &body[start + 1..end]);
+                        let value = crate::expr::resolve(&Value::String(selector), &json!({}));
+                        return Some((end + 1, value.as_str().map(str::to_owned)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        end += 1;
+    }
+    None
 }
