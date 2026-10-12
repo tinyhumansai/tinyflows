@@ -23,16 +23,20 @@ impl CronDocuments {
                     return Ok(None);
                 }
                 let mut doc = doc.clone();
-                let retries = policy
-                    .doc
-                    .get("retries")
-                    .and_then(Value::as_u64)
-                    .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+                let retries = match policy.doc.get("retries") {
+                    None | Some(Value::Null) => None,
+                    Some(value) => Some(
+                        value
+                            .as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .ok_or_else(|| anyhow!("Invalid legacy cron policy retries"))?,
+                    ),
+                };
                 let single_flight = policy
                     .doc
                     .get("single_flight")
                     .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                    .ok_or_else(|| anyhow!("Invalid legacy cron policy single_flight"))?;
                 doc["policy"] = serde_json::to_value(tinyflows_schedule::JobPolicy {
                     retries,
                     single_flight,

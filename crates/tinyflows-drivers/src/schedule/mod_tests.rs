@@ -5,6 +5,65 @@ use chrono::Utc;
 use serde_json::json;
 use tinystoragedrivers_core::{MemoryStorage, Precondition};
 
+async fn refuses_malformed_legacy_policy(policy: serde_json::Value) {
+    use tinystoragedrivers_core::CollectionSpec;
+    let store = store();
+    let job = store
+        .add_shell_job(Some("system".into()), daily(), "system:seeded")
+        .await
+        .unwrap();
+    let before = store.docs.get(JOBS, &job.id).await.unwrap().unwrap();
+    store
+        .docs
+        .ensure_collection(&CollectionSpec::new("cron_job_policies"))
+        .await
+        .unwrap();
+    store
+        .docs
+        .put(
+            "cron_job_policies",
+            &job.id,
+            policy.clone(),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        store.get_job(&job.id).await.is_err(),
+        "malformed legacy policy must prevent scheduling: {policy}"
+    );
+    assert_eq!(
+        store.docs.get(JOBS, &job.id).await.unwrap().unwrap().doc,
+        before.doc,
+        "refusing a policy must preserve the seeded job"
+    );
+    assert_eq!(
+        store
+            .docs
+            .get("cron_job_policies", &job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        policy,
+        "an invalid policy must remain available for repair"
+    );
+}
+
+#[tokio::test]
+async fn malformed_legacy_retry_budgets_fail_closed_without_mutating_seeded_jobs() {
+    for retries in [json!("2"), json!(-1), json!(u64::from(u32::MAX) + 1)] {
+        refuses_malformed_legacy_policy(json!({"retries": retries, "single_flight": true})).await;
+    }
+}
+
+#[tokio::test]
+async fn malformed_legacy_single_flight_fails_closed_without_deleting_the_policy() {
+    refuses_malformed_legacy_policy(json!({"retries": 0, "single_flight": "true"})).await;
+    refuses_malformed_legacy_policy(json!({"retries": 0})).await;
+}
+
 #[test]
 fn limits_default_like_the_sqlite_store_and_clamp_to_one() {
     let store = store();

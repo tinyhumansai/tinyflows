@@ -260,8 +260,19 @@ fn migrate_policies(conn: &Connection) -> Result<()> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cron_job_policies')", [], |r| r.get(0))?;
     if exists {
+        let malformed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cron_job_policies
+             WHERE (retries IS NOT NULL AND
+                    (typeof(retries) != 'integer' OR retries < 0 OR retries > 4294967295))
+                OR typeof(single_flight) != 'integer' OR single_flight NOT IN (0, 1))",
+            [],
+            |row| row.get(0),
+        )?;
+        if malformed {
+            anyhow::bail!("Invalid legacy cron policy; migration left the policy table unchanged");
+        }
         tx.execute_batch("UPDATE cron_jobs SET
-            retries = (SELECT CASE WHEN retries IS NULL THEN NULL ELSE MIN(4294967295, MAX(0, retries)) END FROM cron_job_policies p WHERE p.job_id=cron_jobs.id),
+            retries = (SELECT retries FROM cron_job_policies p WHERE p.job_id=cron_jobs.id),
             single_flight = (SELECT single_flight != 0 FROM cron_job_policies p WHERE p.job_id=cron_jobs.id)
             WHERE EXISTS(SELECT 1 FROM cron_job_policies p WHERE p.job_id=cron_jobs.id);
             DROP TABLE cron_job_policies;")?;
