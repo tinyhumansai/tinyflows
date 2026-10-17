@@ -11,7 +11,7 @@ use tinyflows_bus::catalog::{
     ListSuggestionsRequest, ListWorkflowsResult, PromoteDraftRequest, PromoteDraftResponse,
     PruneRunsRequest, PutWorkflowRequest, PutWorkflowResponse, PutWorkflowResult, RunIdRequest,
     SetEnabledRequest, SetSuggestionStatusRequest, UpdateDraftRequest, UpsertSuggestionsRequest,
-    Workflow, WorkflowRevision, WorkflowSummary,
+    Workflow, WorkflowRevision,
 };
 use tinyflows_catalog::Flow as StoredFlow;
 use tinyflows_drivers::catalog::FlowCatalogDocuments;
@@ -74,33 +74,6 @@ impl CatalogService {
         Ok(FlowCatalogDocuments::new(
             Arc::new(docs) as Arc<dyn DocumentStore>
         ))
-    }
-
-    async fn summary(store: &FlowCatalogDocuments, flow: StoredFlow) -> Result<WorkflowSummary> {
-        let trigger_kind = serde_json::to_value(&flow.graph)?
-            .get("nodes")
-            .and_then(Value::as_array)
-            .and_then(|nodes| {
-                nodes
-                    .iter()
-                    .find(|node| node.get("kind").and_then(Value::as_str) == Some("trigger"))
-            })
-            .and_then(|node| node.get("config"))
-            .and_then(|config| config.get("trigger_kind"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let revision = store.latest_revision_number(&flow.id).await?.unwrap_or(1);
-        Ok(WorkflowSummary {
-            id: flow.id,
-            name: flow.name,
-            revision,
-            enabled: flow.enabled,
-            require_approval: flow.require_approval,
-            last_status: flow.last_status,
-            trigger_kind,
-            node_count: flow.graph.nodes.len(),
-            updated_at: flow.updated_at,
-        })
     }
 
     async fn put(&self, request: PutWorkflowRequest) -> PutWorkflowResponse {
@@ -268,6 +241,12 @@ fn map_update_error(error: tinyflows_catalog::store::FlowUpdateError) -> FlowUpd
 
 #[tinybus::interface(name = "ai.tinyhumans.tinyflows.Catalog")]
 impl CatalogService {
+    async fn migrate_storage(&self, storage: CatalogStorage) -> tinybus::Result<()> {
+        super::catalog_migrations::migrate(self.connection.clone(), storage)
+            .await
+            .map_err(failure)
+    }
+
     async fn node_kinds(
         &self,
     ) -> tinybus::Result<Vec<tinyflows_bus::node_kinds::NodeKindContract>> {
@@ -296,7 +275,11 @@ impl CatalogService {
         let (flows, skipped_rows) = store.list_flows().await.map_err(failure)?;
         let mut workflows = Vec::with_capacity(flows.len());
         for flow in flows {
-            workflows.push(Self::summary(&store, flow).await.map_err(failure)?);
+            workflows.push(
+                super::catalog_service_summary::summary(&store, flow)
+                    .await
+                    .map_err(failure)?,
+            );
         }
         Ok(ListWorkflowsResult {
             workflows,

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn terminal_payload_uses_the_engine_success_vocabulary() {
+    for (status, successful) in [
+        ("completed", true),
+        ("completed_with_warnings", true),
+        ("failed", false),
+        ("cancelled", false),
+        ("interrupted", false),
+        ("future_terminal_status", false),
+    ] {
+        let payload = finished_payload(status, None, None);
+        assert_eq!(payload.status, status);
+        assert_eq!(payload.successful, successful, "status: {status}");
+    }
+}
+
+#[test]
 fn resumed_node_replaces_its_parked_step_instead_of_retaining_stale_diagnostics() {
     let steps = Mutex::new(vec![FlowRunStep {
         node_id: "approval".into(),

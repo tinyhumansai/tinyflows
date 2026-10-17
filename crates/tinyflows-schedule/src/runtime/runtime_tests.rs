@@ -458,6 +458,7 @@ struct BlockExecutor {
     release: Semaphore,
     active: AtomicUsize,
     peak: AtomicUsize,
+    completed: AtomicUsize,
 }
 #[async_trait]
 impl JobExecutor for BlockExecutor {
@@ -466,6 +467,7 @@ impl JobExecutor for BlockExecutor {
         self.peak.fetch_max(active, Ordering::SeqCst);
         self.started.add_permits(1);
         self.release.acquire().await.unwrap().forget();
+        self.completed.fetch_add(1, Ordering::SeqCst);
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(Attempt {
             success: true,

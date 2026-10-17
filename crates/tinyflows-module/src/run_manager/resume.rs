@@ -248,7 +248,11 @@ async fn refuse_stale_graph(
             serde_json::to_value(tinyflows_bus::runs::RunEvent {
                 seq,
                 kind: "finished".into(),
-                data: serde_json::json!({"status":"cancelled","error":GRAPH_CHANGED}),
+                data: serde_json::to_value(super::events::finished_payload(
+                    "cancelled",
+                    Some(GRAPH_CHANGED.to_owned()),
+                    None,
+                ))?,
                 graph_run_id: None,
             })?,
         )

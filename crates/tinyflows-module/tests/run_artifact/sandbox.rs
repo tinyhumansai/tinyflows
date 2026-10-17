@@ -49,7 +49,7 @@ fn agent_graph(named: bool) -> serde_json::Value {
 #[tokio::test]
 #[ignore = "run through scripts/verify-module-artifact.sh"]
 async fn compiled_module_sandbox_uses_schema_mocks_and_only_the_preflight_callback() {
-    assert_eq!(runs::CONTRACT_VERSION, 4);
+    assert_eq!(runs::CONTRACT_VERSION, 5);
     assert!(runs::METHODS.contains(&runs::methods::SANDBOX_RUN));
     let artifact = std::env::var_os("TINYFLOWS_MODULE_ARTIFACT")
         .expect("set TINYFLOWS_MODULE_ARTIFACT to the built cdylib");

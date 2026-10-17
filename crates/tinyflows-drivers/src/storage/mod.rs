@@ -22,7 +22,11 @@
 
 mod kv_import;
 
-use tinystoragedrivers_core::{Owner, Schema};
+use std::sync::Arc;
+
+use tinystoragedrivers_core::{
+    DocumentStore, MemoryStorage, Owner, Schema, Scope, ScopedStorage, StorageBackend,
+};
 
 pub use kv_import::{
     CATALOG_NAMESPACE_PREFIX, KV_OWNER, STATE_NAMESPACE, catalog_namespace, import_legacy_kv,
@@ -54,6 +58,35 @@ pub fn storage_schema() -> Schema {
         schema = crate::store::extend_schema(schema);
     }
     schema
+}
+
+/// The catalog-only portion of owner `flows` and its v1 -> v2 steps.
+///
+/// Unlike [`storage_schema`], this excludes workflow-store schemas so the
+/// catalog module can migrate only the collections behind its own callback.
+#[cfg(feature = "catalog")]
+#[must_use]
+pub fn catalog_storage_schema() -> Schema {
+    crate::catalog::extend_schema(flows_schema())
+}
+
+/// Assemble a scoped document-only migration view over a host callback.
+///
+/// The stream and blob handles are inert memory ports because the TinyFlows
+/// catalog and cron migration schemas contain document steps only. They are
+/// never read or written by these migrations.
+pub fn document_only_scope(
+    scope: Scope,
+    documents: Arc<dyn DocumentStore>,
+) -> tinystoragedrivers_core::Result<ScopedStorage> {
+    let memory = MemoryStorage::new().for_scope(&scope)?;
+    Ok(ScopedStorage::new(
+        scope,
+        "tinyflows-document-callback",
+        documents,
+        memory.streams().clone(),
+        memory.blobs().clone(),
+    ))
 }
 
 /// The `cron` owner's declarations and v1 -> v2 steps.

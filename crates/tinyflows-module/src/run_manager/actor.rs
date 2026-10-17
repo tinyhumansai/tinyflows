@@ -249,10 +249,11 @@ async fn drive_inner(
         delete_checkpoints(&prepared.checkpointer, &request.run_id, &request.run_id).await;
     }
     match writer
-        .emit_terminal(
-            "finished",
-            json!({"status":status,"error":error_text,"graph_run_id":graph_run_id}),
-        )
+        .emit_terminal(super::events::finished_payload(
+            status,
+            error_text.clone(),
+            graph_run_id.clone(),
+        ))
         .await
     {
         Ok(seq) => match prepared

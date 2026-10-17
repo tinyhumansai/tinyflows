@@ -7,6 +7,10 @@ use tokio::sync::Mutex;
 pub(super) struct State {
     executions: Mutex<Vec<String>>,
     triggers: Mutex<Vec<String>>,
+    defer_execute: std::sync::atomic::AtomicBool,
+    execute_started: tokio::sync::Notify,
+    execute_release: tokio::sync::Notify,
+    fail_deliver: std::sync::atomic::AtomicBool,
 }
 struct Callbacks(Arc<State>);
 #[tinybus::interface(name = "ai.tinyhumans.tinyflows.ScheduleHost")]
@@ -25,6 +29,14 @@ impl Callbacks {
     }
     async fn execute(&self, _job: Value, run_id: String) -> Result<Value> {
         self.0.executions.lock().await.push(run_id);
+        if self
+            .0
+            .defer_execute
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.0.execute_started.notify_one();
+            self.0.execute_release.notified().await;
+        }
         Ok(json!({"success":true,"output":"executed","retryable":false}))
     }
     async fn failed(&self, _job: Value, _run_id: String, _attempt: Value) -> Result<()> {
@@ -34,6 +46,13 @@ impl Callbacks {
         Ok("not_requested".into())
     }
     async fn deliver(&self, _projection: Value) -> Result<()> {
+        if self
+            .0
+            .fail_deliver
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(tinybus::Error::failed("injected delivery projection error"));
+        }
         Ok(())
     }
     async fn schedule_trigger(&self, job: Value, _run_id: String) -> Result<Value> {
@@ -467,3 +486,7 @@ async fn module_document_store_retries_policy_migration_conflicts_without_losing
     assert_eq!(list[0]["policy"]["single_flight"], true);
     assert!(docs.get("cron_job_policies", id).await.unwrap().is_none());
 }
+
+#[cfg(test)]
+#[path = "schedule_manual_worker_service_tests.rs"]
+mod manual_worker_tests;

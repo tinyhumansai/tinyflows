@@ -5,9 +5,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tinybus::Connection;
 use tinyflows_bus::catalog::{
-    CallbackAddress, CatalogStorageFailure, CatalogStorageReply, DocDeleteRequest,
-    DocDeleteWhereRequest, DocEnsureRequest, DocGetRequest, DocPutRequest, DocQueryRequest,
-    STORAGE_INTERFACE, storage,
+    CallbackAddress, CatalogStorageCapabilities, CatalogStorageFailure, CatalogStorageReply,
+    DocDeleteRequest, DocDeleteWhereRequest, DocEnsureRequest, DocGetRequest, DocPutRequest,
+    DocQueryRequest, STORAGE_INTERFACE, storage,
 };
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, DocumentStore, Filter, Page, Precondition, Query,
@@ -16,7 +16,7 @@ use tinystoragedrivers_core::{
 
 /// The catalog's own collections (storage schema v2, owner `flows`) and the
 /// graph checkpointer's (owner `graph`).
-const ALLOWED: [&str; 8] = [
+const ALLOWED: [&str; 16] = [
     "flows.definitions",
     "flows.revisions",
     "flows.runs",
@@ -25,11 +25,27 @@ const ALLOWED: [&str; 8] = [
     "graph.checkpoints",
     "graph.threads",
     "graph.writes",
+    "flows_definitions",
+    "flows_revisions",
+    "flows_runs",
+    "flows_suggestions",
+    "flows_drafts",
+    "flows_kv",
+    "flows_state",
+    "tsd.migrations",
 ];
 /// Collections owned by `tsd`, shared by every owner's primitives.
-const SHARED: [&str; 3] = ["tsd.kv", "tsd.leases", "tsd.counters"];
+const SHARED: [&str; 4] = ["tsd.kv", "tsd.leases", "tsd.counters", "tsd.migrations"];
 /// Every `flows` record in a shared collection is keyed `Key::of(["flows", ..])`.
 const FLOWS_KEY_PREFIX: &str = "flows/";
+const FLOWS_MIGRATION_KEYS: [&str; 6] = [
+    "flows/flows.definitions/definitions_v2",
+    "flows/flows.revisions/revisions_v2",
+    "flows/flows.runs/runs_v2",
+    "flows/flows.suggestions/suggestions_v2",
+    "flows/flows.drafts/drafts_v2",
+    "flows/kv_import",
+];
 
 pub(super) struct Documents {
     connection: Connection,
@@ -75,6 +91,34 @@ impl Documents {
         })
     }
 
+    pub(super) async fn require_record_metadata(&mut self) -> Result<()> {
+        let proxy = self
+            .connection
+            .proxy(
+                &self.address.destination,
+                &self.address.object_path,
+                STORAGE_INTERFACE,
+            )
+            .map_err(|error| StorageError::backend(error.to_string()))?;
+        let reply: CatalogStorageReply = proxy
+            .call(storage::CAPABILITIES, &())
+            .await
+            .map_err(|error| StorageError::unavailable(error.to_string()))?;
+        let report: CatalogStorageCapabilities = match reply {
+            CatalogStorageReply::Error { error } => return Err(storage_error(error)),
+            CatalogStorageReply::Value { value } => serde_json::from_value(value)?,
+        };
+        if report.record_metadata {
+            self.capabilities = self.capabilities.with(Capability::RecordMetadata);
+            Ok(())
+        } else {
+            Err(StorageError::unsupported(
+                Capability::RecordMetadata,
+                "catalog migration requires record metadata support",
+            ))
+        }
+    }
+
     fn validate_collection(collection: &str) -> Result<()> {
         if !ALLOWED.contains(&collection) && !SHARED.contains(&collection) {
             return Err(StorageError::invalid_input(
@@ -89,6 +133,11 @@ impl Documents {
     /// `flows/` keys.
     fn validate_record(collection: &str, id: &str) -> Result<()> {
         Self::validate_collection(collection)?;
+        if collection == "tsd.migrations" && !FLOWS_MIGRATION_KEYS.contains(&id) {
+            return Err(StorageError::invalid_input(
+                "record is outside the catalog migration progress keys",
+            ));
+        }
         if SHARED.contains(&collection) && !id.starts_with(FLOWS_KEY_PREFIX) {
             return Err(StorageError::invalid_input(
                 "record is outside the workflow catalog owner's keys",
@@ -222,14 +271,6 @@ impl DocumentStore for Documents {
         precondition: Precondition,
         options: WriteOptions,
     ) -> Result<Version> {
-        if options.created_ms.is_some() {
-            // A creation time is a host-only migration option; the callback
-            // seam cannot carry it.
-            return Err(StorageError::unsupported(
-                Capability::RecordMetadata,
-                "a module cannot set a document's creation time",
-            ));
-        }
         self.call_record(
             storage::PUT,
             collection,
@@ -241,6 +282,7 @@ impl DocumentStore for Documents {
                 precondition: serde_json::from_value(serde_json::to_value(precondition)?)?,
                 schema: options.schema,
                 expires_ms: options.expires_ms,
+                created_ms: options.created_ms,
             },
         )
         .await
@@ -309,3 +351,7 @@ impl DocumentStore for Documents {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "catalog_documents_tests.rs"]
+mod tests;

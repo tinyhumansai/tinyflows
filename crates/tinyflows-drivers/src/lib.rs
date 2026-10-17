@@ -59,6 +59,8 @@ pub use checkpoint_layout::NAMESPACE;
 #[cfg(feature = "engine")]
 pub use state_store::DriverStateStore;
 
-pub use storage::{KV_OWNER, import_legacy_kv, storage_schema};
+#[cfg(feature = "catalog")]
+pub use storage::catalog_storage_schema;
+pub use storage::{KV_OWNER, document_only_scope, import_legacy_kv, storage_schema};
 #[cfg(feature = "schedule")]
 pub use storage::{cron_storage_schema, import_legacy_cron_counters};

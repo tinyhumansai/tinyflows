@@ -1,13 +1,17 @@
 //! Separate Schedule object in the same loadable TinyFlows module.
 #[path = "schedule_clock.rs"]
 mod clock;
+#[path = "schedule_manual_workers.rs"]
+mod manual_workers;
 use super::schedule_callbacks::HostCallbacks;
 use serde_json::Value;
 use std::{collections::HashMap, sync::Arc};
 use tinybus::{Connection, Error, Result};
 use tinyflows_bus::schedule::{
-    self, CheckOriginRequest, CheckPatchRequest, NextRunRequest, RunJobNow, RunJobReply,
-    RunsCloserThanRequest, StartScheduler, TooFrequent, ValidateScheduleRequest,
+    self, AcknowledgeManualRun, CheckOriginRequest, CheckPatchRequest, ManualRunHandle,
+    ManualRunState, NextRunRequest, PrepareManualRun, RunJobNow, RunJobReply,
+    RunsCloserThanRequest, StartManualRun, StartScheduler, StopManualRun, TooFrequent,
+    ValidateScheduleRequest, WaitManualRun,
 };
 use tinyflows_schedule::{
     DeliveryConfig, JobOrigin, Schedule, runtime::*, schedule as maths, store, validation,
@@ -28,6 +32,7 @@ enum Running {
 pub(super) struct ScheduleService {
     connection: Connection,
     runtimes: Mutex<HashMap<String, Running>>,
+    manual_workers: Mutex<manual_workers::ManualWorkers>,
 }
 impl Drop for ScheduleService {
     fn drop(&mut self) {
@@ -36,6 +41,7 @@ impl Drop for ScheduleService {
                 task.abort();
             }
         }
+        self.manual_workers.get_mut().request_stop_all();
     }
 }
 impl ScheduleService {
@@ -43,6 +49,7 @@ impl ScheduleService {
         Self {
             connection,
             runtimes: Mutex::new(HashMap::new()),
+            manual_workers: Mutex::new(manual_workers::ManualWorkers::default()),
         }
     }
     async fn manual(&self, handle: &str) -> Result<Arc<Mutex<Scheduler>>> {
@@ -245,6 +252,63 @@ impl ScheduleService {
             });
             Ok(RunJobReply::Accepted { run_id })
         }
+    }
+
+    async fn prepare_manual_run(&self, request: PrepareManualRun) -> Result<ManualRunHandle> {
+        Ok(self.manual_workers.lock().await.prepare(request))
+    }
+
+    async fn start_manual_run(&self, request: StartManualRun) -> Result<ManualRunState> {
+        let mut workers = self.manual_workers.lock().await;
+        let reservation = workers
+            .get(&request.handle)
+            .ok_or_else(|| Error::failed("unknown, expired, or acknowledged manual run handle"))?;
+        let fingerprint = serde_json::to_value(&request.request).map_err(failure)?;
+        let should_spawn = reservation
+            .entry
+            .begin_start(fingerprint)
+            .map_err(failure)?;
+        let state = reservation.entry.state();
+        if should_spawn {
+            let connection = self.connection.clone();
+            let entry = reservation.entry.clone();
+            let scope = reservation.scope.clone();
+            let run_request = request.request;
+            tokio::spawn(async move {
+                manual_workers::run_manual_worker(connection, scope, run_request, entry).await;
+            });
+        }
+        // The entry is already atomically Starting before the worker task is
+        // scheduled. Duplicate identical starts only observe this state.
+        let _ = &reservation.request_id;
+        drop(workers);
+        Ok(state)
+    }
+
+    async fn wait_manual_run(&self, request: WaitManualRun) -> Result<Option<ManualRunState>> {
+        Ok(self
+            .manual_workers
+            .lock()
+            .await
+            .get(&request.handle)
+            .map(|reservation| reservation.entry.state()))
+    }
+
+    async fn stop_manual_run(&self, request: StopManualRun) -> Result<Option<ManualRunState>> {
+        Ok(self
+            .manual_workers
+            .lock()
+            .await
+            .get(&request.handle)
+            .map(|reservation| reservation.entry.request_stop()))
+    }
+
+    async fn acknowledge_manual_run(&self, request: AcknowledgeManualRun) -> Result<bool> {
+        Ok(self
+            .manual_workers
+            .lock()
+            .await
+            .acknowledge(&request.handle))
     }
 
     async fn parse_human_delay(&self, delay: String) -> Result<i64> {

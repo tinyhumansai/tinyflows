@@ -65,7 +65,8 @@ fn map(batch: Vec<SourceRecord>, collection: &str, convert: Convert) -> Vec<Targ
                 return TargetRecord::new(collection, source.id.clone(), source.body.clone());
             };
             let record = TargetRecord::new(collection, source.id.clone(), body);
-            match created_ms.filter(|ms| *ms > 0) {
+            match created_ms {
+                // Zero and negative values are valid dates, not an unknown-metadata sentinel.
                 Some(ms) => record.created_ms(ms),
                 None => record,
             }
@@ -116,7 +117,8 @@ fn definition(source: &SourceRecord) -> Option<(Value, Option<i64>)> {
         ],
     );
     out.insert("graph".into(), parsed(body.get("graph_json")?));
-    let created = ms(body, "created_at", "created_ns").unwrap_or(0);
+    // A parsed body timestamp (including zero or pre-epoch) wins; otherwise retain driver metadata.
+    let created = ms(body, "created_at", "created_ns").unwrap_or(source.meta.created_ms);
     out.insert("created_ms".into(), created.into());
     out.insert(
         "updated_ms".into(),
@@ -145,7 +147,7 @@ fn revision(source: &SourceRecord) -> Option<(Value, Option<i64>)> {
         ],
     );
     out.insert("graph".into(), parsed(body.get("graph_json")?));
-    let created = ms(body, "created_at", "created_ns").unwrap_or(0);
+    let created = ms(body, "created_at", "created_ns").unwrap_or(source.meta.created_ms);
     out.insert("created_ms".into(), created.into());
     if let Some(touched) = body.get("touched_ns").and_then(Value::as_i64) {
         out.insert("touched_ms".into(), (touched / 1_000_000).into());
@@ -170,7 +172,7 @@ fn run(source: &SourceRecord) -> Option<(Value, Option<i64>)> {
             "terminal_event_seq",
         ],
     );
-    let started = ms(body, "started_at", "started_ns").unwrap_or(0);
+    let started = ms(body, "started_at", "started_ns").unwrap_or(source.meta.created_ms);
     out.insert("started_ms".into(), started.into());
     if let Some(finished) = ms(body, "finished_at", "finished_ns") {
         out.insert("finished_ms".into(), finished.into());
@@ -219,7 +221,7 @@ fn suggestion(source: &SourceRecord) -> Option<(Value, Option<i64>)> {
             body.get(v1).map_or_else(|| Value::Array(vec![]), parsed),
         );
     }
-    let created = ms(body, "created_at", "created_ns").unwrap_or(0);
+    let created = ms(body, "created_at", "created_ns").unwrap_or(source.meta.created_ms);
     out.insert("created_ms".into(), created.into());
     Some((Value::Object(out), Some(created)))
 }
@@ -244,11 +246,13 @@ fn draft(source: &SourceRecord) -> Option<(Value, Option<i64>)> {
                 .and_then(Value::as_i64)
                 .map(|n| n / 1_000_000)
         })
-        .unwrap_or(0);
+        .unwrap_or(source.meta.created_ms);
+    // A missing embedded creation time falls back to the source record's own creation time.
     let created = whole
         .get("created_at")
         .and_then(Value::as_str)
-        .map_or(updated, instant_ms);
+        .map(instant_ms)
+        .unwrap_or(source.meta.created_ms);
     out.insert("created_ms".into(), created.into());
     out.insert("updated_ms".into(), updated.into());
     Some((Value::Object(out), Some(created)))

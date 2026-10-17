@@ -3,7 +3,8 @@ use super::super::codec::{doc_to_job, run_id, run_to_doc, set_last_run};
 use super::super::jobs::reschedule;
 use super::super::{CAS_ATTEMPTS, CronDocuments, OWNER, RUNS, storage_error};
 use super::{
-    CLAIM_EPOCH, COMPLETED, ClaimedOccurrence, JOBS, QUEUED, Receipt, lease_key, queued_run_cleanup,
+    CLAIM_EPOCH, CLAIM_OWNER, COMPLETED, ClaimedOccurrence, JOBS, QUEUED, Receipt, lease_key,
+    queued_run_cleanup,
 };
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
@@ -90,6 +91,7 @@ impl CronDocuments {
                 .ok_or_else(|| anyhow::anyhow!("cron store: invalid job"))?;
             body.remove(QUEUED);
             body.remove(CLAIM_EPOCH);
+            body.remove(CLAIM_OWNER);
             body.insert(
                 COMPLETED.into(),
                 serde_json::to_value(Receipt {

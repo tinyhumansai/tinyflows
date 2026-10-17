@@ -201,7 +201,11 @@ async fn settle_terminal_event(
             serde_json::to_value(RunEvent {
                 seq,
                 kind: "finished".into(),
-                data: serde_json::json!({"status":status,"error":error}),
+                data: serde_json::to_value(super::events::finished_payload(
+                    status,
+                    Some(error.to_owned()),
+                    None,
+                ))?,
                 graph_run_id: None,
             })?,
         )

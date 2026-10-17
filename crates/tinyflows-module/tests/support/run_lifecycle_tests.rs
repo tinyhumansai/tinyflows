@@ -126,6 +126,9 @@ async fn compiled_module_expires_parked_runs_and_sweeps_only_local_orphans() {
         orphan_page.events.last().unwrap().data["status"],
         "interrupted"
     );
+    let finished: runs::RunFinished =
+        serde_json::from_value(orphan_page.events.last().unwrap().data.clone()).unwrap();
+    assert!(!finished.successful);
 }
 
 #[tokio::test]

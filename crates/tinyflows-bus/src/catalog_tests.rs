@@ -64,6 +64,7 @@ fn every_catalog_contract_type_round_trips_on_the_wire() {
         precondition: CatalogDocumentPrecondition::Absent,
         schema: 2,
         expires_ms: Some(1_700_000_000_000),
+        created_ms: Some(1_600_000_000_000),
     });
     wire_round_trip(DocDeleteRequest {
         collection: "flows.definitions".into(),
@@ -95,7 +96,18 @@ fn every_catalog_contract_type_round_trips_on_the_wire() {
         id: "flow-1".into(),
         version: 7,
         doc: json!({"name":"Example"}),
+        meta: CatalogDocumentMeta {
+            schema: 2,
+            created_ms: 1_600_000_000_000,
+            updated_ms: 1_700_000_000_000,
+            expires_ms: None,
+        },
     });
+    let legacy_read: CatalogVersionedDocument = serde_json::from_value(json!({
+        "id":"old", "version":1, "doc":{}
+    }))
+    .unwrap();
+    assert_eq!(legacy_read.meta, CatalogDocumentMeta::default());
     wire_round_trip(CatalogDocumentCursor("cursor-token".into()));
     for filter in [
         CatalogFilter::All,
@@ -145,6 +157,7 @@ fn every_catalog_contract_type_round_trips_on_the_wire() {
             id: "flow-1".into(),
             version: 1,
             doc: json!({}),
+            meta: CatalogDocumentMeta::default(),
         }],
         next: None,
     });
@@ -301,6 +314,7 @@ fn catalog_and_storage_member_json_shapes_are_pinned() {
             precondition: CatalogDocumentPrecondition::Version(7),
             schema: 0,
             expires_ms: None,
+            created_ms: None,
         })
         .unwrap(),
         json!({"collection":"flows.definitions","id":"flow-1","doc":{"name":"Example"},"precondition":{"kind":"version","version":7}})
@@ -313,6 +327,7 @@ fn catalog_and_storage_member_json_shapes_are_pinned() {
             precondition: CatalogDocumentPrecondition::Absent,
             schema: 2,
             expires_ms: None,
+            created_ms: None,
         })
         .unwrap(),
         json!({"collection":"flows.definitions","id":"flow-1","doc":{"name":"Example"},"precondition":{"kind":"absent"},"schema":2}),

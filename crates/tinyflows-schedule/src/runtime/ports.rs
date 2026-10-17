@@ -11,6 +11,11 @@ use tinyflows_bus::schedule::{DeliveryProjection, OccurrenceClaim, RunJobRefusal
 /// Storage bound to one agent/tenant scope.
 #[async_trait]
 pub trait JobStore: Send + Sync {
+    /// Validate capabilities needed before starting a manual claim operation.
+    /// The module uses this before it must retain ambiguous claim ownership.
+    async fn validate_manual_claim_support(&self) -> Result<()> {
+        Ok(())
+    }
     /// Read enabled jobs due at `now` within the store's configured batch limit.
     async fn due_jobs(&self, now: DateTime<Utc>) -> Result<Vec<CronJob>>;
     /// Read due jobs after excluding examined identities, before applying the
@@ -48,6 +53,16 @@ pub trait JobStore: Send + Sync {
         _lease: chrono::Duration,
     ) -> Result<Result<OccurrenceClaim, RunJobRefusal>> {
         anyhow::bail!("job store does not support durable manual admission")
+    }
+    /// Read back a live manual claim by the unique owner selected before
+    /// admission, so a lost claim response can be reconciled without guessing.
+    async fn find_owned_manual_claim(
+        &self,
+        _job: &CronJob,
+        _owner: &str,
+        _now: DateTime<Utc>,
+    ) -> Result<Option<OccurrenceClaim>> {
+        anyhow::bail!("job store does not support manual claim reconciliation")
     }
     /// Extend a live lease; false means this worker has lost its fence.
     async fn renew_occurrence(

@@ -19,7 +19,7 @@ pub const INTERFACE: &str = "ai.tinyhumans.tinyflows.Runs";
 /// Run-control object path.
 pub const OBJECT_PATH: &str = "/ai/tinyhumans/tinyflows/Runs";
 /// Version of the run-control contract.
-pub const CONTRACT_VERSION: u32 = 4;
+pub const CONTRACT_VERSION: u32 = 5;
 /// Run-control members, in stable interface order.
 pub const METHODS: &[&str] = &[
     "StartRun",
@@ -227,6 +227,22 @@ pub struct RunEvent {
     pub kind: String,
     /// Event payload.
     pub data: Value,
+    /// Graph runtime id, distinct from the durable flow run id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_run_id: Option<String>,
+}
+
+/// Authoritative terminal payload carried in a `finished` event's `data`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RunFinished {
+    /// Terminal run status, preserved for display and forward compatibility.
+    pub status: String,
+    /// Whether the module classified the terminal status as successful.
+    #[serde(default)]
+    pub successful: bool,
+    /// Failure or interruption detail, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Graph runtime id, distinct from the durable flow run id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_run_id: Option<String>,

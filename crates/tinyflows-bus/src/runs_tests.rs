@@ -209,7 +209,7 @@ fn run_control_and_poll_contracts_match_literal_fixtures() {
         },
         serde_json::json!({"result":{"sandbox":true,"ok":true}}),
     );
-    assert_eq!(CONTRACT_VERSION, 4);
+    assert_eq!(CONTRACT_VERSION, 5);
     assert_eq!(
         METHODS,
         [
@@ -224,4 +224,37 @@ fn run_control_and_poll_contracts_match_literal_fixtures() {
     );
     assert_eq!(CAPS_CONTRACT_VERSION, 1);
     assert_eq!(CAPS_METHODS.len(), 19);
+}
+
+#[test]
+fn run_finished_payload_has_authoritative_success_and_optional_details() {
+    pin(
+        RunFinished {
+            status: "completed_with_warnings".into(),
+            successful: true,
+            error: None,
+            graph_run_id: Some("graph-run-1".into()),
+        },
+        serde_json::json!({
+            "status":"completed_with_warnings",
+            "successful":true,
+            "graph_run_id":"graph-run-1"
+        }),
+    );
+    pin(
+        RunFinished {
+            status: "cancelled".into(),
+            successful: false,
+            error: Some("cancelled by host".into()),
+            graph_run_id: None,
+        },
+        serde_json::json!({
+            "status":"cancelled",
+            "successful":false,
+            "error":"cancelled by host"
+        }),
+    );
+    let legacy = serde_json::json!({"status":"completed"});
+    let decoded: RunFinished = serde_json::from_value(legacy).unwrap();
+    assert!(!decoded.successful, "missing legacy outcome fails closed");
 }

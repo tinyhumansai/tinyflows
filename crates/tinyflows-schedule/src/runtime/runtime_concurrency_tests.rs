@@ -1,4 +1,5 @@
 use super::*;
+use std::future::Future;
 
 struct ControlledLeaseClock {
     now: DateTime<Utc>,
@@ -30,6 +31,7 @@ async fn live_run_renews_its_durable_lease_on_a_controlled_tick() {
         release: Semaphore::new(0),
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
     });
     let clock = Arc::new(ControlledLeaseClock {
         now: fixture.now(),
@@ -64,6 +66,7 @@ async fn queued_occurrence_renews_and_never_executes_after_takeover() {
         release: Semaphore::new(0),
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
     });
     let clock = Arc::new(ControlledLeaseClock {
         now: fixture.now(),
@@ -179,58 +182,75 @@ async fn a_later_claim_error_releases_every_earlier_undispatched_receipt() {
     assert!(fixture.records.lock().unwrap().is_empty());
 }
 
-struct DropSignal(Arc<Notify>);
-impl Drop for DropSignal {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
-}
 struct CancellableExecutor {
     started: Arc<Notify>,
-    dropped: Arc<Notify>,
+    release: Arc<Semaphore>,
+    completed: Arc<AtomicBool>,
 }
 #[async_trait]
 impl JobExecutor for CancellableExecutor {
     async fn execute(&self, _: &CronJob, _: &str) -> Result<Attempt> {
-        let _drop_signal = DropSignal(self.dropped.clone());
         self.started.notify_one();
-        std::future::pending().await
+        self.release.acquire().await.unwrap().forget();
+        self.completed.store(true, Ordering::SeqCst);
+        Ok(Attempt {
+            success: true,
+            output: "finished after takeover".into(),
+            retryable: false,
+            raw_detail: None,
+        })
     }
 }
 
 #[tokio::test]
-async fn lease_loss_cancels_owned_execution_before_send_or_commit() {
-    let fixture = Fixture::new();
-    let started = Arc::new(Notify::new());
-    let dropped = Arc::new(Notify::new());
-    let clock = Arc::new(ControlledLeaseClock {
-        now: fixture.now(),
-        renewal_tick: Notify::new(),
-        waiters: AtomicUsize::new(0),
-        waiting: Notify::new(),
-    });
-    let mut ports = fixture.ports();
-    ports.executor = Arc::new(CancellableExecutor {
-        started: started.clone(),
-        dropped: dropped.clone(),
-    });
-    ports.clock = clock.clone();
-    let job = fixture.job();
-    let job_id = job.id.clone();
-    let mut scheduler = Scheduler::new(job.id.clone(), SchedulerConfig::default(), ports);
-    assert_eq!(scheduler.dispatch(vec![job]).await.unwrap(), 1);
-    started.notified().await;
-    fixture.take_lease_on_renew.store(true, Ordering::SeqCst);
-    clock.renewal_tick.notify_one();
-    dropped.notified().await;
-    assert!(scheduler.drain().await.is_err());
-    assert!(fixture.records.lock().unwrap().is_empty());
-    assert!(fixture.projections.lock().unwrap().is_empty());
-    assert_eq!(
-        fixture.leases.lock().unwrap().get(&job_id).unwrap().0,
-        "successor-owner"
-    );
-    scheduler.shutdown().await;
+async fn lease_loss_waits_for_inflight_execute_then_blocks_commit() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let fixture = Fixture::new();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Semaphore::new(0));
+        let completed = Arc::new(AtomicBool::new(false));
+        let clock = Arc::new(ControlledLeaseClock {
+            now: fixture.now(),
+            renewal_tick: Notify::new(),
+            waiters: AtomicUsize::new(0),
+            waiting: Notify::new(),
+        });
+        let mut ports = fixture.ports();
+        ports.executor = Arc::new(CancellableExecutor {
+            started: started.clone(),
+            release: release.clone(),
+            completed: completed.clone(),
+        });
+        ports.clock = clock.clone();
+        let job = fixture.job();
+        let job_id = job.id.clone();
+        let mut scheduler = Scheduler::new(job.id.clone(), SchedulerConfig::default(), ports);
+        assert_eq!(scheduler.dispatch(vec![job]).await.unwrap(), 1);
+        started.notified().await;
+        loop {
+            let waiting = clock.waiting.notified();
+            if clock.waiters.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            waiting.await;
+        }
+        fixture.take_lease_on_renew.store(true, Ordering::SeqCst);
+        clock.renewal_tick.notify_one();
+        fixture.lease_taken_over.notified().await;
+        assert!(!completed.load(Ordering::SeqCst));
+        release.add_permits(1);
+        assert!(scheduler.drain().await.is_err());
+        assert!(completed.load(Ordering::SeqCst));
+        assert!(fixture.records.lock().unwrap().is_empty());
+        assert!(fixture.projections.lock().unwrap().is_empty());
+        assert_eq!(
+            fixture.leases.lock().unwrap().get(&job_id).unwrap().0,
+            "successor-owner"
+        );
+        scheduler.shutdown().await;
+    })
+    .await
+    .expect("lease-loss test must quiesce after releasing its controlled callback");
 }
 #[tokio::test]
 async fn dispatch_returns_before_execution_and_limits_concurrent_jobs() {
@@ -240,6 +260,7 @@ async fn dispatch_returns_before_execution_and_limits_concurrent_jobs() {
         release: Semaphore::new(0),
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
     });
     let mut ports = f.ports();
     ports.executor = executor.clone();
@@ -263,44 +284,85 @@ async fn dispatch_returns_before_execution_and_limits_concurrent_jobs() {
 }
 
 #[tokio::test]
-async fn shutdown_aborts_queued_and_running_jobs_and_releases_claims() {
-    let f = Fixture::new();
-    let executor = Arc::new(BlockExecutor {
-        started: Semaphore::new(0),
-        release: Semaphore::new(0),
-        active: AtomicUsize::new(0),
-        peak: AtomicUsize::new(0),
-    });
-    let mut ports = f.ports();
-    ports.executor = executor.clone();
-    let scope = uuid::Uuid::new_v4().to_string();
-    let jobs = vec![f.job(), f.job()];
-    let ids: Vec<_> = jobs.iter().map(|j| j.id.clone()).collect();
-    let mut scheduler = Scheduler::new(
-        scope.clone(),
-        SchedulerConfig {
-            max_concurrent: 1,
-            ..Default::default()
-        },
-        ports,
-    );
-    scheduler.dispatch(jobs).await.unwrap();
-    executor.started.acquire().await.unwrap().forget();
-    assert!(
-        ids.iter()
-            .all(|id| f.leases.lock().unwrap().contains_key(id))
-    );
-    scheduler.shutdown().await;
-    assert!(
-        ids.iter()
-            .all(|id| !f.leases.lock().unwrap().contains_key(id))
-    );
-    assert_eq!(
-        executor.started.available_permits(),
-        0,
-        "queued work never entered Execute after stop"
-    );
-    assert!(scheduler.dispatch(vec![f.job()]).await.is_err());
+async fn shutdown_waits_for_inflight_job_and_releases_queued_claims() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let f = Fixture::new();
+        let executor = Arc::new(BlockExecutor {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            completed: AtomicUsize::new(0),
+        });
+        let mut ports = f.ports();
+        ports.executor = executor.clone();
+        let scope = uuid::Uuid::new_v4().to_string();
+        let jobs = vec![f.job(), f.job()];
+        let ids: Vec<_> = jobs.iter().map(|j| j.id.clone()).collect();
+        let mut scheduler = Scheduler::new(
+            scope.clone(),
+            SchedulerConfig {
+                max_concurrent: 1,
+                ..Default::default()
+            },
+            ports,
+        );
+        scheduler.dispatch(jobs).await.unwrap();
+        executor.started.acquire().await.unwrap().forget();
+        assert_eq!(executor.active.load(Ordering::SeqCst), 1);
+        assert!(
+            ids.iter()
+                .all(|id| f.leases.lock().unwrap().contains_key(id))
+        );
+
+        let (shutdown_started, shutdown_ready) = tokio::sync::oneshot::channel();
+        let shutdown = tokio::spawn(async move {
+            let mut scheduler = scheduler;
+            {
+                let mut shutdown_future = Box::pin(scheduler.shutdown());
+                let mut started = Some(shutdown_started);
+                std::future::poll_fn(|context| {
+                    let result = shutdown_future.as_mut().poll(context);
+                    if let Some(started) = started.take() {
+                        let _ = started.send(());
+                    }
+                    result
+                })
+                .await;
+            }
+            scheduler
+        });
+        shutdown_ready.await.unwrap();
+        assert_eq!(executor.active.load(Ordering::SeqCst), 1);
+        assert!(
+            ids.iter()
+                .all(|id| f.leases.lock().unwrap().contains_key(id)),
+            "claims remain owned until the in-flight callback finishes"
+        );
+        executor.release.add_permits(1);
+        let mut scheduler = shutdown.await.unwrap();
+
+        assert_eq!(executor.active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            executor.completed.load(Ordering::SeqCst),
+            1,
+            "the in-flight Execute callback returned instead of being aborted"
+        );
+        assert!(
+            ids.iter()
+                .all(|id| !f.leases.lock().unwrap().contains_key(id))
+        );
+        assert_eq!(
+            executor.started.available_permits(),
+            0,
+            "queued work never entered Execute after stop"
+        );
+        assert!(f.records.lock().unwrap().is_empty());
+        assert!(f.projections.lock().unwrap().is_empty());
+        assert!(scheduler.dispatch(vec![f.job()]).await.is_err());
+    })
+    .await
+    .expect("shutdown must quiesce after the controlled Execute callback is released");
 }
 
 #[tokio::test]

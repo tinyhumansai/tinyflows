@@ -255,7 +255,11 @@ async fn finish_admission_failure(
             serde_json::to_value(RunEvent {
                 seq,
                 kind: "finished".into(),
-                data: serde_json::json!({"status":"failed","error":message}),
+                data: serde_json::to_value(events::finished_payload(
+                    "failed",
+                    Some(message.to_owned()),
+                    None,
+                ))?,
                 graph_run_id: None,
             })?,
         )

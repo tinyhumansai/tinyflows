@@ -11,8 +11,11 @@ pub mod caps;
 mod catalog_authoring;
 mod catalog_documents;
 mod catalog_extended_ops;
+mod catalog_migrations;
 mod catalog_service;
+mod catalog_service_summary;
 mod exports;
+mod migration_lock;
 mod schedule_callbacks;
 mod schedule_service;
 

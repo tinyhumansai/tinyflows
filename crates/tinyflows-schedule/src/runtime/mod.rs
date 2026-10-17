@@ -234,6 +234,44 @@ impl Scheduler {
         .await
     }
 
+    /// Execute an admitted manual run with cooperative stop at callback
+    /// boundaries. `None` means stop was observed after the current callback;
+    /// the caller still owns releasing the occurrence claim.
+    pub async fn run_manual_claim_cooperative(
+        &self,
+        claim: OccurrenceClaim,
+        delivery: ManualDelivery,
+        mut stop: watch::Receiver<bool>,
+    ) -> Result<Option<ManualRunOutcome>> {
+        let work = execution::execute_and_persist_cooperative(
+            &self.ports,
+            &self.config,
+            &claim,
+            delivery,
+            &mut stop,
+        );
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                _ = self.ports.clock.lease_wait(Duration::from_secs(30)) => {
+                    match self.ports.store.renew_occurrence(
+                        &claim,
+                        self.ports.clock.now(),
+                        OCCURRENCE_LEASE,
+                    ).await {
+                        Ok(true) => {}
+                        // The renewal may race a terminal commit, whose job
+                        // fence disappears before its callback reply arrives.
+                        // Keep the in-flight operation alive; its own claim
+                        // checks still fence any later callbacks.
+                        Ok(false) | Err(_) => return work.as_mut().await,
+                    }
+                }
+                result = &mut work => return result,
+            }
+        }
+    }
+
     /// Wait for every dispatched job, returning persistence or task failures.
     pub async fn drain(&mut self) -> Result<()> {
         let mut first_error = None;
@@ -299,6 +337,7 @@ async fn run_claim_with_renewal(
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<ManualRunOutcome> {
     let work_cancellation = cancellation.clone();
+    let (work_stop, mut work_stop_receiver) = watch::channel(false);
     let work = async {
         let _permit = match permits {
             Some(permits) => Some(permits.acquire_owned().await?),
@@ -315,34 +354,68 @@ async fn run_claim_with_renewal(
             !*work_cancellation.borrow(),
             "scheduler stopped before execution"
         );
-        execution::execute_and_persist(ports, config, &claim, delivery, advance_schedule).await
+        execution::execute_and_persist_inner(
+            ports,
+            config,
+            &claim,
+            delivery,
+            advance_schedule,
+            Some(&mut work_stop_receiver),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("scheduler stopped before occurrence completion"))
     };
     tokio::pin!(work);
+    let mut renewals_enabled = true;
     loop {
         tokio::select! {
             biased;
             changed = cancellation.changed() => {
                 if changed.is_ok() && *cancellation.borrow() {
-                    let _ = ports.store.release_occurrence(&claim, ports.clock.now()).await?;
-                    return Err(anyhow::anyhow!("scheduler stopped before occurrence completion"));
+                    work_stop.send_replace(true);
                 }
             }
-            _ = ports.clock.lease_wait(Duration::from_secs(30)) => {
-                anyhow::ensure!(
-                    ports.store.renew_occurrence(&claim, ports.clock.now(), OCCURRENCE_LEASE).await?,
-                    "scheduler lost the occurrence lease"
-                );
+            _ = ports.clock.lease_wait(Duration::from_secs(30)), if renewals_enabled => {
+                match ports.store.renew_occurrence(&claim, ports.clock.now(), OCCURRENCE_LEASE).await {
+                    Ok(true) => {}
+                    // A terminal commit may already have cleared the fence
+                    // while its response is still in flight. Await the work;
+                    // its callback boundaries remain guarded by claim checks.
+                    Ok(false) | Err(_) => {
+                        renewals_enabled = false;
+                        work_stop.send_replace(true);
+                    }
+                }
             }
             result = &mut work => {
-                if result.is_err() {
-                    let _ = ports.store.release_occurrence(&claim, ports.clock.now()).await;
-                }
-                return result;
+                return release_claim_after_work_error(ports, &claim, result).await;
             }
         }
     }
 }
 
+async fn release_claim_after_work_error(
+    ports: &RuntimePorts,
+    claim: &OccurrenceClaim,
+    result: Result<ManualRunOutcome>,
+) -> Result<ManualRunOutcome> {
+    if result.is_err() {
+        let _ = ports
+            .store
+            .release_occurrence(claim, ports.clock.now())
+            .await;
+    }
+    result
+}
+
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../runtime_cooperative_stop_tests.rs"]
+mod cooperative_stop_tests;
+
+#[cfg(test)]
+#[path = "../runtime_heartbeat_cleanup_tests.rs"]
+mod heartbeat_cleanup_tests;

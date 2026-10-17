@@ -10,9 +10,15 @@ use tinystoragedrivers_core::{
 };
 
 /// Collections owned by `tsd`, shared by every owner's primitives.
-const SHARED: [&str; 2] = ["tsd.counters", "tsd.leases"];
+const SHARED: [&str; 3] = ["tsd.counters", "tsd.leases", "tsd.migrations"];
 /// Every `cron` record in a shared collection is keyed `Key::of(["cron", ..])`.
 const CRON_KEY_PREFIX: &str = "cron/";
+const CRON_MIGRATION_KEYS: [&str; 4] = [
+    "cron/cron.jobs/jobs_v2",
+    "cron/cron.runs/runs_v2",
+    "cron/cron.admission/admission_v2",
+    "cron/counters_import",
+];
 
 pub(super) struct Documents {
     connection: Connection,
@@ -70,12 +76,26 @@ impl Documents {
         #[derive(Deserialize)]
         struct CapabilityReport {
             transactions: bool,
+            #[serde(default)]
+            record_metadata: bool,
         }
         let report: CapabilityReport = documents.request(json!({"op":"capabilities"})).await?;
         if report.transactions {
             documents.capabilities = documents.capabilities.with(Capability::Transactions);
         }
+        if report.record_metadata {
+            documents.capabilities = documents.capabilities.with(Capability::RecordMetadata);
+        }
         Ok(documents)
+    }
+    pub(super) fn require_record_metadata(&self) -> anyhow::Result<()> {
+        if self.capabilities.contains(Capability::RecordMetadata) {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "schedule migration requires record metadata support"
+            ))
+        }
     }
     fn validate_collection(collection: &str) -> Result<()> {
         // Only schedule-owned collections can cross this narrow callback seam.
@@ -86,6 +106,11 @@ impl Documents {
             "tsd.counters",
             "tsd.leases",
             "cron_job_policies",
+            "cron_jobs",
+            "cron_runs",
+            "cron_counters",
+            "tsd.migrations",
+            "tsd.kv",
         ]
         .contains(&collection)
         {
@@ -100,6 +125,16 @@ impl Documents {
     /// never scan them.
     fn validate_record(collection: &str, id: &str) -> Result<()> {
         Self::validate_collection(collection)?;
+        if collection == "tsd.kv" {
+            return Err(StorageError::invalid_input(
+                "the schedule port may only ensure tsd.kv for primitive preparation",
+            ));
+        }
+        if collection == "tsd.migrations" && !CRON_MIGRATION_KEYS.contains(&id) {
+            return Err(StorageError::invalid_input(
+                "record is outside the schedule migration progress keys",
+            ));
+        }
         if SHARED.contains(&collection) && !id.starts_with(CRON_KEY_PREFIX) {
             return Err(StorageError::invalid_input(
                 "record is outside the schedule owner's keys",
@@ -109,7 +144,7 @@ impl Documents {
     }
     fn validate_set(collection: &str) -> Result<()> {
         Self::validate_collection(collection)?;
-        if SHARED.contains(&collection) {
+        if SHARED.contains(&collection) || collection == "tsd.kv" {
             return Err(StorageError::invalid_input(
                 "set operations are outside the schedule port for shared collections",
             ));
@@ -198,20 +233,15 @@ impl DocumentStore for Documents {
         precondition: Precondition,
         options: WriteOptions,
     ) -> Result<Version> {
-        if options.created_ms.is_some() {
-            // A creation time is a host-only migration option; the callback
-            // seam cannot carry it.
-            return Err(StorageError::unsupported(
-                Capability::RecordMetadata,
-                "a module cannot set a document's creation time",
-            ));
-        }
         let mut request = json!({"op":"put","collection":collection,"id":id,"doc":doc,"precondition":precondition});
         if options.schema != 0 {
             request["schema"] = json!(options.schema);
         }
         if let Some(expires_ms) = options.expires_ms {
             request["expires_ms"] = json!(expires_ms);
+        }
+        if let Some(created_ms) = options.created_ms {
+            request["created_ms"] = json!(created_ms);
         }
         self.call_record(collection, id, request).await
     }

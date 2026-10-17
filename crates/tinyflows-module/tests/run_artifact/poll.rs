@@ -1,6 +1,13 @@
 use super::*;
 use tinyflows_bus::{catalog::CatalogStorage, runs::RunControlRequest};
 
+pub(super) fn assert_terminal_outcome(event: &runs::RunEvent, status: &str, successful: bool) {
+    assert_eq!(event.kind, "finished");
+    let finished: runs::RunFinished = serde_json::from_value(event.data.clone()).unwrap();
+    assert_eq!(finished.status, status);
+    assert_eq!(finished.successful, successful);
+}
+
 pub(super) async fn poll_until_kind(
     proxy: &tinybus::Proxy,
     storage: &CatalogStorage,

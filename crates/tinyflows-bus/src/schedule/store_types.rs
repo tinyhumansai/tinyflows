@@ -210,4 +210,6 @@ pub enum StoreOperation {
         /// The run to import.
         run: CronRun,
     },
+    /// Apply the module-owned v1 -> v2 schedule migration in this callback scope.
+    Migrate,
 }

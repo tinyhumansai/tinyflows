@@ -3,7 +3,7 @@ use crate::catalog::FlowCatalogDocuments;
 use serde_json::json;
 use tinystoragedrivers_core::{
     DocumentStoreExt, MemoryStorage, MigrateOptions, Precondition, Query, Registry, Scope,
-    ScopedStorage, StorageBackend,
+    ScopedStorage, StorageBackend, WriteOptions,
 };
 
 fn scoped() -> ScopedStorage {
@@ -18,8 +18,28 @@ async fn seed(storage: &ScopedStorage, collection: &str, id: &str, body: Value) 
         .unwrap();
 }
 
+async fn seed_with_created_ms(
+    storage: &ScopedStorage,
+    collection: &str,
+    id: &str,
+    body: Value,
+    created_ms: i64,
+) {
+    storage
+        .documents()
+        .put_with(
+            collection,
+            id,
+            body,
+            Precondition::None,
+            WriteOptions::new().created_ms(created_ms),
+        )
+        .await
+        .unwrap();
+}
+
 async fn migrate(storage: &ScopedStorage) {
-    let registry = Registry::compose([crate::storage_schema()]).unwrap();
+    let registry = Registry::compose([crate::catalog_storage_schema()]).unwrap();
     registry
         .migrate(storage, &MigrateOptions::new())
         .await
@@ -32,7 +52,7 @@ fn graph() -> Value {
 
 #[test]
 fn the_schema_composes_and_names_every_catalog_collection() {
-    let schema = crate::storage_schema();
+    let schema = crate::catalog_storage_schema();
     assert_eq!(schema.owner.as_str(), "flows");
     let names: Vec<&str> = schema.items.iter().map(|item| item.name()).collect();
     for name in [
@@ -45,6 +65,12 @@ fn the_schema_composes_and_names_every_catalog_collection() {
         assert!(names.contains(&name), "{name}");
     }
     assert!(schema.items.iter().all(|i| i.scope() == ScopeClass::Tenant));
+    assert!(
+        !schema
+            .items
+            .iter()
+            .any(|item| item.name() == "flows.workflows")
+    );
     Registry::compose([schema]).unwrap();
 }
 
@@ -259,4 +285,91 @@ async fn v1_records_missing_their_json_field_are_carried_not_dropped() {
             "{collection}/{id} must survive the migration"
         );
     }
+}
+
+#[tokio::test]
+async fn catalog_migration_preserves_source_record_metadata_without_body_timestamps() {
+    let storage = scoped();
+    let created_ms = 1_700_000_123_456_i64;
+    seed_with_created_ms(
+        &storage,
+        "flows_revisions",
+        "legacy-revision",
+        json!({"flow_id":"legacy-flow","name":"old","graph_json":"{}","require_approval":false}),
+        created_ms,
+    )
+    .await;
+
+    migrate(&storage).await;
+
+    let revision = storage
+        .documents()
+        .get("flows.revisions", "legacy-revision")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision.doc["created_ms"], created_ms);
+    assert_eq!(revision.meta.created_ms, created_ms);
+}
+
+#[tokio::test]
+async fn catalog_migration_preserves_zero_negative_and_source_creation_times() {
+    let storage = scoped();
+    let epoch_metadata = 1_700_000_000_000_i64;
+    let draft_created_ms = 1_600_000_000_000_i64;
+    let draft_updated_ms = 1_800_000_000_000_i64;
+    seed_with_created_ms(
+        &storage,
+        "flows_definitions",
+        "epoch-flow",
+        json!({"name":"Epoch","graph_json":"{}","enabled":true,
+            "created_at":"1970-01-01T00:00:00Z","updated_at":"1970-01-01T00:00:00Z"}),
+        epoch_metadata,
+    )
+    .await;
+    seed_with_created_ms(
+        &storage,
+        "flows_revisions",
+        "negative-revision",
+        json!({"flow_id":"epoch-flow","name":"Before epoch","graph_json":"{}",
+            "require_approval":false,"created_at":"1969-12-31T23:59:59.999Z"}),
+        epoch_metadata,
+    )
+    .await;
+    seed_with_created_ms(
+        &storage,
+        "flows_drafts",
+        "older-draft",
+        json!({"draft_json":"{\"flow_id\":\"epoch-flow\",\"name\":\"Draft\",\"graph\":{},\"updated_at\":\"2027-01-15T08:00:00Z\"}"}),
+        draft_created_ms,
+    )
+    .await;
+
+    migrate(&storage).await;
+
+    let epoch = storage
+        .documents()
+        .get("flows.definitions", "epoch-flow")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(epoch.doc["created_ms"], 0);
+    assert_eq!(epoch.meta.created_ms, 0);
+    let negative = storage
+        .documents()
+        .get("flows.revisions", "negative-revision")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(negative.doc["created_ms"], -1);
+    assert_eq!(negative.meta.created_ms, -1);
+    let draft = storage
+        .documents()
+        .get("flows.drafts", "older-draft")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(draft.doc["created_ms"], draft_created_ms);
+    assert_eq!(draft.doc["updated_ms"], draft_updated_ms);
+    assert_eq!(draft.meta.created_ms, draft_created_ms);
 }

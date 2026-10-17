@@ -14,7 +14,7 @@ where
 
 #[test]
 fn served_catalog_version_and_member_list_match_the_new_surface() {
-    assert_eq!(CONTRACT_VERSION, 4);
+    assert_eq!(CONTRACT_VERSION, 5);
     assert_eq!(
         METHODS,
         [
@@ -41,11 +41,13 @@ fn served_catalog_version_and_member_list_match_the_new_surface() {
             "NodeKinds",
             "ApplyGraphOps",
             "ApprovalManifest",
+            "MigrateStorage",
         ]
     );
     assert_eq!(
         STORAGE_METHODS,
         [
+            "DocCapabilities",
             "DocEnsure",
             "DocGet",
             "DocPut",

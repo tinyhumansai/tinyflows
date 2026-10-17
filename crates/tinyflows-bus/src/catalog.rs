@@ -11,11 +11,11 @@ mod storage_types;
 mod types;
 
 pub use storage_types::{
-    CatalogCollectionSpec, CatalogDocumentCursor, CatalogDocumentPage, CatalogDocumentPrecondition,
-    CatalogFilter, CatalogIndexSpec, CatalogQuery, CatalogSearchSpec, CatalogSort,
-    CatalogSortDirection, CatalogStorageFailure, CatalogStorageReply, CatalogVersionedDocument,
-    DocDeleteRequest, DocDeleteWhereRequest, DocEnsureRequest, DocGetRequest, DocPutRequest,
-    DocQueryRequest,
+    CatalogCollectionSpec, CatalogDocumentCursor, CatalogDocumentMeta, CatalogDocumentPage,
+    CatalogDocumentPrecondition, CatalogFilter, CatalogIndexSpec, CatalogQuery, CatalogSearchSpec,
+    CatalogSort, CatalogSortDirection, CatalogStorageCapabilities, CatalogStorageFailure,
+    CatalogStorageReply, CatalogVersionedDocument, DocDeleteRequest, DocDeleteWhereRequest,
+    DocEnsureRequest, DocGetRequest, DocPutRequest, DocQueryRequest,
 };
 
 pub use extended_types::*;
@@ -29,9 +29,9 @@ pub use types::{
 pub const INTERFACE: &str = "ai.tinyhumans.tinyflows.Catalog";
 /// Catalog object path.
 pub const OBJECT_PATH: &str = "/ai/tinyhumans/tinyflows/Catalog";
-/// Version of the served catalog contract. Version 4 adds node contracts,
-/// structural graph edits, and host-classified approval manifests.
-pub const CONTRACT_VERSION: u32 = 4;
+/// Version of the served catalog contract. Version 5 adds scoped schema
+/// migration and record-metadata support to the host document callback.
+pub const CONTRACT_VERSION: u32 = 5;
 /// Exact members served by the catalog module.
 pub const METHODS: &[&str] = &[
     members::LIST_WORKFLOWS,
@@ -57,6 +57,7 @@ pub const METHODS: &[&str] = &[
     members::NODE_KINDS,
     members::APPLY_GRAPH_OPS,
     members::APPROVAL_MANIFEST,
+    members::MIGRATE_STORAGE,
 ];
 
 /// Callback interface implemented by the scope-owning host.
@@ -119,6 +120,8 @@ pub mod members {
     pub const APPLY_GRAPH_OPS: &str = "ApplyGraphOps";
     /// `(ApprovalManifestRequest) -> Vec<Value>`.
     pub const APPROVAL_MANIFEST: &str = "ApprovalManifest";
+    /// `(CatalogStorage) -> ()`; migrates this callback scope's v1 catalog data.
+    pub const MIGRATE_STORAGE: &str = "MigrateStorage";
 }
 
 /// Pure structural graph edit request. The graph and tagged operations use
@@ -238,6 +241,8 @@ pub struct ApprovalManifestRequest {
 
 /// Callback members accepted by the generic document adapter.
 pub mod storage {
+    /// `() -> {value: CatalogStorageCapabilities}`.
+    pub const CAPABILITIES: &str = "DocCapabilities";
     /// `(DocGetRequest) -> {value: Option<CatalogVersionedDocument>}`.
     pub const GET: &str = "DocGet";
     /// `(DocPutRequest) -> {value: u64}`.
@@ -254,6 +259,7 @@ pub mod storage {
 
 /// Exact storage callback member set used by the served catalog.
 pub const STORAGE_METHODS: &[&str] = &[
+    storage::CAPABILITIES,
     storage::ENSURE,
     storage::GET,
     storage::PUT,

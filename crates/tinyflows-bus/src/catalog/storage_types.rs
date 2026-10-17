@@ -25,6 +25,26 @@ pub struct CatalogVersionedDocument {
     pub version: u64,
     /// Document JSON object.
     pub doc: Value,
+    /// Driver metadata; omitted by legacy callbacks that do not expose it.
+    #[serde(default)]
+    pub meta: CatalogDocumentMeta,
+}
+
+/// Record metadata returned with catalog document reads.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CatalogDocumentMeta {
+    /// Declared body schema version, or zero when unknown.
+    #[serde(default)]
+    pub schema: u32,
+    /// Original record creation time in Unix epoch milliseconds.
+    #[serde(default)]
+    pub created_ms: i64,
+    /// Latest record update time in Unix epoch milliseconds.
+    #[serde(default)]
+    pub updated_ms: i64,
+    /// Record expiry in Unix epoch milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<i64>,
 }
 
 /// Cursor returned by a paged document query.
@@ -183,6 +203,18 @@ pub struct DocPutRequest {
     /// Unix epoch milliseconds from which the document reads as absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_ms: Option<i64>,
+    /// Original record creation time, used only by schema migrations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_ms: Option<i64>,
+}
+
+/// Optional abilities of the host document callback.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CatalogStorageCapabilities {
+    /// Whether document reads and writes preserve driver record metadata,
+    /// including explicit creation times used by migrations.
+    #[serde(default)]
+    pub record_metadata: bool,
 }
 
 fn is_zero(value: &u32) -> bool {

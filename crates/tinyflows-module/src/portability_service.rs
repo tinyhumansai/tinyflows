@@ -34,6 +34,45 @@ impl Portability {
             .map_err(|_| Error::failed("HTTP request preparation failed"))
     }
 
+    /// Return only normalized trigger data used by host dispatch bindings.
+    async fn describe_trigger(
+        &self,
+        request: tinyflows_bus::portability::DescribeTrigger,
+    ) -> Result<tinyflows_bus::portability::TriggerDetails> {
+        let graph = tinyflows::migrate::deserialize_graph(request.graph)
+            .map_err(|_| Error::failed("invalid workflow graph"))?;
+        let Some(trigger) = graph.trigger() else {
+            return Ok(tinyflows_bus::portability::TriggerDetails {
+                kind: None,
+                schedule: None,
+            });
+        };
+        let Some(kind) = tinyflows::triggers::graph_trigger_kind(&graph) else {
+            return Ok(tinyflows_bus::portability::TriggerDetails {
+                kind: None,
+                schedule: None,
+            });
+        };
+        let kind_label = tinyflows::triggers::trigger_kind_label(&kind).to_owned();
+        let schedule = if matches!(kind, tinyflows::model::TriggerKind::Schedule) {
+            let raw_schedule = trigger
+                .config
+                .get("schedule")
+                .cloned()
+                .ok_or_else(|| Error::failed("schedule trigger is missing its schedule"))?;
+            Some(
+                serde_json::from_value(raw_schedule)
+                    .map_err(|_| Error::failed("schedule trigger has an invalid schedule"))?,
+            )
+        } else {
+            None
+        };
+        Ok(tinyflows_bus::portability::TriggerDetails {
+            kind: Some(kind_label),
+            schedule,
+        })
+    }
+
     /// Match a graph's sole app-event trigger.
     async fn app_event_binding(
         &self,

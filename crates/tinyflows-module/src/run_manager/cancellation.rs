@@ -141,10 +141,11 @@ pub(super) async fn cancel_parked(
         tracing::warn!(%error, run_id, "parked cancellation cleanup failed");
     }
     let seq = writer
-        .emit_terminal(
-            "finished",
-            serde_json::json!({"status":"cancelled","error":"parked run cancelled"}),
-        )
+        .emit_terminal(super::events::finished_payload(
+            "cancelled",
+            Some("parked run cancelled".into()),
+            None,
+        ))
         .await?;
     if !prepared
         .catalog
@@ -198,7 +199,11 @@ async fn append_cancelled_event(
             serde_json::to_value(RunEvent {
                 seq,
                 kind: "finished".into(),
-                data: serde_json::json!({"status":"cancelled","error":reason}),
+                data: serde_json::to_value(super::events::finished_payload(
+                    "cancelled",
+                    Some(reason.to_owned()),
+                    None,
+                ))?,
                 graph_run_id: None,
             })?,
         )

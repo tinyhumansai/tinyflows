@@ -38,6 +38,9 @@ async fn failed_actor_persists_graph_observations_and_settles_executed_dedup_nod
             .any(|event| event.kind == "graph_observation" && event.graph_run_id.is_some())
     );
     assert_eq!(events.events.last().unwrap().data["status"], "failed");
+    let finished: runs::RunFinished =
+        serde_json::from_value(events.events.last().unwrap().data.clone()).unwrap();
+    assert!(!finished.successful);
     let row: Option<catalog::FlowRun> = catalog_proxy
         .call(
             "GetRun",

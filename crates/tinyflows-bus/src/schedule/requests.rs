@@ -31,6 +31,134 @@ pub struct RunJobNow {
     pub wait: bool,
 }
 
+/// Reserve an inert handle for a host-owned manual worker lifecycle. Repeating
+/// the same `(scope, request_id)` returns the same live reservation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareManualRun {
+    /// The scheduler/store scope, bound to the returned handle.
+    pub scope: String,
+    /// Caller-generated idempotency key for prepare retries.
+    pub request_id: String,
+}
+
+/// Opaque module-owned capability for one prepared manual worker.
+///
+/// Handles belong to one module generation. A forced unload or process crash
+/// can lose in-memory lifecycle state; a durable occurrence lease is then
+/// recovered only by expiry. Callback side effects remain at-least-once across
+/// ambiguous transport failures, with no exactly-once guarantee.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ManualRunHandle {
+    /// Random, non-reused token minted by the module.
+    pub token: String,
+}
+
+/// Execution inputs for `StartManualRun`; scope comes only from its handle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualRunRequest {
+    /// Context-bound host execution and delivery callbacks.
+    pub callback: super::CallbackAddress,
+    /// Retry and timing configuration.
+    pub config: serde_json::Value,
+    /// Scoped module-owned document store; leased cron paths require transactions.
+    pub storage: super::StoreConfig,
+    /// Saved snapshot to execute, even when disabled or scheduled in the future.
+    pub job: CronJob,
+    /// Stable invocation identity persisted in run history.
+    pub run_id: String,
+    /// Whether normal product delivery is requested.
+    #[serde(default)]
+    pub delivery: ManualDelivery,
+}
+
+/// Start a prepared worker. The handle must already exist; this method never
+/// reserves or recreates one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartManualRun {
+    /// Previously prepared module-owned handle.
+    pub handle: ManualRunHandle,
+    /// Execution inputs bound to the prepared scope.
+    pub request: ManualRunRequest,
+}
+
+/// Read the current state of a manual worker without consuming it. `None`
+/// means the handle is absent and no worker can be started from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitManualRun {
+    /// Previously prepared module-owned handle.
+    pub handle: ManualRunHandle,
+}
+
+/// Request cooperative stopping and return the current state immediately.
+/// `None` means the handle is absent and no worker can be started from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopManualRun {
+    /// Previously prepared module-owned handle.
+    pub handle: ManualRunHandle,
+}
+
+/// Remove a retained terminal worker result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcknowledgeManualRun {
+    /// Previously prepared module-owned handle.
+    pub handle: ManualRunHandle,
+}
+
+/// Observable state for a prepared manual worker. Only a terminal state
+/// permits acknowledgement and callback release.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManualRunState {
+    /// Reservation exists but execution has not been admitted.
+    Prepared,
+    /// Claim and durable queue admission are in progress.
+    Starting,
+    /// The queued worker is executing or finalizing.
+    Running { run_id: String },
+    /// Stop requested; the worker is finishing its current callback and cleanup.
+    Stopping { run_id: Option<String> },
+    /// Claim cleanup failed and is being retried by the module supervisor.
+    CleanupPending { run_id: Option<String> },
+    /// Work is complete, refused, stopped, or failed after safe cleanup.
+    Terminal { outcome: ManualRunOutcome },
+}
+
+/// Stable terminal outcome retained until explicit acknowledgement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManualRunOutcome {
+    /// Run history and schedule-side effects were durably committed.
+    Completed {
+        /// Stable invocation identity.
+        run_id: String,
+        /// Final host-classified attempt.
+        attempt: super::Attempt,
+        /// Final execution-plus-delivery decision.
+        success: bool,
+        /// Actual send result, absent when delivery was intentionally skipped.
+        delivery_status: Option<DeliveryStatus>,
+    },
+    /// Admission was refused without retaining an occurrence claim.
+    Refused {
+        /// Stable invocation identity supplied by the host.
+        run_id: String,
+        /// Machine-readable admission refusal.
+        reason: RunJobRefusal,
+    },
+    /// The run stopped after its claim was confirmed released or fenced.
+    Stopped {
+        /// Present when a start request had supplied a run identity.
+        run_id: Option<String>,
+    },
+    /// The run failed after its claim was confirmed released or fenced.
+    Failed {
+        /// Present when a start request had supplied a run identity.
+        run_id: Option<String>,
+        /// Safe diagnostic from module-owned execution or persistence.
+        message: String,
+    },
+}
+
 /// Whether a manual run sends its normal product delivery.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

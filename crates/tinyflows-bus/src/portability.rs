@@ -6,9 +6,14 @@ use serde_json::Value;
 /// Interface that exposes engine-owned preparation behavior to hosts.
 pub const INTERFACE: &str = "ai.tinyhumans.tinyflows.Portability";
 /// Contract version for this interface.
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 /// Methods implemented by the compiled module.
-pub const METHODS: &[&str] = &["PrepareHttpRequest", "AppEventBinding", "PinnedInputs"];
+pub const METHODS: &[&str] = &[
+    "PrepareHttpRequest",
+    "AppEventBinding",
+    "PinnedInputs",
+    "DescribeTrigger",
+];
 
 /// Credential material already resolved by the trusted host.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -50,6 +55,24 @@ pub struct AppEventBinding {
 pub struct PinnedInputs {
     /// Serialized workflow graph.
     pub graph: Value,
+}
+
+/// Describe the module-owned trigger metadata needed by host bindings.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DescribeTrigger {
+    /// Serialized workflow graph.
+    pub graph: Value,
+}
+
+/// Normalized trigger details for a graph with exactly one recognized trigger.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TriggerDetails {
+    /// Stable snake-case trigger kind; absent when the graph has no unique,
+    /// recognized trigger.
+    pub kind: Option<String>,
+    /// Typed schedule for a schedule trigger. Other trigger kinds have no
+    /// schedule. A missing or malformed schedule is an operation error.
+    pub schedule: Option<crate::schedule::Schedule>,
 }
 
 #[cfg(test)]

@@ -6,9 +6,9 @@ fn every() -> Schedule {
 }
 
 #[test]
-fn contract_is_version_five_with_the_exact_member_set() {
-    assert_eq!(CONTRACT_VERSION, 5);
-    assert_eq!(METHODS.len(), 17);
+fn contract_is_version_six_with_the_exact_member_set() {
+    assert_eq!(CONTRACT_VERSION, 6);
+    assert_eq!(METHODS.len(), 22);
     let mut unique: Vec<_> = METHODS.to_vec();
     unique.sort_unstable();
     unique.dedup();
@@ -16,6 +16,11 @@ fn contract_is_version_five_with_the_exact_member_set() {
     for name in [
         "ScheduleStore",
         "RunJobNow",
+        "PrepareManualRun",
+        "StartManualRun",
+        "WaitManualRun",
+        "StopManualRun",
+        "AcknowledgeManualRun",
         "ParseHumanDelay",
         "ValidateDelivery",
         "NextRun",
@@ -30,6 +35,110 @@ fn contract_is_version_five_with_the_exact_member_set() {
     ] {
         assert!(METHODS.contains(&name), "{name}");
     }
+}
+
+#[test]
+fn manual_worker_states_are_stable_typed_wire_values() {
+    let prepared: ManualRunState = serde_json::from_value(json!({"kind":"prepared"})).unwrap();
+    assert!(matches!(prepared, ManualRunState::Prepared));
+    let terminal = ManualRunState::Terminal {
+        outcome: ManualRunOutcome::Stopped {
+            run_id: Some("run".into()),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(terminal).unwrap(),
+        json!({"kind":"terminal","outcome":{"kind":"stopped","run_id":"run"}})
+    );
+}
+
+#[test]
+fn manual_worker_requests_and_outcomes_round_trip_as_typed_wire_contracts() {
+    fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: T) {
+        let encoded = serde_json::to_value(value).unwrap();
+        let decoded: T = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+    }
+
+    let handle = ManualRunHandle {
+        token: "opaque-handle".into(),
+    };
+    let callback = CallbackAddress {
+        destination: "host.Callbacks".into(),
+        object_path: "/host/agent".into(),
+    };
+    let storage: StoreConfig = serde_json::from_value(json!({
+        "backend":{"kind":"documents","callback":{
+            "destination":"host.Callbacks","object_path":"/host/documents"
+        }}
+    }))
+    .unwrap();
+    let job: CronJob = serde_json::from_value(json!({
+        "id":"job","expression":"","schedule":{"kind":"every","every_ms":60000},
+        "command":"echo hi","prompt":null,"name":null,"job_type":"shell",
+        "session_target":"isolated","model":null,"agent_id":null,"enabled":true,
+        "delivery":{"mode":"none"},"delete_after_run":false,
+        "created_at":"2026-01-01T00:00:00Z","next_run":"2026-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    let request = ManualRunRequest {
+        callback,
+        config: json!({"retries":2}),
+        storage,
+        job,
+        run_id: "run".into(),
+        delivery: ManualDelivery::NotRequested,
+    };
+
+    round_trip(PrepareManualRun {
+        scope: "scope".into(),
+        request_id: "request".into(),
+    });
+    round_trip(handle.clone());
+    round_trip(StartManualRun {
+        handle: handle.clone(),
+        request,
+    });
+    round_trip(WaitManualRun {
+        handle: handle.clone(),
+    });
+    round_trip(StopManualRun {
+        handle: handle.clone(),
+    });
+    round_trip(AcknowledgeManualRun { handle });
+    round_trip(Option::<ManualRunState>::None);
+
+    round_trip(ManualRunState::Prepared);
+    round_trip(ManualRunState::Starting);
+    round_trip(ManualRunState::Running {
+        run_id: "run".into(),
+    });
+    round_trip(ManualRunState::Stopping {
+        run_id: Some("run".into()),
+    });
+    round_trip(ManualRunState::CleanupPending { run_id: None });
+    round_trip(ManualRunState::Terminal {
+        outcome: ManualRunOutcome::Completed {
+            run_id: "run".into(),
+            attempt: Attempt {
+                success: true,
+                output: "done".into(),
+                retryable: false,
+                raw_detail: None,
+            },
+            success: true,
+            delivery_status: Some(DeliveryStatus::Delivered),
+        },
+    });
+    round_trip(ManualRunOutcome::Refused {
+        run_id: "run".into(),
+        reason: RunJobRefusal::AlreadyRunning,
+    });
+    round_trip(ManualRunOutcome::Stopped { run_id: None });
+    round_trip(ManualRunOutcome::Failed {
+        run_id: Some("run".into()),
+        message: "safe failure".into(),
+    });
 }
 
 #[test]
@@ -101,6 +210,7 @@ fn every_advertised_store_operation_round_trips_through_the_typed_form() {
         json!({"op":"set_max_active_jobs","limit":3}),
         json!({"op":"import_job","job":job}),
         json!({"op":"import_run","run":run}),
+        json!({"op":"migrate"}),
     ];
     assert_eq!(operations.len(), STORE_OPERATIONS.len());
     for (operation, name) in operations.iter().zip(STORE_OPERATIONS) {

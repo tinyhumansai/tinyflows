@@ -7,10 +7,25 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use tinyflows::engine::{GraphEventJournal, GraphObservation, InMemoryGraphEventJournal};
 use tinyflows::observability::{ExecutionStep, Run, RunObserver, RunStatus, StepStatus};
-use tinyflows_bus::runs::RunEvent;
+use tinyflows_bus::runs::{RunEvent, RunFinished};
 use tinyflows_catalog::FlowRunStep;
 use tinyflows_drivers::catalog::FlowCatalogDocuments;
 use tokio::sync::{mpsc, oneshot};
+
+/// Construct the terminal wire payload using the owning engine's status
+/// classification. Callers cannot provide an independent success flag.
+pub(super) fn finished_payload(
+    status: &str,
+    error: Option<String>,
+    graph_run_id: Option<String>,
+) -> RunFinished {
+    RunFinished {
+        status: status.to_owned(),
+        successful: tinyflows::nodes::control_flow::dedup_settle::is_success_status(status),
+        error,
+        graph_run_id,
+    }
+}
 
 async fn persist_event(
     catalog: &FlowCatalogDocuments,
@@ -147,11 +162,12 @@ impl EventWriter {
         });
     }
 
-    pub async fn emit_terminal(&self, kind: &str, data: Value) -> Result<u64> {
+    pub async fn emit_terminal(&self, finished: RunFinished) -> Result<u64> {
+        let data = serde_json::to_value(finished)?;
         let (ack, result) = oneshot::channel();
         self.sender
             .send(WriteCommand::Event {
-                kind: kind.to_owned(),
+                kind: "finished".to_owned(),
                 data,
                 graph_run_id: None,
                 ack: Some(ack),

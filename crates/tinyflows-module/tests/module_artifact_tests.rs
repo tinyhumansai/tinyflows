@@ -8,6 +8,8 @@ mod callbacks;
 mod copilot_artifact;
 #[path = "support/document_callbacks.rs"]
 mod document_callbacks;
+#[path = "support/manual_worker_artifact_tests.rs"]
+mod manual_worker_artifact_tests;
 #[path = "support/portability_artifact.rs"]
 mod portability_artifact;
 #[path = "support/run_artifact_tests.rs"]
@@ -20,6 +22,8 @@ mod schedule_v4_delivery_artifact;
 mod schedule_v4_manual_artifact;
 #[path = "support/schedule_v4_recovery_artifact.rs"]
 mod schedule_v4_recovery_artifact;
+#[path = "support/storage_migration_artifact_tests.rs"]
+mod storage_migration_artifact_tests;
 #[path = "support/wiring_warning_artifact.rs"]
 mod wiring_warning_artifact;
 use serde_json::json;
@@ -68,9 +72,10 @@ impl HostCallback {
 #[ignore = "run through scripts/verify-module-artifact.sh"]
 async fn compiled_module_serves_validation_without_linking_engine_into_client() {
     assert_eq!(tinyflows_bus::CONTRACT_VERSION, 3);
-    assert_eq!(tinyflows_bus::catalog::CONTRACT_VERSION, 4);
-    assert_eq!(tinyflows_bus::runs::CONTRACT_VERSION, 4);
-    assert_eq!(tinyflows_bus::schedule::CONTRACT_VERSION, 5);
+    assert_eq!(tinyflows_bus::catalog::CONTRACT_VERSION, 5);
+    assert_eq!(tinyflows_bus::runs::CONTRACT_VERSION, 5);
+    assert_eq!(tinyflows_bus::portability::CONTRACT_VERSION, 2);
+    assert_eq!(tinyflows_bus::schedule::CONTRACT_VERSION, 6);
     assert_eq!(tinyflows_bus::runs::CAPS_CONTRACT_VERSION, 1);
     assert_eq!(tinyflows_bus::runs::CAPS_METHODS.len(), 19);
     let artifact = std::env::var_os("TINYFLOWS_MODULE_ARTIFACT")
@@ -105,6 +110,26 @@ async fn compiled_module_serves_validation_without_linking_engine_into_client() 
         .map(|method| method.to_string())
         .collect();
     assert_eq!(actual_copilot_methods, expected_copilot_methods);
+    let portability_interface = info
+        .manifest
+        .provides
+        .iter()
+        .find(|provided| {
+            provided.version.interface.as_str() == tinyflows_bus::portability::INTERFACE
+        })
+        .expect("portability interface is provided by the compiled module");
+    let mut actual_portability: Vec<_> = portability_interface
+        .methods
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let mut expected_portability: Vec<_> = tinyflows_bus::portability::METHODS
+        .iter()
+        .map(|member| member.to_string())
+        .collect();
+    actual_portability.sort();
+    expected_portability.sort();
+    assert_eq!(actual_portability, expected_portability);
     assert!(info.manifest.requires.iter().any(|dependency| {
         dependency.optional
             && dependency.interface.interface.as_str()

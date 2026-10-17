@@ -11,9 +11,11 @@ pub mod types;
 pub use frequency::{MIN_AGENT_JOB_INTERVAL, TooFrequent, describe_gap};
 pub use records::{Attempt, Completion, RunRecord};
 pub use requests::{
-    CheckOriginRequest, CheckPatchRequest, DeliveryProjection, ManualClaimReply, ManualDelivery,
-    NextRunRequest, OccurrenceClaim, RunJobNow, RunJobRefusal, RunJobReply, RunsCloserThanRequest,
-    ValidateScheduleRequest,
+    AcknowledgeManualRun, CheckOriginRequest, CheckPatchRequest, DeliveryProjection,
+    ManualClaimReply, ManualDelivery, ManualRunHandle, ManualRunOutcome, ManualRunRequest,
+    ManualRunState, NextRunRequest, OccurrenceClaim, PrepareManualRun, RunJobNow, RunJobRefusal,
+    RunJobReply, RunsCloserThanRequest, StartManualRun, StopManualRun, ValidateScheduleRequest,
+    WaitManualRun,
 };
 pub use store_types::{
     AgentJobSpec, ImportedJob, MAX_CRON_OUTPUT_BYTES, StoreOperation, TRUNCATED_OUTPUT_MARKER,
@@ -39,8 +41,9 @@ pub const CALLBACK_INTERFACE: &str = "ai.tinyhumans.tinyflows.ScheduleHost";
 /// the `set_max_active_jobs`/`import_job`/`import_run` store operations. 4 added
 /// optional `config.now` for fixed calendar time on manual schedulers. 5 adds
 /// occurrence leases, module-owned manual run admission and explicit
-/// send/terminal delivery phases.
-pub const CONTRACT_VERSION: u32 = 5;
+/// send/terminal delivery phases. 6 adds prepared handles and host-owned
+/// lifecycle observation for detached manual workers.
+pub const CONTRACT_VERSION: u32 = 6;
 /// Exact advertised scheduler member set.
 pub const METHODS: &[&str] = &[
     members::SCHEDULE_STORE,
@@ -49,6 +52,11 @@ pub const METHODS: &[&str] = &[
     members::TICK_SCHEDULER,
     members::DRAIN_SCHEDULER,
     members::RUN_JOB_NOW,
+    members::PREPARE_MANUAL_RUN,
+    members::START_MANUAL_RUN,
+    members::WAIT_MANUAL_RUN,
+    members::STOP_MANUAL_RUN,
+    members::ACKNOWLEDGE_MANUAL_RUN,
     members::PARSE_HUMAN_DELAY,
     members::VALIDATE_DELIVERY,
     members::NEXT_RUN,
@@ -76,6 +84,16 @@ pub mod members {
     pub const DRAIN_SCHEDULER: &str = "DrainScheduler";
     /// `(RunJobNow) -> RunJobReply`; durable admission precedes acknowledgement.
     pub const RUN_JOB_NOW: &str = "RunJobNow";
+    /// `(PrepareManualRun) -> ManualRunHandle`; creates an inert reservation.
+    pub const PREPARE_MANUAL_RUN: &str = "PrepareManualRun";
+    /// `(StartManualRun) -> ManualRunState`; starts only a live prepared handle.
+    pub const START_MANUAL_RUN: &str = "StartManualRun";
+    /// `(WaitManualRun) -> Option<ManualRunState>`; immediate snapshot, absent means quiescent.
+    pub const WAIT_MANUAL_RUN: &str = "WaitManualRun";
+    /// `(StopManualRun) -> Option<ManualRunState>`; requests stop, absent means quiescent.
+    pub const STOP_MANUAL_RUN: &str = "StopManualRun";
+    /// `(AcknowledgeManualRun) -> bool`; removes a retained terminal result.
+    pub const ACKNOWLEDGE_MANUAL_RUN: &str = "AcknowledgeManualRun";
     /// `(delay: string) -> milliseconds: i64`.
     pub const PARSE_HUMAN_DELAY: &str = "ParseHumanDelay";
     /// `(DeliveryConfig, Option<JobOrigin>, Option<Vec<String>>) -> ()`.
@@ -227,6 +245,7 @@ pub const STORE_OPERATIONS: &[&str] = &[
     "set_max_active_jobs",
     "import_job",
     "import_run",
+    "migrate",
 ];
 
 /// Context-bound document callback interface. The only member is `Document`;
