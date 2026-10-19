@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Code node contract and dry-run honesty
+
+- **Fixed** the `code` node contract (catalog and builder prompt): `source` is
+  a function body that receives one variable, `input` (the array of input
+  items, payload under `.json`), and `return`s the json of the node's single
+  output item. The old example read an undefined `item`, which builders copied
+  into scripts that failed every real run (tinyhumansai/openhuman#7830).
+- **Added** `unexecuted_code_nodes` to the dry-run report, with a leading
+  `CODE NOT EXECUTED` line in its `note`/`message`: the sandbox stubs `code`
+  nodes, so a clean dry run never proved a script works.
+- **Added** `code_source_errors`, a static check that fails the dry run when a
+  `code` source reads an `item` variable it never binds.
+
 ### Bounded occurrence lease records
 
 - **Fixed** the `tsd.leases` record kept per cron occurrence (#159). Completing

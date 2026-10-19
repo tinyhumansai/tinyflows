@@ -113,6 +113,7 @@ pub fn report(
         }
     };
     let report = outcome.report;
+    let code_summary = code_summary(&report.unexecuted_code_nodes);
     let result = if report.is_failing() {
         json!({
             "sandbox": true,
@@ -122,8 +123,10 @@ pub fn report(
             "agent_input_context_nulls": report.agent_input_context_nulls,
             "node_errors": report.node_errors,
             "routing_divergence_warnings": report.routing_divergence_warnings,
+            "unexecuted_code_nodes": report.unexecuted_code_nodes,
+            "code_source_errors": report.code_source_errors,
             "permissions_manifest": permissions_manifest,
-            "message": "These tool_call args resolved to null, an agent node's prompt or input_context resolved to null (an EMPTY prompt — see agent_prompt_nulls — or no upstream data at all — see agent_input_context_nulls), or a tool_call node failed during the sandbox run (even one recovered via on_error: continue/route) — wire null-resolved args from an upstream node's real output (give any agent node an output_parser.schema so its fields are addressable), feed upstream data into a null-resolved agent prompt/input_context from a real upstream field instead of a jq expression inside the prompt text, and fix or rewire whatever tool_call node_errors names. Also check routing_divergence_warnings: any agent/tool_call node listed there never ran in this sandbox at all because an upstream condition routed the mock data past it — verify that wiring by hand too."
+            "message": format!("{code_summary}These tool_call args resolved to null, an agent node's prompt or input_context resolved to null (an EMPTY prompt — see agent_prompt_nulls — or no upstream data at all — see agent_input_context_nulls), or a tool_call node failed during the sandbox run (even one recovered via on_error: continue/route) — wire null-resolved args from an upstream node's real output (give any agent node an output_parser.schema so its fields are addressable), feed upstream data into a null-resolved agent prompt/input_context from a real upstream field instead of a jq expression inside the prompt text, and fix or rewire whatever tool_call node_errors names. Also check routing_divergence_warnings: any agent/tool_call node listed there never ran in this sandbox at all because an upstream condition routed the mock data past it — verify that wiring by hand too. A code_source_errors entry is a script that reads an undefined `item` and fails every real run: rewrite it to read `input`.")
         })
     } else {
         json!({
@@ -136,11 +139,28 @@ pub fn report(
             "agent_input_context_nulls": report.agent_input_context_nulls,
             "node_errors": report.node_errors,
             "routing_divergence_warnings": report.routing_divergence_warnings,
+            "unexecuted_code_nodes": report.unexecuted_code_nodes,
+            "code_source_errors": report.code_source_errors,
             "permissions_manifest": permissions_manifest,
-            "note": "SANDBOX (mock) output — LLM/tool/HTTP/code nodes returned deterministic echoes; NO real side effects occurred. This checks wiring/routing only, not whether real integrations work. If routing_divergence_warnings is non-empty, an agent/tool_call node never ran in this sandbox because an upstream condition routed the mock data past it — that node's wiring is unverified; check it by hand."
+            "note": format!("{code_summary}SANDBOX (mock) output — LLM/tool/HTTP/code nodes returned deterministic echoes; NO real side effects occurred. This checks wiring/routing only, not whether real integrations work. If routing_divergence_warnings is non-empty, an agent/tool_call node never ran in this sandbox because an upstream condition routed the mock data past it — that node's wiring is unverified; check it by hand.")
         })
     };
     Ok(result)
+}
+
+/// The line that leads the report when the graph has `code` nodes, so a
+/// builder cannot read a clean dry run as proof that their scripts work.
+fn code_summary(nodes: &[authoring_report::UnexecutedCodeNode]) -> String {
+    if nodes.is_empty() {
+        return String::new();
+    }
+    let ids: Vec<&str> = nodes.iter().map(|n| n.node_id.as_str()).collect();
+    format!(
+        "CODE NOT EXECUTED: {} code node(s) ({}) were stubbed, not run, so their scripts are \
+         UNVERIFIED by this dry run; do not report them as working (see unexecuted_code_nodes). ",
+        ids.len(),
+        ids.join(", ")
+    )
 }
 
 #[cfg(test)]

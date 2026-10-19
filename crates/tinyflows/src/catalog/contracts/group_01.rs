@@ -311,20 +311,39 @@ pub(super) fn contract_code() -> NodeKindContract {
     NodeKindContract {
         kind: "code".to_string(),
         summary: "Run a sandboxed JavaScript or Python snippet.".to_string(),
-        description: "config.language + config.source, run via the host's CodeRunner \
-                capability."
+        description: "config.source is the BODY of a function, run via the host's CodeRunner \
+                capability. It receives one variable, `input`: the array of this node's input \
+                items, each { json, binary?, paired_item? }, so payload fields sit under .json \
+                (input[0].json.amount). There is no `item` variable; using one fails the run \
+                (ReferenceError / NameError). The body's `return` value (any JSON; none gives \
+                null) becomes the json of the node's ONE output item: returning an array yields \
+                one item holding that array, so fan it out with a split_out node. The function \
+                is not async, so `await` is unavailable."
             .to_string(),
         config_fields: vec![
             ConfigField::required("language", "enum", "The runtime language.")
                 .with_enum(&["javascript", "python"]),
-            ConfigField::required("source", "string", "The code to run."),
+            ConfigField::required(
+                "source",
+                "string",
+                "A function body that reads `input` (the input items array) and `return`s the \
+                     output value.",
+            ),
         ],
         ports: PortSpec::linear(),
         example: json!({
             "id": "shape", "kind": "code", "name": "Shape",
-            "config": { "language": "javascript", "source": "return { total: item.a + item.b };" }
+            "config": {
+                "language": "javascript",
+                "source": "return { total: input.reduce((sum, i) => sum + i.json.a + i.json.b, 0) };"
+            }
         }),
-        notes: vec![],
+        notes: vec![
+            "A dry run does NOT execute code: the sandbox stubs the node to return \
+             { result: <input> }, so a script that would crash still dry-runs without error. \
+             Check the source against the contract above."
+                .to_string(),
+        ],
     }
 }
 

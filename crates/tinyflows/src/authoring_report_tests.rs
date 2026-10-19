@@ -187,3 +187,48 @@ fn unexecuted_agent_or_tool_call_nodes_warn_with_the_condition_that_routed_past(
     );
     assert!(!report.is_failing(), "routing warnings are advisory");
 }
+
+fn code_graph(source: &str, language: &str) -> WorkflowGraph {
+    graph(
+        json!([
+            { "id": "t", "kind": "trigger", "name": "T", "config": {} },
+            { "id": "shape", "kind": "code", "name": "Shape",
+              "config": { "language": language, "source": source } },
+        ]),
+        json!([{ "from_node": "t", "to_node": "shape" }]),
+    )
+}
+
+#[test]
+fn every_code_node_is_reported_unexecuted_without_failing_the_run() {
+    let g = code_graph("return { n: input.length };", "javascript");
+    let report = AuthoringReport::build(&g, &[], &json!({}));
+    let entries = serde_json::to_value(&report.unexecuted_code_nodes).unwrap();
+    assert_eq!(entries.as_array().unwrap().len(), 1);
+    assert_eq!(entries[0]["node_id"], "shape");
+    assert!(
+        entries[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was NOT executed")
+    );
+    assert!(report.code_source_errors.is_empty());
+    assert!(!report.is_failing());
+}
+
+#[test]
+fn a_code_source_reading_an_undefined_item_fails_the_dry_run() {
+    let g = code_graph("var txs = txsOf(item, 0);\nreturn txs;", "javascript");
+    let report = AuthoringReport::build(&g, &[], &json!({}));
+    assert_eq!(report.code_source_errors.len(), 1);
+    assert_eq!(report.code_source_errors[0].node_id, "shape");
+    assert!(
+        report.code_source_errors[0]
+            .message
+            .contains("ReferenceError")
+    );
+    assert!(report.is_failing());
+
+    let py = AuthoringReport::build(&code_graph("return item", "python"), &[], &json!({}));
+    assert!(py.code_source_errors[0].message.contains("NameError"));
+}

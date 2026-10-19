@@ -53,19 +53,20 @@ async fn catalog_node_kinds_returns_the_full_portable_contracts() -> tinybus::Re
     assert_eq!(code.config_fields.len(), 2);
     assert_eq!(code.ports.outputs, ["main"]);
     assert_eq!(code.example["kind"], "code");
-    assert!(code.notes.is_empty());
+    assert_eq!(code.notes.len(), 1);
     assert_eq!(
         serde_json::to_value(code).unwrap(),
         json!({
             "kind":"code",
             "summary":"Run a sandboxed JavaScript or Python snippet.",
-            "description":"config.language + config.source, run via the host's CodeRunner capability.",
+            "description":"config.source is the BODY of a function, run via the host's CodeRunner capability. It receives one variable, `input`: the array of this node's input items, each { json, binary?, paired_item? }, so payload fields sit under .json (input[0].json.amount). There is no `item` variable; using one fails the run (ReferenceError / NameError). The body's `return` value (any JSON; none gives null) becomes the json of the node's ONE output item: returning an array yields one item holding that array, so fan it out with a split_out node. The function is not async, so `await` is unavailable.",
             "config_fields":[
                 {"name":"language","required":true,"value_type":"enum","description":"The runtime language.","enum_values":["javascript","python"]},
-                {"name":"source","required":true,"value_type":"string","description":"The code to run."}
+                {"name":"source","required":true,"value_type":"string","description":"A function body that reads `input` (the input items array) and `return`s the output value."}
             ],
             "ports":{"inputs":["main"],"outputs":["main"]},
-            "example":{"id":"shape","name":"Shape","kind":"code","config":{"language":"javascript","source":"return { total: item.a + item.b };"}}
+            "example":{"id":"shape","name":"Shape","kind":"code","config":{"language":"javascript","source":"return { total: input.reduce((sum, i) => sum + i.json.a + i.json.b, 0) };"}},
+            "notes":["A dry run does NOT execute code: the sandbox stubs the node to return { result: <input> }, so a script that would crash still dry-runs without error. Check the source against the contract above."]
         })
     );
     assert!(tinyflows_bus::node_kinds::render_node_kinds_line(&contracts).contains("http_request"));

@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use crate::diagnostics::{nearest_upstream_condition, node_error_message};
 use crate::expr::NullResolution;
-use crate::model::{NodeKind, WorkflowGraph};
+use crate::model::{Node, NodeKind, WorkflowGraph};
 use crate::observability::{ExecutionStep, StepStatus};
 use crate::preflight::mock_opaque_tool_call_upstream_ref;
 
@@ -88,6 +88,24 @@ pub struct RoutingDivergenceWarning {
     pub message: String,
 }
 
+/// A `code` node the sandbox stubbed instead of running its `source`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnexecutedCodeNode {
+    /// The `code` node.
+    pub node_id: String,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+/// A `code` node whose `source` reads an `item` variable it never defines.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeSourceError {
+    /// The `code` node.
+    pub node_id: String,
+    /// What fails at run time, and what to read instead.
+    pub message: String,
+}
+
 /// Every bucket of the authoring report.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthoringReport {
@@ -101,16 +119,23 @@ pub struct AuthoringReport {
     pub node_errors: Vec<NodeErrorEntry>,
     /// Agent / `tool_call` nodes the sample routed past.
     pub routing_divergence_warnings: Vec<RoutingDivergenceWarning>,
+    /// Every `code` node: the sandbox never runs their scripts.
+    #[serde(default)]
+    pub unexecuted_code_nodes: Vec<UnexecutedCodeNode>,
+    /// `code` sources that read an undefined `item` and fail every real run.
+    #[serde(default)]
+    pub code_source_errors: Vec<CodeSourceError>,
 }
 
 impl AuthoringReport {
-    /// Whether anything here should fail the dry run. Routing warnings are
-    /// advisory and never do.
+    /// Whether anything here should fail the dry run. Routing warnings and
+    /// unexecuted `code` nodes are advisory and never do.
     pub fn is_failing(&self) -> bool {
         !self.null_resolutions.is_empty()
             || !self.agent_prompt_nulls.is_empty()
             || !self.agent_input_context_nulls.is_empty()
             || !self.node_errors.is_empty()
+            || !self.code_source_errors.is_empty()
     }
 
     /// Reads a settled run: `steps` as the engine reported them and `output`,
@@ -198,8 +223,57 @@ impl AuthoringReport {
             ),
             node_errors,
             routing_divergence_warnings,
+            unexecuted_code_nodes: unexecuted_code_nodes(graph),
+            code_source_errors: code_source_errors(graph),
         }
     }
+}
+
+fn code_nodes(graph: &WorkflowGraph) -> impl Iterator<Item = &Node> {
+    graph.nodes.iter().filter(|n| n.kind == NodeKind::Code)
+}
+
+/// One entry per `code` node in the graph, whether or not the sample reached
+/// it: the sandbox runs none of them.
+pub fn unexecuted_code_nodes(graph: &WorkflowGraph) -> Vec<UnexecutedCodeNode> {
+    code_nodes(graph)
+        .map(|node| UnexecutedCodeNode {
+            node_id: node.id.clone(),
+            message: format!(
+                "code node '{}' was NOT executed: the sandbox stubs it to return \
+                 {{ \"result\": <input> }}, so this dry run says nothing about whether its \
+                 script works. Check its source against the code contract: a function body that \
+                 reads `input` (the array of input items, payload under .json) and `return`s \
+                 the output.",
+                node.id
+            ),
+        })
+        .collect()
+}
+
+/// `code` nodes whose source reads `item` without binding it.
+pub fn code_source_errors(graph: &WorkflowGraph) -> Vec<CodeSourceError> {
+    code_nodes(graph)
+        .filter_map(|node| {
+            let config = &node.config;
+            let python = config.get("language").and_then(Value::as_str) == Some("python");
+            let source = config.get("source").and_then(Value::as_str)?;
+            code_source::reads_undefined_item(source, python).then(|| CodeSourceError {
+                node_id: node.id.clone(),
+                message: format!(
+                    "code node '{}' reads a variable `item` its source never defines, so every \
+                     real run fails with {}. The script receives only `input`, the array of input \
+                     items: read input[0].json for one item, or map over input for each.",
+                    node.id,
+                    if python {
+                        "NameError"
+                    } else {
+                        "ReferenceError"
+                    }
+                ),
+            })
+        })
+        .collect()
 }
 
 fn agent_nulls(
@@ -322,6 +396,9 @@ fn null_resolution_entry(
         suggestion: Some(suggestion),
     }
 }
+
+#[path = "code_source.rs"]
+mod code_source;
 
 #[cfg(test)]
 #[path = "authoring_report_tests.rs"]
