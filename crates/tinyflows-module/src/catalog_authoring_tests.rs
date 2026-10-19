@@ -78,10 +78,9 @@ async fn catalog_node_kinds_returns_the_full_portable_contracts() -> tinybus::Re
         tinyflows_bus::node_kinds::render_node_kinds_required(std::slice::from_ref(code)),
         "code(config.language, config.source)"
     );
-    assert_eq!(
-        code.clone().with_note("host overlay").notes,
-        ["host overlay"]
-    );
+    let overlaid = code.clone().with_note("host overlay").notes;
+    assert_eq!(overlaid.len(), code.notes.len() + 1);
+    assert_eq!(overlaid.last().map(String::as_str), Some("host overlay"));
     let unknown: tinybus::Result<Value> = proxy.call("UnknownCatalogMember", ()).await;
     assert!(unknown.is_err());
     Ok(())
