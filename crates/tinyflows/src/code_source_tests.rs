@@ -19,6 +19,9 @@ fn a_free_item_read_is_flagged() {
     assert!(py("return {'total': item['a']}"));
     assert!(py("for x in item:\n    pass"));
     assert!(py("def f(x=item):\n    return x\nreturn f()"));
+    // An argument, not a parameter.
+    assert!(js("return pick(0, item);"));
+    assert!(py("def f(x=g(0, item)):\n    return x"));
 }
 
 #[test]
@@ -34,6 +37,8 @@ fn a_bound_item_is_not_flagged() {
         "input.forEach(function (item) { out.push(item.json); });",
         "function pick(item) { return item.json; }\nreturn input.map(pick);",
         "try { f(); } catch (item) { return item.message; }",
+        "function pick(a = 0, item) { return item.json; }\nreturn pick(0, input[0]);",
+        "function pick(a = [1, 2], item) { return item; }",
     ] {
         assert!(!js(source), "{source}");
     }
@@ -43,6 +48,8 @@ fn a_bound_item_is_not_flagged() {
         "item = input[0]\nreturn item['json']",
         "def pick(item):\n    return item['json']\nreturn [pick(i) for i in input]",
         "return list(map(lambda item: item['json'], input))",
+        "def pick(x: int, item: dict):\n    return item['json']\nreturn pick(0, input[0])",
+        "def pick(x: int, item):\n    return item\nreturn pick(0, input[0])",
     ] {
         assert!(!py(source), "{source}");
     }

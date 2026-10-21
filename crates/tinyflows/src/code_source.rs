@@ -72,11 +72,15 @@ fn binds(toks: &[Tok<'_>], i: usize) -> bool {
     let before = |n: usize| start.checked_sub(n);
     let declares = |n: usize| word(toks, before(n)).is_some_and(|w| DECLARE.contains(&w));
     let opener = punct(toks, before(1));
-    if declares(1)
-        // `function (item)`, `catch (item)`, `function f(item)`, `def f(item)`.
-        || (opener == Some('(')
-            && (matches!(word(toks, before(2)), Some("function" | "catch"))
-                || matches!(word(toks, before(3)), Some("function" | "def"))))
+    // A parameter name opens its slot: `function (item)`, `catch (item)`,
+    // `function f(a = 0, item)`, `def f(x: int, item)`. After `=` it is a read.
+    let in_params = matches!(punct(toks, i.checked_sub(1)), Some('(' | ','))
+        && enclosing_paren(toks, i).is_some_and(|p| {
+            matches!(word(toks, p.checked_sub(1)), Some("function" | "catch"))
+                || matches!(word(toks, p.checked_sub(2)), Some("function" | "def"))
+        });
+    if in_params
+        || declares(1)
         // `const { item } = …`, `let [item] = …`.
         || (matches!(opener, Some('{' | '[')) && declares(2))
     {
@@ -93,6 +97,21 @@ fn binds(toks: &[Tok<'_>], i: usize) -> bool {
         || (after(0) == Some('=') && after(1) != Some('='))
         // `(item) => …` / `(item, i) => …`.
         || (after(0) == Some(')') && after(1) == Some('=') && after(2) == Some('>'))
+}
+
+/// Index of the unmatched `(` around token `i`; `None` when the innermost
+/// unmatched bracket is a `[` or `{`, or there is none.
+fn enclosing_paren(toks: &[Tok<'_>], i: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for j in (0..i).rev() {
+        match punct(toks, Some(j)) {
+            Some(')' | ']' | '}') => depth += 1,
+            Some(c @ ('(' | '[' | '{')) if depth == 0 => return (c == '(').then_some(j),
+            Some('(' | '[' | '{') => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Splits into words (`[A-Za-z0-9_$]+`) and single punctuation characters.
