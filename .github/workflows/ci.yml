@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.120.0
 
       - name: Check the workspace at its declared minimum compiler version
         run: cargo check --locked --workspace --all-features
