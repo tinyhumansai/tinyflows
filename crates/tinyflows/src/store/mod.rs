@@ -4,11 +4,11 @@
 //! [`crate::caps::WorkflowResolver`] — and it only covers resolving a
 //! `sub_workflow` node's id. Everything else a host needs (listing, saving,
 //! deleting, recording runs) has no contract upstream, so this module defines
-//! one: [`WorkflowStore`].
+//! one: `WorkflowStore`.
 //!
 //! The trait exists so the backing store is a decision, not a fact of the
 //! codebase. This crate ships no implementation: it carries the contract, the
-//! record types, the rules a store judges documents by ([`HostPolicy`]), the
+//! record types, the rules a store judges documents by (`HostPolicy`), the
 //! patch-based [`authoring`] on top, and the pieces every implementation
 //! shares (ids, the revision cap, note pruning). Storage belongs to the
 //! `tinystoragedrivers` ports, and `tinyflows-drivers`' `DriverWorkflowStore`

@@ -39,6 +39,9 @@ fn updated_job_doc(job: &CronJob, previous: &Value) -> Result<Value> {
     if let Some(incarnation) = incarnation(previous) {
         doc[INCARNATION] = json!(incarnation);
     }
+    if let Some(created_ms) = previous.get("created_ms") {
+        doc["created_ms"] = created_ms.clone();
+    }
     Ok(doc)
 }
 

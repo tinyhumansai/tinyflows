@@ -1,13 +1,28 @@
-use super::{Acquire, Acquisition, Body, Lease, LeaseRecord, Leases, id};
-use tinystoragedrivers_types::{Result, StorageError};
+//! Full host-semantics lease acquisition.
+
+use super::*;
 
 impl Leases {
-    /// Take `(owner, key)` with endpoint and takeover semantics.
+    /// Take `(owner, key)` with the full host semantics: an endpoint, a
+    /// distinction between a clean and an unclean takeover, and an unclean
+    /// takeover of the same holder's leftover live record.
     ///
-    /// A missing record starts at epoch 1. A matching live tenure is
-    /// re-entrant; a released or expired record advances the epoch. A live
-    /// leftover from the same holder is taken over only when `held_epoch` is
-    /// absent. A stale epoch or a competing live holder returns `Held`.
+    /// The rule, in order:
+    ///
+    /// 1. no record: epoch 1, clean;
+    /// 2. live, same holder and `held_epoch == Some(record.epoch)`:
+    ///    re-entrant, the epoch stays, clean;
+    /// 3. released: epoch + 1, clean;
+    /// 4. live, same holder, `held_epoch == None` (the caller holds nothing:
+    ///    the previous incarnation died before it expired): epoch + 1,
+    ///    unclean, taken over at once, fencing the old incarnation out. A
+    ///    caller that passes a `held_epoch` which no longer matches is a
+    ///    stale actor and gets [`Acquisition::Held`] instead, and so does
+    ///    a call that lost a race to another acquire of the same holder;
+    /// 5. expired (`now >= expires_ms`): epoch + 1, unclean;
+    /// 6. otherwise [`Acquisition::Held`] with the live record.
+    ///
+    /// Racing acquirers get exactly one winner.
     ///
     /// # Errors
     ///
@@ -25,6 +40,9 @@ impl Leases {
         let id = id(owner, key)?;
         let mut unclean = false;
         let mut seen: Option<Body> = None;
+        // `Repo::update` calls the closure again only after losing the swap,
+        // so any call after the first means another writer got in: judge the
+        // record as that competitor's write, never as a dead incarnation.
         let mut attempts = 0_u32;
         let stored = self
             .repo
@@ -42,6 +60,9 @@ impl Leases {
                             (found.epoch, false)
                         } else if live && (found.holder != holder || raced || held_epoch.is_some())
                         {
+                            // Another holder, a competing call of the same
+                            // holder that just won, or a caller proving it
+                            // holds a stale epoch: the live record stands.
                             seen.clone_from(&current);
                             return Ok(None);
                         } else {
@@ -77,38 +98,5 @@ impl Leases {
                 }
             },
         })
-    }
-
-    /// Return the stored record, including lapsed and released leases.
-    ///
-    /// Unlike [`Self::current`], this lets observers distinguish a clean
-    /// release from an abandoned lease and read the epoch a takeover resumes.
-    ///
-    /// # Errors
-    ///
-    /// A storage error.
-    pub async fn inspect(&self, owner: &str, key: &str) -> Result<Option<LeaseRecord>> {
-        let id = id(owner, key)?;
-        Ok(self
-            .repo
-            .get(&id)
-            .await?
-            .map(|found| LeaseRecord::from_body(found.doc)))
-    }
-
-    /// Delete a lease only while it still belongs to `(holder, epoch)`.
-    ///
-    /// This compacts keys that will never be acquired again. A later acquire
-    /// would restart at epoch 1, so callers must ensure no protected resource
-    /// can still accept writes from that earlier epoch.
-    ///
-    /// # Errors
-    ///
-    /// A storage error, or a conflict past the retry budget.
-    pub async fn compact(&self, owner: &str, key: &str, holder: &str, epoch: u64) -> Result<bool> {
-        let id = id(owner, key)?;
-        self.repo
-            .delete_if(&id, |lease| lease.holder == holder && lease.epoch == epoch)
-            .await
     }
 }

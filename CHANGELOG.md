@@ -15,6 +15,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events from older module versions; recovery events omit output when no engine
   outcome exists, and finished events identify host-deadline termination.
 
+### Code node contract and dry-run honesty
+
+- **Fixed** the `code` node contract (catalog and builder prompt): `source` is
+  a function body that receives one variable, `input` (the array of input
+  items, payload under `.json`), and `return`s the json of the node's single
+  output item. The old example read an undefined `item`, which builders copied
+  into scripts that failed every real run (tinyhumansai/openhuman#7830).
+- **Added** `unexecuted_code_nodes` to the dry-run report, with a leading
+  `CODE NOT EXECUTED` line in its `note`/`message`: the sandbox stubs `code`
+  nodes, so a clean dry run never proved a script works.
+- **Added** `code_source_errors`, a static check that fails the dry run when a
+  `code` source reads an `item` variable it never binds.
+- **Fixed** `code_source_errors` failing the dry run (`ok: false`) on valid
+  scripts that bind `item` in a form the token scan does not know, such as
+  `const { json: item } = input[0]` or Python `with … as item:`. The check is
+  now advisory: entries are still reported, and the `note`/`message` names
+  them on a `POSSIBLE UNDEFINED` line after `CODE NOT EXECUTED`, but they no
+  longer fail the dry run.
+
+### Per-run dedup tentative keys
+
+- **Changed** the `dedup` node to stage unseen keys under
+  `dedup:<node_id>:tentative:<run_id>` when the host seeds `run.id`
+  (`RunInput::run_id`), so overlapping runs of one flow no longer share a
+  tentative set and one run's settlement cannot commit or release another's
+  keys (tinyhumansai/openhuman#5268). A run with no seeded id keeps the shared
+  `dedup:<node_id>:tentative` key.
+- **Breaking:** `dedup::tentative_key` and `dedup_settle::{settle, commit,
+  release}` take the run id (`Option<&str>`). Hosts settle with the id they
+  seeded; the module run manager does. Tentative keys a pre-upgrade run wrote
+  under the shared key are not settled by a post-upgrade finish; the node only
+  reads `committed`, so those items are processed again once.
+- **Changed** a failed run-scoped commit to park that run's tentative keys in
+  `dedup:<node_id>:uncommitted`, which the node's next successful commit folds
+  into `committed`, so a successful run's keys are still retried once its own
+  tentative key can no longer be settled.
+
 ### Bounded occurrence lease records
 
 - **Fixed** the `tsd.leases` record kept per cron occurrence (#159). Completing

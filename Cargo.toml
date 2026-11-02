@@ -19,11 +19,8 @@ exclude = ["worktrees", "vendor/tinybus"]
 
 # Pin unpublished module APIs to a source available in non-recursive clones and archives.
 [patch.crates-io]
-tinybus = { git = "https://github.com/senamakel/tinybus", rev = "34d3bd6dda099e54cee11a2f96f28a21da9e0759" }
-tinybus-module = { git = "https://github.com/senamakel/tinybus", rev = "34d3bd6dda099e54cee11a2f96f28a21da9e0759" }
-
-[patch."https://github.com/tinyhumansai/tinybus"]
-tinybus = { git = "https://github.com/senamakel/tinybus", rev = "0de2d283f35cbbff08efad6fbe05537ffb74611b" }
+tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "6ce06bc674e4f4d718aa51e643ef62c1f372e270" }
+tinybus-module = { git = "https://github.com/tinyhumansai/tinybus", rev = "6ce06bc674e4f4d718aa51e643ef62c1f372e270" }
 
 [workspace.package]
 edition = "2024"
@@ -33,7 +30,7 @@ repository = "https://github.com/tinyhumansai/tinyflows"
 homepage = "https://github.com/tinyhumansai/tinyflows"
 
 [workspace.dependencies]
-tinyflows = { version = "0.8.0", path = "crates/tinyflows" }
+tinyflows = { version = "0.9.4", path = "crates/tinyflows" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"

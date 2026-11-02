@@ -77,7 +77,7 @@ fn drain(sink: &TranscriptSink) -> Vec<TranscriptEntry> {
 ///   multi-turn tool-use loop is a documented follow-up.
 /// - **output-parser sub-port** (`config.output_parser`): after the completion
 ///   (and any tool hop), the resulting value is validated/repaired against
-///   `config.output_parser.schema` using the shared [`schema`] routine
+///   `config.output_parser.schema` using the shared `schema` routine
 ///   (validate → one LLM auto-fix → re-validate), honoring
 ///   `config.output_parser.auto_fix` (default `true`).
 ///
@@ -92,7 +92,7 @@ fn drain(sink: &TranscriptSink) -> Vec<TranscriptEntry> {
 /// [`AgentRunRequest`](crate::caps::AgentRunRequest) carrying the resolved
 /// instructions, model, provider, working directory, context blocks, tool
 /// descriptors, limits, and metadata. See
-/// [`agent_request`](super::agent_request) for the merge rules.
+/// `agent_request` for the merge rules.
 ///
 /// The inline tool sub-port is skipped on that path (the agent owns its own tool
 /// loop, and re-invoking a tool it already called would duplicate the side

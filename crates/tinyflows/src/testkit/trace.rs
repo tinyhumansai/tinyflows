@@ -1,6 +1,6 @@
 //! A structured record of what a run actually did.
 //!
-//! [`RunObserver`](crate::observability::RunObserver) reports a node's *output*
+//! [`RunObserver`] reports a node's *output*
 //! after the fact. That is the wrong half of the question. When a workflow runs
 //! green and does nothing, the output is exactly what a correct run's output
 //! looks like — an object, no errors — and the thing that went wrong is
@@ -15,7 +15,7 @@
 //! produced it.
 //!
 //! Assembled from the [`StepInterceptor`] (which sees a node before it runs)
-//! and a [`RunObserver`](crate::observability::RunObserver) (which sees how long
+//! and a [`RunObserver`] (which sees how long
 //! it took), because neither can supply the whole picture alone.
 
 use std::sync::Mutex;
@@ -238,7 +238,7 @@ struct TraceState {
 ///
 /// Implements both [`StepInterceptor`] — which is how it sees a node's input and
 /// bindings *before* the node runs — and
-/// [`RunObserver`](crate::observability::RunObserver), which is how it learns
+/// [`RunObserver`], which is how it learns
 /// how long each activation took. Pass the same instance as both.
 ///
 /// Attach a [`MockCaps`] to have the run's capability calls folded into the

@@ -27,6 +27,7 @@ pub use store::{
     AgentJobSpec, ImportedJob, MAX_CRON_OUTPUT_BYTES, TRUNCATED_OUTPUT_MARKER, check_patch,
     truncate_cron_output,
 };
+pub use tinyflows_bus::schedule::{ChannelConversationIdentity, ChannelSessionIdentity};
 pub use types::{
     ActiveHours, CronJob, CronJobPatch, CronRun, DeliveryConfig, DeliveryStatus, JobOrigin,
     JobPolicy, JobType, Schedule, SessionTarget, delivery_mode,

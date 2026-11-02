@@ -265,32 +265,36 @@ where
                     error,
                 } = fail;
                 let failed_node = active[failed_index].node.clone();
-                // Schedule the successors of the branches that completed before
-                // the failure (they succeeded; their routing must not be lost)
-                // followed by the failed branch and the not-yet-run tail, which
-                // re-run on resume with their `Send` args preserved.
-                let successors = match self.route_completed(
-                    &active[..failed_index],
-                    &goto_map,
-                    &state,
-                    &mut barrier_arrivals,
-                ) {
-                    Ok(successors) => successors,
-                    Err(route_err) => {
-                        return self
-                            .fail_and_return(
-                                &run_id,
-                                &thread_id,
-                                started_at,
-                                steps,
-                                &mut async_writes,
-                                route_err,
-                            )
-                            .await;
-                    }
-                };
+                // Schedule the successors of the branches that completed (they
+                // succeeded; their routing must not be lost) followed by every
+                // branch that did not complete — failed, interrupted or never
+                // run — which re-run on resume with their `Send` args preserved.
+                let (done, done_goto) =
+                    Self::partition_completed(&active, &goto_map, &completed_indices);
+                let successors =
+                    match self.route_completed(&done, &done_goto, &state, &mut barrier_arrivals) {
+                        Ok(successors) => successors,
+                        Err(route_err) => {
+                            return self
+                                .fail_and_return(
+                                    &run_id,
+                                    &thread_id,
+                                    started_at,
+                                    steps,
+                                    &mut async_writes,
+                                    route_err,
+                                )
+                                .await;
+                        }
+                    };
                 let mut pending = successors;
-                pending.extend(active[failed_index..].iter().cloned());
+                pending.extend(
+                    active
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !completed_indices.contains(index))
+                        .map(|(_, activation)| activation.clone()),
+                );
                 // Settle any in-flight Async background writes before the
                 // failure-boundary persist so earlier boundaries are durable
                 // when the run aborts. Like the persist error below, a
@@ -306,7 +310,7 @@ where
                         &run_id,
                         &state,
                         &pending,
-                        &active[..failed_index],
+                        &done,
                         &barrier_arrivals,
                         parent_checkpoint.clone(),
                         steps,

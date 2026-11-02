@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// A `RunId` is the unit of recursion in the graph runtime: when a run spawns a
 /// sub-agent or sub-graph, the child gets its own `RunId` while
-/// [`crate::harness::events::HarnessRunStatus`] records that child's
+/// `crate::harness::events::HarnessRunStatus` records that child's
 /// `parent_run_id` (the spawning run) and `root_run_id` (the top-level
 /// ancestor), so the full recursion tree is reconstructable from these ids.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub struct TaskId(pub(crate) String);
 
 /// Identifies a single interactive `.ragsh` REPL session.
 ///
-/// A `SessionId` names one [`crate::repl`] session: a persistent namespace and
+/// A `SessionId` names one `crate::repl` session: a persistent namespace and
 /// capability boundary that a (possibly model-driven) orchestrator drives one
 /// cell at a time. Pairing it with a [`RunId`] lets REPL events and the child
 /// model/tool/graph runs a session spawns be correlated back to the session

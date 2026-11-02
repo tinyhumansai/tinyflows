@@ -252,7 +252,7 @@ async fn failed_actor_persists_graph_observations_and_settles_executed_dedup_nod
     let namespace = format!("flow:{flow_id}");
     assert_eq!(
         catalog_docs
-            .kv_get(&namespace, "dedup:failure-dedup:tentative")
+            .kv_get(&namespace, "dedup:failure-dedup:tentative:failed-run-id")
             .await
             .unwrap(),
         None

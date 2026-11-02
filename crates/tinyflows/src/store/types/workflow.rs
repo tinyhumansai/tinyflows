@@ -54,7 +54,7 @@ fn default_enabled() -> bool {
 /// Stored as free-form strings rather than parsed types because a workflow may
 /// legitimately name a custom harness preset only some hosts expose. The
 /// meaning of these strings — and the refusal of one that cannot be a harness —
-/// lives in [`crate::flow_engine::harness_choice`].
+/// lives in `crate::flow_engine::harness_choice`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowDefaults {

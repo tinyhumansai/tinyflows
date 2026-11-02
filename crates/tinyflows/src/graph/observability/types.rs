@@ -155,7 +155,7 @@ pub struct GraphLatencyMetrics {
 /// Health rollup for a single graph node across one run.
 ///
 /// A graph node is the graph's unit of work — frequently a delegated agent or
-/// tool call (see [`crate::graph::SubAgentNode`]) — so per-node success/failure
+/// tool call (see `crate::graph::SubAgentNode`) — so per-node success/failure
 /// counts double as **tool health** telemetry for the graph. Counts are derived
 /// from durable [`GraphObservation`]s by correlating `node.started` with
 /// `node.completed` / `node.failed`.
@@ -350,7 +350,7 @@ pub(crate) struct StatusStoreState {
 /// The sink is configured with the emitting run's lineage and checkpoint
 /// coordinates; each received event is stamped with a monotonically increasing
 /// `offset`, the latest observed `step`, and the configured `namespace`. The
-/// observation is then handed to a background [`AppendWorker`] that persists it
+/// observation is then handed to a background `AppendWorker` that persists it
 /// off the executor thread (best-effort — a full bounded queue drops rather
 /// than stalling the run, and append errors are reported, not propagated).
 /// [`crate::graph::stream::GraphEventSink::flush`] blocks until the durable log

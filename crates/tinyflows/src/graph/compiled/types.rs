@@ -285,7 +285,7 @@ pub struct GraphInput {
     /// Target node for this input. `__start__` is accepted as the virtual entry
     /// target and is resolved to the graph's compiled entry node at run time.
     pub node: NodeId,
-    /// Optional per-input payload delivered as [`NodeContext::send_arg`].
+    /// Optional per-input payload delivered as `NodeContext::send_arg`.
     pub payload: Option<serde_json::Value>,
 }
 

@@ -1,7 +1,7 @@
 //! Topologies this engine's fan-in lowering cannot execute safely.
 //!
-//! [`validate`](crate::validate) answers "is this a well-formed graph" and
-//! [`gates`](crate::gates) answers "are its bindings resolvable". Neither
+//! [`validate`] answers "is this a well-formed graph" and
+//! [`gates`] answers "are its bindings resolvable". Neither
 //! answers the third question, which is about the engine rather than the graph:
 //! *can this implementation actually run it?*
 //!
@@ -26,7 +26,7 @@
 //!
 //! An inline `sub_workflow` is part of the graph and is descended into, to the
 //! same depth the run will use — one budget shared across the whole call chain,
-//! which is why [`errors_with_max_depth`] exists at all. A `sub_workflow` that
+//! which is why `errors_with_max_depth` exists at all. A `sub_workflow` that
 //! names a *saved* workflow cannot be resolved here, because this crate has no
 //! catalog; a host that has one walks those itself and passes the remaining
 //! depth in.

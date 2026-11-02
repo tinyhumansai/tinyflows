@@ -1,4 +1,4 @@
-//! [`WorkflowStore`] on a `tinystoragedrivers` document handle.
+//! `WorkflowStore` on a `tinystoragedrivers` document handle.
 //!
 //! [`DriverWorkflowStore`] is the storage behind the engine's authoring layer
 //! (`tinyflows::store`): saved workflow definitions, their superseded
@@ -11,15 +11,15 @@
 //!
 //! | Collection | Document id | Holds |
 //! | --- | --- | --- |
-//! | `flows.workflows` | `Key::of([workflow id])` | one [`WorkflowRecord`] |
+//! | `flows.workflows` | `Key::of([workflow id])` | one `WorkflowRecord` |
 //! | `flows.workflow_revisions` | revision id | one superseded copy of a workflow |
-//! | `flows.workflow_runs` | `Key::of([run id])` | one [`RunRecord`] |
+//! | `flows.workflow_runs` | `Key::of([run id])` | one `RunRecord` |
 //! | `flows.workflow_notes` | `Key::of([workflow id])` | the workflow's whole journal (at most [`MAX_NOTES`]) |
-//! | `flows.workflow_proposals` | `Key::of([proposal id])` | one [`WorkflowProposal`] |
+//! | `flows.workflow_proposals` | `Key::of([proposal id])` | one `WorkflowProposal` |
 //! | `flows.workflow_quarantine` | ULID | a journal that could not be parsed, set aside |
 //!
 //! The names carry `workflow_` because the records are not the catalog's: a
-//! [`WorkflowRecord`] is not a `Flow` (`flows.definitions`), nor a [`RunRecord`]
+//! `WorkflowRecord` is not a `Flow` (`flows.definitions`), nor a `RunRecord`
 //! a catalog run (`flows.runs`). The decision lock is not a collection of this
 //! owner: it is a `tsd.leases` lease (owner `flows`, key
 //! `workflow_decision/<workflow id>`).
@@ -46,12 +46,12 @@
 //!   then swaps the definition, and takes the revision back when the swap loses
 //!   (then retries). A crash between the two leaves one extra revision, never
 //!   a lost one;
-//! - [`WorkflowStore::save_if_fingerprint`] and
-//!   [`WorkflowStore::save_if_record_fingerprint`] compare the fingerprint on
+//! - `WorkflowStore::save_if_fingerprint` and
+//!   `WorkflowStore::save_if_record_fingerprint` compare the fingerprint on
 //!   the document they swap, so two processes (or store instances) racing the
 //!   same edit cannot both win;
 //! - the journal is one document per workflow, updated by compare-and-swap;
-//! - [`WorkflowStore::lock_proposal_decision`] is a `tsd.leases` lease, so it
+//! - `WorkflowStore::lock_proposal_decision` is a `tsd.leases` lease, so it
 //!   holds across processes sharing one database. The lease lasts
 //!   [`LOCK_LEASE`]; a decision that takes longer than that loses its
 //!   exclusion.
@@ -162,7 +162,7 @@ impl DriverWorkflowStore {
     }
 
     /// The same store, naming itself `label` in
-    /// [`WorkflowStore::proposal_decision_scope`]. Instances over the same
+    /// `WorkflowStore::proposal_decision_scope`. Instances over the same
     /// storage should share a label; unrelated catalogs in one process should
     /// not.
     #[must_use]

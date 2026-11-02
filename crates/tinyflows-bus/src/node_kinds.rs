@@ -2,10 +2,10 @@
 //! schema.
 //!
 //! A node's `config` is free-form
-//! [`serde_json::Value`](serde_json::Value): each executor reads the keys it
+//! [`serde_json::Value`]: each executor reads the keys it
 //! needs at run time, so the per-kind config *shape* was, until now, documented
 //! only in prose in downstream hosts. This module makes that shape a typed,
-//! host-agnostic **source of truth** — one [`NodeKindContract`] per node kind — so a host (or an agent authoring a
+//! host-agnostic **source of truth** — one `NodeKindContract` per node kind — so a host (or an agent authoring a
 //! graph) can enumerate the kinds and fetch one kind's config fields, ports, an
 //! example node, and the authoring gotchas without reading a prompt.
 //!
@@ -107,7 +107,7 @@ impl ConfigField {
 }
 
 /// The input/output ports a node exposes. Routing is keyed exclusively on the
-/// source node's `from_port` (see [`crate::validate`]'s condition-routing
+/// source node's `from_port` (see `crate::validate`'s condition-routing
 /// check), so the output-port list is what an author wires branch edges onto.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PortSpec {

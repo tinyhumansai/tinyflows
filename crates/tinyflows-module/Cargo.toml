@@ -14,8 +14,8 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 tinyflows-drivers = { path = "../tinyflows-drivers", default-features = false, features = ["catalog", "engine", "schedule"] }
 tinyflows-catalog = { path = "../tinyflows-catalog" }
-tinystoragedrivers-api = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
-tinystoragedrivers-types = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
+tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
 tinyflows-storage = { path = "../tinyflows-storage" }
 tinyflows-schedule = { path = "../tinyflows-schedule" }
 anyhow = "1"
@@ -28,9 +28,9 @@ tracing.workspace = true
 tinyflows = { workspace = true, features = ["mock"] }
 tinyflows-bus = { path = "../tinyflows-bus" }
 tinyflows-copilot = { path = "../tinyflows-copilot" }
-tinytools = { git = "https://github.com/senamakel/tinytools", rev = "643df90ba25f93187249fa99f6789f9aa7f8bbc8" }
-tinybus = { version = ">=0.3.12, <0.4", default-features = false, features = ["macros", "modules"] }
-tinybus-module = ">=0.3.12, <0.4"
+tinytools = { git = "https://github.com/tinyhumansai/tinytools", rev = "41cc80ac9acf37a14f20be94f60ee552749f1540" }
+tinybus = { version = ">=0.3.6, <0.4", default-features = false, features = ["macros", "modules"] }
+tinybus-module = ">=0.3.6, <0.4"
 serde_json.workspace = true
 
 [features]
@@ -42,4 +42,4 @@ static-link = []
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
-tinystoragedrivers-testkit = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
+tinystoragedrivers-testkit = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }

@@ -17,7 +17,7 @@ use crate::nodes::{ExecutionMode, NodeContext, NodeExecutor, NodeOutput, executi
 /// single time against the first item. With no input, either mode invokes once.
 ///
 /// Output is wrapped in the stable `{ json, text, raw }`
-/// [envelope](crate::nodes::integration::envelope), matching the `agent` node so
+/// envelope, matching the `agent` node so
 /// a downstream `=item.json.<field>` binding is consistent across capabilities.
 #[derive(Debug, Default, Clone)]
 pub struct ToolCallNode;

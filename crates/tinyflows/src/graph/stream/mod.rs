@@ -9,7 +9,7 @@
 //! real time; because every event is tagged with its node and step, the streams
 //! of nested runs can be merged and attributed back up the run tree.
 //!
-//! See [`types`] for the event and stream-mode definitions. The executor emits
+//! See `types` for the event and stream-mode definitions. The executor emits
 //! [`GraphEvent`]s into an optional [`GraphEventSink`]; callers can plug in a
 //! [`NoopSink`], a test-friendly [`CollectingSink`], or any custom transport.
 

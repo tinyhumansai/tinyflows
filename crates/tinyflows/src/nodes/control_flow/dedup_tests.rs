@@ -18,11 +18,14 @@ fn dedup_node(id: &str, config: Value) -> Node {
 }
 
 async fn run_dedup(caps: &Capabilities, node: &Node, input: &[Item]) -> NodeOutput {
-    let run = Value::Null;
+    run_dedup_in(caps, node, input, &Value::Null).await
+}
+
+async fn run_dedup_in(caps: &Capabilities, node: &Node, input: &[Item], run: &Value) -> NodeOutput {
     let ctx = NodeContext {
         node,
         input,
-        run: &run,
+        run,
         nodes: &Value::Null,
         caps,
         agents: &[],
@@ -63,7 +66,7 @@ async fn unseen_keys_pass_through_and_are_staged_tentative() {
 
     let tentative = caps
         .state
-        .load(&tentative_key("dd"))
+        .load(&tentative_key("dd", None))
         .await
         .unwrap()
         .expect("tentative written");
@@ -121,7 +124,7 @@ async fn null_or_empty_key_fails_open_and_is_not_recorded() {
     assert_eq!(out.items.len(), 2, "both fail-open items pass through");
     assert!(
         caps.state
-            .load(&tentative_key("dd"))
+            .load(&tentative_key("dd", None))
             .await
             .unwrap()
             .is_none(),
@@ -155,14 +158,14 @@ async fn two_dedup_nodes_keep_separate_committed_and_tentative_sets() {
 
     let dd2_tentative = caps
         .state
-        .load(&tentative_key("dd2"))
+        .load(&tentative_key("dd2", None))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(dd2_tentative, json!(["shared"]));
     assert!(
         caps.state
-            .load(&tentative_key("dd1"))
+            .load(&tentative_key("dd1", None))
             .await
             .unwrap()
             .is_none(),
@@ -190,7 +193,7 @@ async fn same_key_twice_in_one_run_passes_once_only() {
 
     let tentative = caps
         .state
-        .load(&tentative_key("dd"))
+        .load(&tentative_key("dd", None))
         .await
         .unwrap()
         .unwrap();
@@ -212,7 +215,7 @@ async fn a_key_already_present_in_stale_tentative_is_preserved_across_runs() {
     // before this run is a host-side concern this node has no opinion on.)
     let caps = mock_capabilities();
     caps.state
-        .store(&tentative_key("dd"), json!(["stale"]))
+        .store(&tentative_key("dd", None), json!(["stale"]))
         .await
         .unwrap();
 
@@ -222,7 +225,7 @@ async fn a_key_already_present_in_stale_tentative_is_preserved_across_runs() {
 
     let tentative = caps
         .state
-        .load(&tentative_key("dd"))
+        .load(&tentative_key("dd", None))
         .await
         .unwrap()
         .unwrap();
@@ -254,7 +257,7 @@ async fn empty_input_is_a_no_op_and_writes_nothing() {
     assert!(out.items.is_empty());
     assert!(
         caps.state
-            .load(&tentative_key("dd"))
+            .load(&tentative_key("dd", None))
             .await
             .unwrap()
             .is_none()
@@ -272,9 +275,51 @@ async fn missing_key_config_fails_open_for_every_item() {
     assert_eq!(out.items.len(), 1);
     assert!(
         caps.state
-            .load(&tentative_key("dd"))
+            .load(&tentative_key("dd", None))
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_seeded_run_id_scopes_the_tentative_set_to_that_run() {
+    let caps = mock_capabilities();
+    let node = dedup_node("dd", json!({ "key": "=item.id" }));
+
+    run_dedup_in(
+        &caps,
+        &node,
+        &[Item::new(json!({ "id": "a" }))],
+        &json!({ "id": "r1" }),
+    )
+    .await;
+    run_dedup_in(
+        &caps,
+        &node,
+        &[Item::new(json!({ "id": "b" }))],
+        &json!({ "id": "r2" }),
+    )
+    .await;
+
+    assert_eq!(
+        caps.state
+            .load(&tentative_key("dd", Some("r1")))
+            .await
+            .unwrap(),
+        Some(json!(["a"]))
+    );
+    assert_eq!(
+        caps.state
+            .load(&tentative_key("dd", Some("r2")))
+            .await
+            .unwrap(),
+        Some(json!(["b"])),
+        "an overlapping run stages its own set"
+    );
+    assert_eq!(
+        caps.state.load(&tentative_key("dd", None)).await.unwrap(),
+        None,
+        "the shared set is untouched when the host seeds a run id"
     );
 }

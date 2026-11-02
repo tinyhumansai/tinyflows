@@ -113,13 +113,13 @@ fn last_paragraph(text: &str) -> Option<String> {
 /// of the same rule.
 ///
 /// Codex review follow-up: a bare `?` outside code isn't necessarily a real
-/// question — a status line like "Checked https://api.example/search?q=foo
+/// question — a status line like "Checked <https://api.example/search?q=foo>
 /// and got 403." has one mid-token, in a URL query string. Counting that
 /// would flip `text_looks_like_question` to `true` and skip
 /// the host's fallback entirely, leaving the user with an
 /// unanswerable status note — exactly the failure mode this backstop exists
 /// to prevent. So each candidate `?` is additionally required to be
-/// sentence-terminal via [`is_sentence_terminal_question_mark`].
+/// sentence-terminal via `is_sentence_terminal_question_mark`.
 #[must_use]
 pub fn question_mark_outside_code(text: &str) -> bool {
     let chars: Vec<char> = text.chars().collect();

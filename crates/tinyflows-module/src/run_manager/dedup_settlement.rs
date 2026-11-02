@@ -93,7 +93,7 @@ impl DedupSettlementScope {
         match tokio::task::spawn_blocking(move || {
             let state = FlowStateDocuments::new(catalog, namespace);
             for node_id in node_ids {
-                let result = dedup_settle::settle(&state, &node_id, success);
+                let result = dedup_settle::settle(&state, &node_id, Some(run_id.as_str()), success);
                 tracing::debug!(run_id, node_id, ?result, "settled dedup node state");
             }
         })

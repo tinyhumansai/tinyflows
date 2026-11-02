@@ -67,6 +67,7 @@ pub async fn run_with_observer(
 
 /// Observe a preflight child with the traversal's inherited depth counters.
 /// The overlay takes precedence over any cap on the child's own trigger.
+#[cfg(any(test, feature = "mock"))]
 pub(crate) async fn run_preflight_with_observer(
     workflow: &CompiledWorkflow,
     input: RunInput,

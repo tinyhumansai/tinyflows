@@ -25,6 +25,9 @@ fn env_builtin_is_not_reachable() {
     assert_eq!(evaluate(&json!("=env"), &scope), Value::Null);
     assert_eq!(evaluate(&json!("=env.PATH"), &scope), Value::Null);
     assert_eq!(evaluate(&json!("=$ENV.PATH"), &scope), Value::Null);
+    // These two reach jq itself; the three above stop at the path resolver.
+    assert_eq!(evaluate(&json!("=env | .PATH"), &scope), Value::Null);
+    assert_eq!(evaluate(&json!("=(env|type)"), &scope), Value::Null);
     // A pure jq builtin still works; only supplementary native builtins
     // are omitted.
     assert_eq!(evaluate(&json!("=[1,2,3]|length"), &scope), json!(3));

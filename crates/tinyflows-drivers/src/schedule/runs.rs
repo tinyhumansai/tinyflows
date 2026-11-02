@@ -380,3 +380,7 @@ mod tests;
 #[cfg(test)]
 #[path = "runs_sweep_tests.rs"]
 mod sweep_tests;
+
+#[cfg(test)]
+#[path = "migrated_job_identity_tests.rs"]
+mod migrated_job_identity_tests;

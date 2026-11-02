@@ -181,16 +181,48 @@ pub(super) fn validate_loops(graph: &WorkflowGraph, errors: &mut Vec<ValidationE
         })
     });
     if !has_run_level_bound {
+        let is_loop = |id: &str| {
+            graph
+                .nodes
+                .iter()
+                .any(|n| n.id == id && n.kind == NodeKind::Loop)
+        };
         for (from, to) in &loop_edges {
-            let bounded = nodes_on_cycle(graph, to, from).into_iter().any(|id| {
-                graph
-                    .nodes
-                    .iter()
-                    .any(|n| n.id == id && n.kind == NodeKind::Loop)
-            });
+            // A `loop` merely *on* the cycle is not enough: a side path through
+            // it leaves a direct `to -> from` path that never counts a pass.
+            // The cycle is bounded only when the loop sits on every way round.
+            let bounded = is_loop(to) || is_loop(from) || !path_avoiding(graph, to, from, is_loop);
             if !bounded {
                 errors.push(ValidationError::IllegalCycle(to.clone()));
             }
         }
     }
+}
+
+/// Whether `target` is reachable from `start` without passing through a node
+/// `skip` matches. `start` and `target` themselves are never skipped.
+fn path_avoiding(
+    graph: &WorkflowGraph,
+    start: &str,
+    target: &str,
+    skip: impl Fn(&str) -> bool,
+) -> bool {
+    let mut seen = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(node) = stack.pop() {
+        if node == target {
+            return true;
+        }
+        if !seen.insert(node) || (node != start && skip(node)) {
+            continue;
+        }
+        stack.extend(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.from_node == node)
+                .map(|edge| edge.to_node.as_str()),
+        );
+    }
+    false
 }

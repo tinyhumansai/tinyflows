@@ -8,7 +8,7 @@
 //! run for human-in-the-loop input, which the durable executor checkpoints and
 //! later resumes.
 //!
-//! See [`types`] for the definitions.
+//! See `types` for the definitions.
 
 mod types;
 

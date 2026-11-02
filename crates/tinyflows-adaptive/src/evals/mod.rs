@@ -12,16 +12,16 @@
 //! six" is compatible with the ledger being decorative. What answers it is a
 //! **family** of related tasks, run twice in the same order, where the only
 //! difference between the runs is whether anything survives between episodes —
-//! and the number to read is the [`Series::slope`]: attempts-to-success
+//! and the number to read is the `Series::slope`: attempts-to-success
 //! falling as the family progresses.
 //!
 //! Two pieces, because that experiment needs two things this crate did not
 //! have:
 //!
-//! * [`slope`] — the measurement. `Episode`, two arms, the slope, and a
+//! * `slope` — the measurement. `Episode`, two arms, the slope, and a
 //!   comparison that refuses to call a bend a win unless the arm also
 //!   converges.
-//! * [`arms`] — the control. A loop with learning off is not a loop with its
+//! * `arms` — the control. A loop with learning off is not a loop with its
 //!   ledger removed; [`Forgetful`] blanks the cross-episode reads and leaves
 //!   the within-episode ones, which is the difference under test.
 //!

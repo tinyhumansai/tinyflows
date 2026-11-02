@@ -220,7 +220,7 @@ impl Tool for ListFlowsTool {
 // get_flow — read-only: a saved flow's graph
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `get_flow`: read-only fetch of a saved flow's full [`WorkflowGraph`] by id,
+/// `get_flow`: read-only fetch of a saved flow's full `WorkflowGraph` by id,
 /// so the builder can clone or extend an existing automation.
 pub struct GetFlowTool {
     flows: Arc<dyn FlowStore>,

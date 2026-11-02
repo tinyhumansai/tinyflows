@@ -9,15 +9,15 @@
 //!
 //! This module is that, in four layers, each usable on its own:
 //!
-//! - [`mocks`] — programmable capability doubles with a call log. Say what a
+//! - `mocks` — programmable capability doubles with a call log. Say what a
 //!   tool returns, make the third call fail, and ask afterwards exactly what was
 //!   sent where.
-//! - [`trace`] — a structured record of a run: every node's input and output,
+//! - `trace` — a structured record of a run: every node's input and output,
 //!   every `=`-binding with the value it resolved to, every capability call, and
 //!   the diagnosis of what a green run is hiding.
-//! - [`harness`] — the ergonomic front door for a test: build, mock, run,
+//! - `harness` — the ergonomic front door for a test: build, mock, run,
 //!   assert.
-//! - [`debug`] — breakpoints. Pause a run before or after a node, inspect what
+//! - `debug` — breakpoints. Pause a run before or after a node, inspect what
 //!   it was about to receive, override it, and step on.
 //!
 //! Everything is built on [`crate::interception`], the engine's one
@@ -27,7 +27,7 @@
 //! # For agents, not only for tests
 //!
 //! Workflows here are written by agents as often as by people, and an agent
-//! that cannot debug what it wrote can only guess at why it failed. [`tools`]
+//! that cannot debug what it wrote can only guess at why it failed. `tools`
 //! exposes every capability above as a named tool with a JSON Schema and a
 //! JSON-in/JSON-out handler, so a host can hand the whole of this module to an
 //! agent without writing an adapter. tinyflows still talks to no model itself:

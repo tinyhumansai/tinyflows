@@ -11,7 +11,7 @@
 //!   `checkpoint_id`, subgraph `namespace`, `step`, `offset`, and timestamp.
 //! - [`GraphEventJournal`] — an append-only, offset-addressable journal of
 //!   observations, with an [`InMemoryGraphEventJournal`] and a store-backed
-//!   [`StoreGraphEventJournal`] (stream key = run id).
+//!   `StoreGraphEventJournal` (stream key = run id).
 //! - [`GraphStatusStore`] — a compact "what is running now?" surface over
 //!   [`crate::graph::GraphRunStatus`], with an [`InMemoryGraphStatusStore`].
 //! - [`JournalGraphSink`] — a [`GraphEventSink`] that wraps each emitted event
@@ -32,7 +32,7 @@
 //!
 //! The journaling sink bridges the synchronous [`GraphEventSink::emit`] hook to
 //! the async journal API through a background drain (an
-//! [`AppendWorker`](crate::harness::observability)): `emit` never blocks the
+//! `AppendWorker`): `emit` never blocks the
 //! executor on I/O and persistence is best-effort (a full bounded queue drops
 //! rather than stalls; backend errors are reported, not propagated). The
 //! executor calls [`GraphEventSink::flush`] after the terminal run event so a

@@ -239,3 +239,41 @@ fn a_merge_outside_the_cycle_is_accepted() {
     };
     assert_eq!(validate_all(&graph), Vec::new());
 }
+
+/// A `loop` node that hangs off the cycle on a side path does not bound it: the
+/// direct `b -> c -> b` cycle never passes through the loop, so it spins with no
+/// pass count. Refuse it like any other unbounded cycle.
+#[test]
+fn loop_on_side_path_does_not_bound_a_bypass_cycle() {
+    let graph = WorkflowGraph {
+        nodes: vec![
+            node("t", NodeKind::Trigger),
+            node("b", NodeKind::OutputParser),
+            node("c", NodeKind::OutputParser),
+            node_cfg(
+                "l",
+                NodeKind::Loop,
+                serde_json::json!({ "max_iterations": 2 }),
+            ),
+            node("work", NodeKind::OutputParser),
+        ],
+        edges: vec![
+            edge_on("t", "main", "b"),
+            edge_on("b", "main", "c"),
+            edge_on("c", "main", "b"),
+            edge_on("b", "main", "l"),
+            edge_on("l", "body", "work"),
+            edge_on("work", "main", "l"),
+            edge_on("l", "done", "c"),
+        ],
+        ..Default::default()
+    };
+
+    let errors = validate_all(&graph);
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error, ValidationError::IllegalCycle(_))),
+        "the b <-> c cycle bypasses the loop and must be refused: {errors:?}"
+    );
+}

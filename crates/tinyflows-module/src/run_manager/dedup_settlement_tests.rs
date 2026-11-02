@@ -90,7 +90,7 @@ async fn real_catalog_settlements_preserve_sequential_union_and_failure_release(
         .unwrap();
 
     state
-        .store("dedup:dedup:tentative", serde_json::json!(["a"]))
+        .store("dedup:dedup:tentative:run-a", serde_json::json!(["a"]))
         .await
         .unwrap();
     let first = DedupSettlementScope::acquire(&storage, &context, &graph, "run-a").await;
@@ -98,7 +98,7 @@ async fn real_catalog_settlements_preserve_sequential_union_and_failure_release(
     drop(first);
 
     state
-        .store("dedup:dedup:tentative", serde_json::json!(["b"]))
+        .store("dedup:dedup:tentative:run-b", serde_json::json!(["b"]))
         .await
         .unwrap();
     let second = DedupSettlementScope::acquire(&storage, &context, &graph, "run-b").await;
@@ -111,10 +111,16 @@ async fn real_catalog_settlements_preserve_sequential_union_and_failure_release(
         .unwrap()
         .expect("successful module settlements commit the key set");
     assert_eq!(committed, serde_json::json!(["a", "b"]));
-    assert_eq!(state.load("dedup:dedup:tentative").await.unwrap(), None);
+    assert_eq!(
+        state.load("dedup:dedup:tentative:run-b").await.unwrap(),
+        None
+    );
 
     state
-        .store("dedup:dedup:tentative", serde_json::json!(["retry-me"]))
+        .store(
+            "dedup:dedup:tentative:run-failed",
+            serde_json::json!(["retry-me"]),
+        )
         .await
         .unwrap();
     let failed = DedupSettlementScope::acquire(&storage, &context, &graph, "run-failed").await;
@@ -126,5 +132,11 @@ async fn real_catalog_settlements_preserve_sequential_union_and_failure_release(
         Some(serde_json::json!(["a", "b"])),
         "a failed actor releases tentative keys without erasing a prior winner"
     );
-    assert_eq!(state.load("dedup:dedup:tentative").await.unwrap(), None);
+    assert_eq!(
+        state
+            .load("dedup:dedup:tentative:run-failed")
+            .await
+            .unwrap(),
+        None
+    );
 }

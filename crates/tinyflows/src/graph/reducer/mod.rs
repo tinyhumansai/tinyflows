@@ -6,7 +6,7 @@
 //! updates back into one committed state through a reducer, in deterministic
 //! active-set order, so merged state is reproducible regardless of completion
 //! order. This module supplies the built-in channel/state reducers and the
-//! closure-backed escape hatches; see [`types`] for the trait and marker
+//! closure-backed escape hatches; see `types` for the trait and marker
 //! definitions.
 
 mod types;

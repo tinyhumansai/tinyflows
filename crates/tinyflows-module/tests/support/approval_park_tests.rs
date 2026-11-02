@@ -225,7 +225,7 @@ async fn compiled_module_guards_resume_ownership_pending_gate_and_graph_pin() {
     let namespace = format!("flow:{flow_id}");
     assert_eq!(
         documents
-            .kv_get(&namespace, "dedup:dedup:tentative")
+            .kv_get(&namespace, "dedup:dedup:tentative:guarded-run")
             .await
             .unwrap(),
         None
@@ -418,7 +418,7 @@ async fn pending_approval_is_parked_without_terminal_event_or_dedup_settlement()
     let namespace = format!("flow:{flow_id}");
     assert_eq!(
         documents
-            .kv_get(&namespace, "dedup:dedup:tentative")
+            .kv_get(&namespace, "dedup:dedup:tentative:parked-run")
             .await
             .unwrap(),
         Some(json!(["parked-item"]))
@@ -455,7 +455,7 @@ async fn pending_approval_is_parked_without_terminal_event_or_dedup_settlement()
     assert_eq!(terminal.events.last().unwrap().data["status"], "cancelled");
     assert_eq!(
         documents
-            .kv_get(&namespace, "dedup:dedup:tentative")
+            .kv_get(&namespace, "dedup:dedup:tentative:parked-run")
             .await
             .unwrap(),
         None

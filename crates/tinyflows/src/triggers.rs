@@ -3,9 +3,9 @@
 //!
 //! A flow whose trigger is `webhook`, `form`, `chat_message`, ... is accepted
 //! and saved, but a host that has not wired that dispatch path never runs it.
-//! [`graph_trigger_warnings`] turns that silence into a non-fatal warning.
-//! The set of kinds that fire is [`trigger_kind_fires`]; a host that wires more
-//! kinds filters the warning itself with [`graph_trigger_warnings_for`].
+//! `graph_trigger_warnings` turns that silence into a non-fatal warning.
+//! The set of kinds that fire is `trigger_kind_fires`; a host that wires more
+//! kinds filters the warning itself with `graph_trigger_warnings_for`.
 
 use crate::model::{TriggerKind, WorkflowGraph};
 

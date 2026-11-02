@@ -6,8 +6,8 @@
 //! and the wrong one for a debugger, which has to be able to say "stop here",
 //! "use this value instead", and "pretend that failed".
 //!
-//! So this is the other half: a [`StepInterceptor`] is consulted before and
-//! after every non-trigger node activation, and the [`StepAction`] it returns is
+//! So this is the other half: a `StepInterceptor` is consulted before and
+//! after every non-trigger node activation, and the `StepAction` it returns is
 //! obeyed. It is what [`crate::testkit`] is built on, and a host may implement
 //! it directly for a fault-injection harness of its own.
 //!
@@ -29,7 +29,7 @@
 //! detach, and drop for exactly this reason.
 //!
 //! **Nothing here costs anything when unused.** The engine holds an
-//! `Option<Arc<dyn StepInterceptor>>` and builds a [`StepFrame`] only when it is
+//! `Option<Arc<dyn StepInterceptor>>` and builds a `StepFrame` only when it is
 //! `Some`, so a run with no interceptor pays two `Option` checks per activation
 //! and constructs nothing.
 //!
@@ -130,7 +130,7 @@ pub enum StepAction {
     /// genuine failure instead.
     Fail {
         /// The failure message, reported as an
-        /// [`EngineError::Capability`](crate::error::EngineError::Capability).
+        /// [`EngineError::Capability`].
         message: String,
     },
     /// Raise a real graph interrupt here, checkpointing the run.

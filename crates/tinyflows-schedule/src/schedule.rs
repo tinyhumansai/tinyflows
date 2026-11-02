@@ -1,7 +1,9 @@
 use crate::posix_weekday::posix_to_crate_weekdays;
 use crate::types::{ActiveHours, Schedule};
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, NaiveTime, Timelike, Utc};
+use chrono::{
+    DateTime, Duration as ChronoDuration, LocalResult, NaiveTime, TimeZone, Timelike, Utc,
+};
 use cron::Schedule as CronExprSchedule;
 use std::str::FromStr;
 
@@ -101,8 +103,8 @@ pub fn validate_agent_schedule(schedule: &Schedule, now: DateTime<Utc>) -> Resul
 /// `*/7 * * * *` fires at :56 and then at :00, four minutes apart, and is
 /// reported as such. Ties keep the earliest pair.
 ///
-/// The walk is bounded ([`RUN_GAP_SCAN_OCCURRENCES`] runs, one shared
-/// [`ACTIVE_WINDOW_CANDIDATE_LIMIT`] budget), so a sparse or window-restricted
+/// The walk is bounded (`RUN_GAP_SCAN_OCCURRENCES` runs, one shared
+/// `ACTIVE_WINDOW_CANDIDATE_LIMIT` budget), so a sparse or window-restricted
 /// expression stays cheap; if the budget runs out mid-walk, the closest pair
 /// seen so far is still reported. An expression that cannot be parsed, or that
 /// has no second occurrence, is not evidence of anything and yields `None`;
@@ -209,6 +211,42 @@ impl<'a> CronPlan<'a> {
     }
 }
 
+/// The first occurrence of `cron` in `timezone` that is strictly after `from`.
+///
+/// The expression is walked in wall-clock time and each match is resolved
+/// here, rather than by `cron`, which yields a repeated fall-back time's
+/// earlier instant even when that is before `from`, and silently drops a time
+/// that a spring-forward gap skips. A skipped time runs at the first valid
+/// instant after the gap instead, so a daily `30 2 * * *` still runs on the
+/// day the clocks go forward.
+fn next_wall_clock_run<Z: TimeZone>(
+    timezone: &Z,
+    cron: &CronExprSchedule,
+    from: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let wall_from = from.with_timezone(timezone).naive_local().and_utc();
+    cron.after(&wall_from).find_map(|wall| {
+        let wall = wall.naive_utc();
+        let instants = match timezone.from_local_datetime(&wall) {
+            LocalResult::Single(at) => vec![at],
+            LocalResult::Ambiguous(earlier, later) => vec![earlier, later],
+            // Gaps are at most a few hours; walk to the first valid minute.
+            LocalResult::None => (1..=180)
+                .find_map(|minutes| {
+                    timezone
+                        .from_local_datetime(&(wall + ChronoDuration::minutes(minutes)))
+                        .earliest()
+                })
+                .into_iter()
+                .collect(),
+        };
+        instants
+            .into_iter()
+            .map(|at| at.with_timezone(&Utc))
+            .find(|at| *at > from)
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ScheduleTimeZone {
     Local,
@@ -231,22 +269,11 @@ impl ScheduleTimeZone {
         from: DateTime<Utc>,
         expr: &str,
     ) -> Result<DateTime<Utc>> {
-        match self {
-            Self::Named(timezone) => {
-                let localized_from = from.with_timezone(&timezone);
-                let next_local = cron.after(&localized_from).next().ok_or_else(|| {
-                    anyhow::anyhow!("No future occurrence for expression: {expr}")
-                })?;
-                Ok(next_local.with_timezone(&Utc))
-            }
-            Self::Local => {
-                let localized_from = from.with_timezone(&chrono::Local);
-                let next_local = cron.after(&localized_from).next().ok_or_else(|| {
-                    anyhow::anyhow!("No future occurrence for expression: {expr}")
-                })?;
-                Ok(next_local.with_timezone(&Utc))
-            }
-        }
+        let next = match self {
+            Self::Named(timezone) => next_wall_clock_run(&timezone, cron, from),
+            Self::Local => next_wall_clock_run(&chrono::Local, cron, from),
+        };
+        next.ok_or_else(|| anyhow::anyhow!("No future occurrence for expression: {expr}"))
     }
 
     fn local_time_of_day(self, time: DateTime<Utc>) -> NaiveTime {

@@ -24,7 +24,7 @@ fn kind_name(kind: &NodeKind) -> String {
 /// sanity (a known value, and an `error` edge when the policy is `route`),
 /// `void` topology (a terminal sink may have no outgoing edge, and must have an
 /// incoming one), declared-input sanity (addressable, unique names; defaults
-/// that match their declared type), and loop legality (see [`validate_loops`] — cycles are
+/// that match their declared type), and loop legality (see `validate_loops` — cycles are
 /// permitted; only the ones that cannot iterate are refused).
 ///
 /// # Errors

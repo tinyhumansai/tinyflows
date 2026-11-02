@@ -16,7 +16,7 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 /// re-validates, emitting the repaired value. A value that still fails — or fails
 /// with `config.auto_fix == false` — surfaces a capability error, which the
 /// engine routes per the node's `on_error` policy (`stop` / `continue` /
-/// `route`). See [`schema`] for the supported schema subset.
+/// `route`). See `schema` for the supported schema subset.
 ///
 /// Config:
 /// - `schema` — the JSON Schema to validate against. Omitted / null ⇒ the node is

@@ -100,7 +100,7 @@ where
     /// human interrupt): after a node handler aborts a checkpointed run — a
     /// transient outage that outlived the node-retry policy, or a hard crash —
     /// the run leaves a resumable checkpoint (see
-    /// [`CompiledGraph::with_node_retry`]). Calling `retry` re-runs exactly what
+    /// `CompiledGraph::with_node_retry`). Calling `retry` re-runs exactly what
     /// did not complete, carrying no resume value. It is shorthand for
     /// [`CompiledGraph::resume`] with an empty [`Command`].
     ///

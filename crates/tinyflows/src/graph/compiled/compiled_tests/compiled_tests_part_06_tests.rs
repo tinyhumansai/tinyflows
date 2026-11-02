@@ -1,4 +1,3 @@
-
 #[tokio::test]
 async fn parallel_partial_progress_is_preserved_on_failure() {
     // A parallel step where one branch succeeds and a lower/higher-index branch
@@ -51,6 +50,119 @@ async fn parallel_partial_progress_is_preserved_on_failure() {
     let resumed = graph.retry("fanout").await.unwrap();
     assert_eq!(resumed.state, 11, "1 (preserved) + 10 (re-run branch)");
     assert_eq!(resumed.status.status, ExecutionStatus::Completed);
+}
+
+#[tokio::test]
+async fn parallel_lower_index_failure_preserves_higher_index_success() {
+    // H10: the failing branch has the LOWER index; the higher-index success
+    // already ran and must not be dropped and re-run on retry.
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let ok_calls = Arc::new(AtomicUsize::new(0));
+    let ok_counter = ok_calls.clone();
+    let graph = GraphBuilder::<i32, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|s: i32, u: i32| Ok(s + u)))
+        .add_node("seed", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::goto(["flaky", "ok"])))
+        })
+        .add_node("ok", move |_s, _c: NodeContext| {
+            let ok_counter = ok_counter.clone();
+            async move {
+                ok_counter.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(NodeResult::Update(1))
+            }
+        })
+        .add_node("flaky", move |_s, _c: NodeContext| {
+            let attempts = attempts.clone();
+            async move {
+                if attempts.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    Err(GraphError::Graph("branch blip".into()))
+                } else {
+                    Ok(NodeResult::Update(10))
+                }
+            }
+        })
+        .set_entry("seed")
+        .mark_command_routing("seed")
+        .set_finish("ok")
+        .set_finish("flaky")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    graph.run_with_thread("fanout-lo", 0).await.unwrap_err();
+    assert_eq!(
+        ok_calls.load(AtomicOrdering::SeqCst),
+        1,
+        "ok ran once concurrently"
+    );
+    let snapshot = graph.get_state("fanout-lo", None).await.unwrap().unwrap();
+    let (snap_values, snap_next) = (snapshot.values, snapshot.next_nodes.clone());
+
+    let resumed = graph.retry("fanout-lo").await.unwrap();
+    assert_eq!(
+        ok_calls.load(AtomicOrdering::SeqCst),
+        1,
+        "ok must not be re-run on retry (snapshot after failure: values={snap_values}, next={snap_next:?}; final state={})",
+        resumed.state
+    );
+    assert_eq!(snap_values, 1, "the higher-index success's +1 is preserved");
+    assert_eq!(resumed.state, 11);
+}
+
+#[tokio::test]
+async fn parallel_failures_on_both_sides_of_a_success_retry_only_the_failures() {
+    let cp = Arc::new(InMemoryCheckpointer::<i32>::new());
+    let ok_calls = Arc::new(AtomicUsize::new(0));
+    let ok_counter = ok_calls.clone();
+    let flaky = |value: i32| {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        move |_s, _c: NodeContext| {
+            let attempts = attempts.clone();
+            async move {
+                if attempts.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    Err(GraphError::Graph("branch blip".into()))
+                } else {
+                    Ok(NodeResult::Update(value))
+                }
+            }
+        }
+    };
+    let graph = GraphBuilder::<i32, i32>::new()
+        .with_parallel(true)
+        .set_reducer(ClosureStateReducer::new(|s: i32, u: i32| Ok(s + u)))
+        .add_node("seed", |_s, _c: NodeContext| async move {
+            Ok(NodeResult::Command(Command::goto(["a", "ok", "z"])))
+        })
+        .add_node("a", flaky(10))
+        .add_node("ok", move |_s, _c: NodeContext| {
+            let ok_counter = ok_counter.clone();
+            async move {
+                ok_counter.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(NodeResult::Update(1))
+            }
+        })
+        .add_node("z", flaky(100))
+        .set_entry("seed")
+        .mark_command_routing("seed")
+        .set_finish("a")
+        .set_finish("ok")
+        .set_finish("z")
+        .compile()
+        .unwrap()
+        .with_checkpointer(cp.clone());
+
+    graph.run_with_thread("fanout-two", 0).await.unwrap_err();
+    let snapshot = graph.get_state("fanout-two", None).await.unwrap().unwrap();
+    assert_eq!(
+        snapshot.values, 1,
+        "the success between the failures is kept"
+    );
+
+    let resumed = graph.retry("fanout-two").await.unwrap();
+    assert_eq!(ok_calls.load(AtomicOrdering::SeqCst), 1, "ok is not re-run");
+    assert_eq!(resumed.state, 111, "both failed branches re-ran on retry");
 }
 
 // ---------------------------------------------------------------------------

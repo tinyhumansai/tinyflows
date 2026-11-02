@@ -238,9 +238,9 @@ where
     /// set is run in chunks of at most that many futures, so at most that many
     /// node handlers are in flight at once. Results are folded in active-set
     /// index order — the reducer is the join/fan-in — so the merged state is
-    /// reproducible regardless of completion order. The lowest-index branch that
-    /// errors or interrupts is the step's terminal outcome; lower-index
-    /// successful branches still contribute their updates.
+    /// reproducible regardless of completion order. Every successful branch
+    /// contributes its updates, whichever side of a failure or interrupt it sits
+    /// on; the lowest-index failure names the step's error.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_active_parallel(
         &self,
@@ -418,15 +418,16 @@ where
                         step,
                         error: error.to_string(),
                     });
-                    // The lowest-index failing branch is terminal: fold the
-                    // lower-index successes (already applied above) and schedule
-                    // their successors plus this branch and the rest for a
-                    // resumable retry.
-                    failure = Some(StepFailure {
-                        failed_index: index,
-                        error,
-                    });
-                    break;
+                    // Every branch has already run, so keep folding: a success
+                    // on either side of this failure must be kept, not re-run
+                    // on retry. The lowest-index failure names the step's error.
+                    if failure.is_none() {
+                        failure = Some(StepFailure {
+                            failed_index: index,
+                            error,
+                        });
+                    }
+                    continue;
                 }
             };
 

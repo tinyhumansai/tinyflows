@@ -511,6 +511,12 @@ A `WorkflowGraph` is `{ name?, nodes: [...], edges: [...] }`.
    `body`; `config.connection_ref` = an `http_cred:<name>` for auth.
 5. **`shell`** — a shell command in `config.source`.
 6. **`code`** — `config.language` (`"javascript"` | `"python"`) + `config.source`.
+   `source` is a function BODY with one variable, `input`: the array of input
+   items, payload under `.json` (`input[0].json.amount`). There is **no `item`
+   variable** (a script using one fails the run). `return` the output: it
+   becomes the `json` of ONE output item. Example:
+   `return { total: input.reduce((sum, i) => sum + i.json.a, 0) };`.
+   Dry runs never execute `source` (see the sandbox table), so check it by hand.
 7. **`condition`** — boolean gate on `config.field`; routes to the **`true`** or
    **`false`** port. Wire both (or the `false` branch dead-ends). If
    `config.field` binds to an `agent` node's output, that field's

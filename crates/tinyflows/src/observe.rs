@@ -3,9 +3,9 @@
 //! The host owns the event bus and the exporter transport; the two mappings
 //! here are generic over engine types and carry no I/O:
 //!
-//! - [`step_status_str`]: a [`StepStatus`] as the stable string persisted on a
+//! - `step_status_str`: a `StepStatus` as the stable string persisted on a
 //!   run step and published in progress events.
-//! - [`to_exporter_observations`]: the engine's durable [`GraphObservation`]s
+//! - `to_exporter_observations`: the engine's durable `GraphObservation`s
 //!   re-typed for a trace exporter that names its own, structurally identical
 //!   observation type.
 

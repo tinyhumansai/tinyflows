@@ -231,7 +231,7 @@ pub struct RunRecord {
     /// The single most useful thing about a run that the graph cannot supply:
     /// two runs of one workflow differ only in what was passed to them, so a
     /// history that omitted this listed the same sentence over and over. Bounded
-    /// per value ([`MAX_INPUT_BYTES`]) rather than whole, because every surface
+    /// per value (`MAX_INPUT_BYTES`) rather than whole, because every surface
     /// that lists runs shows all of a run's inputs at once.
     ///
     /// Empty on a workflow that declares no inputs, and on records written

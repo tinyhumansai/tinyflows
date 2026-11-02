@@ -46,8 +46,9 @@ pub const CALLBACK_INTERFACE: &str = "ai.tinyhumans.tinyflows.ScheduleHost";
 /// send/terminal delivery phases. 6 adds prepared handles and host-owned
 /// lifecycle observation for detached manual workers. 7 adds `TickSchedulerAt`,
 /// a manual pass at a host-supplied calendar instant, so a host can step a
-/// schedule forward instead of waiting for it.
-pub const CONTRACT_VERSION: u32 = 7;
+/// schedule forward instead of waiting for it. 8 adds an optional opaque,
+/// host-validated durable channel-session identity to channel job origins.
+pub const CONTRACT_VERSION: u32 = 8;
 /// Exact advertised scheduler member set.
 pub const METHODS: &[&str] = &[
     members::SCHEDULE_STORE,
@@ -269,6 +270,9 @@ pub const DOCUMENT_INTERFACE: &str = "ai.tinyhumans.tinyflows.ScheduleDocuments"
 /// Exact document callback member used by the module.
 pub const DOCUMENT_METHOD: &str = "Document";
 
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+mod identity_tests;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;

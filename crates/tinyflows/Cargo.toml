@@ -1,6 +1,6 @@
 [package]
 name = "tinyflows"
-version = "0.8.28"
+version = "0.9.4"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"

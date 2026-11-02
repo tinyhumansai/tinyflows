@@ -1,4 +1,4 @@
-use super::ChannelSessionIdentity;
+use super::identity::ChannelSessionIdentity;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -99,9 +99,15 @@ pub enum JobOrigin {
         /// Channel-side thread or topic within the chat.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
-        /// Trusted host-derived identity for the channel session and
-        /// conversation. Absent on legacy channel origins.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Opaque, host-derived durable session binding for this channel
+        /// origin. TinyFlows stores and forwards it without interpreting it;
+        /// the host validates it against trusted context before using it.
+        /// `session_identity` is accepted as a wire alias for compatibility.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            alias = "session_identity"
+        )]
         channel_session: Option<Box<ChannelSessionIdentity>>,
     },
 }
@@ -240,7 +246,7 @@ impl<'de> Deserialize<'de> for Schedule {
 pub mod delivery_mode {
     /// Keep the result in the run history only.
     pub const NONE: &str = "none";
-    /// Announce the result on [`DeliveryConfig::channel`] / [`DeliveryConfig::to`].
+    /// Announce the result on `DeliveryConfig::channel` / `DeliveryConfig::to`.
     pub const ANNOUNCE: &str = "announce";
     /// Surface the result as a proactive message.
     pub const PROACTIVE: &str = "proactive";
@@ -448,7 +454,7 @@ pub struct CronJobPatch {
     pub delete_after_run: Option<bool>,
     /// `Option<Option<String>>` distinguishes "no change" (`None`) from
     /// "clear the agent definition" (`Some(None)`). See
-    /// [`deserialize_double_option`] for why the custom deserializer is required
+    /// `deserialize_double_option` for why the custom deserializer is required
     /// to honor a wire `null` as a clear rather than a silent no-op.
     ///
     /// Omitted when serialized for `None`: the custom deserializer reads a
@@ -475,7 +481,3 @@ pub struct CronJobPatch {
 #[cfg(test)]
 #[path = "types_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "identity_tests.rs"]
-mod identity_tests;

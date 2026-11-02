@@ -111,7 +111,7 @@ pub enum NodeKind {
     /// The policy (`all` / `any` / `first_n` / `quorum` / `timeout_partial`)
     /// is what makes this more than a barrier: a gate can proceed on a quorum
     /// and leave the stragglers, or settle for whatever arrived before its
-    /// deadline. See [`crate::nodes::release`].
+    /// deadline. See `crate::nodes::release`.
     Gate,
     /// Terminal sink: accepts items on `main`, discards them, and activates no
     /// successors. The branch ends here, on purpose.

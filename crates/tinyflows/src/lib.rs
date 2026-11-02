@@ -4,7 +4,7 @@
 //! tinyflows models an automation as a [`model::WorkflowGraph`]: a directed graph
 //! of typed [`model::Node`]s connected by [`model::Edge`]s. A [`compiler::compile`]
 //! step validates the graph and (from stage A1) lowers it onto the
-//! in-crate [`graph`](crate::graph) state-graph runtime, which
+//! in-crate [`graph`] state-graph runtime, which
 //! the [`engine::run`] entry point drives.
 //!
 //! The crate is deliberately **host-agnostic**: anything that touches the outside

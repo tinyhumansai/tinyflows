@@ -280,6 +280,7 @@ use routing::{
 };
 
 mod api;
+#[cfg(any(test, feature = "mock"))]
 pub(crate) use api::run_preflight_with_observer;
 pub(crate) use api::run_sub_workflow;
 pub use api::{

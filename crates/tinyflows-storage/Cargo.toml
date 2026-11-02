@@ -9,13 +9,8 @@ publish = false
 description = "TinyFlows-owned generic document persistence helpers"
 
 [dependencies]
-# These exact git pins bridge the storage security migration while its
-# upstream roll-ups are pending. Relative to the published 2.1.2 crates, the
-# pin includes the unreleased Storage Bus/QueueStore API (tinystoragedrivers
-# PRs #71 and #72) and post-release workspace/lockfile security fixes (#73).
-# The consumed API/type crates are otherwise unchanged from 2.1.2.
-tinystoragedrivers-api = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
-tinystoragedrivers-types = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
+tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -25,6 +20,7 @@ ulid = "1"
 data-encoding = "2"
 
 [dev-dependencies]
-tinystoragedrivers-testkit = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
-tinystoragedrivers-busproxy = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
-tinybus-sdk = { package = "tinybus", git = "https://github.com/senamakel/tinybus", rev = "0de2d283f35cbbff08efad6fbe05537ffb74611b", default-features = false }
+tinystoragedrivers-testkit = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-busproxy = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+# Keep this on the rev tinystoragedrivers pins so `tinybus::Connection` is one type with its busproxy.
+tinybus-sdk = { package = "tinybus", git = "https://github.com/tinyhumansai/tinybus", rev = "6ce06bc674e4f4d718aa51e643ef62c1f372e270", default-features = false }

@@ -40,7 +40,7 @@
 //! 2. **The run's approvals list** (`run.trigger.approvals`) — the
 //!    re-execute resume path, and how `engine::resume` has always delivered an
 //!    approval. Listing this node's id there approves it.
-//! 3. **The host's [`ApprovalProvider`]** — asked once per activation, under
+//! 3. **The host's `ApprovalProvider`** — asked once per activation, under
 //!    the create-or-fetch contract documented on the trait.
 //! 4. **Nobody**, on a host that wired no provider: the node simply waits, so
 //!    it reduces to a pause the host settles through `engine::resume`.

@@ -331,7 +331,7 @@ async fn running_fixture() -> RunningFixture {
     catalog
         .kv_set(
             &namespace,
-            &tinyflows::nodes::control_flow::dedup::tentative_key("dedup"),
+            &tinyflows::nodes::control_flow::dedup::tentative_key("dedup", Some(&run_id)),
             &json!(["dedup-item"]),
         )
         .await
@@ -381,8 +381,26 @@ async fn assert_reconciled(
     run_id: &str,
     storage: &CatalogStorage,
 ) {
-    let row = catalog.get_flow_run(run_id).await.unwrap().unwrap();
-    let events = catalog.flow_run_events_after(run_id, 0, 20).await.unwrap();
+    let mut settled = None;
+    // Cleanup runs on other tasks; wait on a wall-clock deadline, not a fixed number of yields,
+    // so a loaded CI runner cannot exhaust the budget before the work is scheduled.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let row = catalog.get_flow_run(run_id).await.unwrap().unwrap();
+        let events = catalog.flow_run_events_after(run_id, 0, 20).await.unwrap();
+        if row.status == "interrupted"
+            && catalog
+                .flow_run_terminal_event_seq(run_id)
+                .await
+                .unwrap()
+                .is_some()
+        {
+            settled = Some((row, events));
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let (row, events) = settled.expect("actor recovery must finish its durable cleanup");
     assert_eq!(row.status, "interrupted");
     assert!(
         row.error
@@ -409,7 +427,7 @@ async fn assert_reconciled(
         catalog
             .kv_get(
                 &format!("flow:{flow_id}"),
-                &tinyflows::nodes::control_flow::dedup::tentative_key("dedup"),
+                &tinyflows::nodes::control_flow::dedup::tentative_key("dedup", Some(run_id)),
             )
             .await
             .unwrap(),

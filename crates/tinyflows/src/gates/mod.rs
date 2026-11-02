@@ -1,6 +1,6 @@
 //! Checks that run before an authoring write lands.
 //!
-//! [`validate`](crate::validate) answers "would this compile" — no trigger, an
+//! [`validate`] answers "would this compile" — no trigger, an
 //! edge to a node that is not there. That is a real bar and it is not the one
 //! authors keep failing. The graphs that cost people an afternoon *do* compile:
 //! they have a binding that resolves to null at run time, so a step executes
@@ -27,7 +27,7 @@
 //! of those would have to hard-code a host, which this crate does not do. A host
 //! adds its own by implementing
 //! [`HostPolicy::check_graph`](crate::store::HostPolicy::check_graph), whose
-//! default is exactly [`failures`] below.
+//! default is exactly `failures` below.
 
 use crate::bindings::{self, collect_expressions, parse_node_binding, reads_as_prose};
 use crate::model::{NodeKind, WorkflowGraph};

@@ -112,6 +112,11 @@ jobs:
           # of the root manifest) — the released package's own manifest is
           # the one that carries a version to bump.
           perl -0pi -e 's/(\[package\][\s\S]*?\nversion = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/' crates/tinyflows/Cargo.toml
+          # The workspace dependency every sibling crate inherits pins a
+          # version too; left behind, a minor or major bump no longer matches
+          # it and `cargo update --precise` cannot resolve.
+          perl -pi -e 's/^(tinyflows = \{ version = ")[^"]+(", path = "crates\/tinyflows" \})/$1$ENV{NEXT_VERSION}$2/' Cargo.toml
+          grep -qx "tinyflows = { version = \"${NEXT_VERSION}\", path = \"crates/tinyflows\" }" Cargo.toml
           cargo update -p "$CRATE_NAME" --precise "$NEXT_VERSION"
 
       - name: Commit version bump and tag
@@ -121,7 +126,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/tinyflows/Cargo.toml Cargo.lock
+          git add Cargo.toml crates/tinyflows/Cargo.toml Cargo.lock
           git commit -m "Release ${RELEASE_TAG}"
           git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}"
 

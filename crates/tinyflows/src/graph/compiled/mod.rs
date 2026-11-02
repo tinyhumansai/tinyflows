@@ -18,7 +18,7 @@
 //! By default execution is sequential within a step. When the graph is compiled
 //! with [`crate::graph::GraphBuilder::with_parallel`], a step with more than one
 //! active node runs every branch concurrently via
-//! [`futures::future::join_all`], yet the data flow — snapshot reads, boundary
+//! `futures::future::join_all`, yet the data flow — snapshot reads, boundary
 //! reducer application, boundary checkpointing — is identical: each branch reads
 //! the same committed snapshot (its own clone), and results are folded into the
 //! reducer in deterministic active-set order at the step boundary, so the merged
@@ -45,11 +45,11 @@
 //! restartable after a hard one:
 //!
 //! - **Node retry.** With
-//!   [`CompiledGraph::with_node_retry`], a node whose handler fails with a
-//!   [retryable][crate::harness::retry::is_retryable] error (a model or tool
+//!   `CompiledGraph::with_node_retry`, a node whose handler fails with a
+//!   retryablecrate::harness::retry::is_retryable error (a model or tool
 //!   error — the transient class) is re-run from its start up to the policy's
 //!   attempt cap, emitting
-//!   [`GraphEvent::NodeRetryScheduled`](crate::graph::stream::GraphEvent::NodeRetryScheduled)
+//!   [`GraphEvent::NodeRetryScheduled`]
 //!   and sleeping the opt-in backoff between attempts. A single network blip is
 //!   absorbed without touching the run.
 //! - **Resumable failure.** When a handler fails beyond the retry budget (or the

@@ -10,7 +10,7 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 
 /// Runs another workflow as a nested sub-graph.
 ///
-/// The child [`WorkflowGraph`](crate::model::WorkflowGraph) is supplied one of
+/// The child [`WorkflowGraph`] is supplied one of
 /// two ways — **exactly one** of these config keys must be present:
 ///
 /// - `workflow` — the child graph embedded **inline** as JSON (back-compat;
@@ -20,7 +20,7 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 ///   host-injected [`WorkflowResolver`](crate::caps::WorkflowResolver)
 ///   (`ctx.caps.resolver`).
 ///
-/// The resolved child is compiled and run via [`crate::engine::run_sub_workflow`],
+/// The resolved child is compiled and run via `crate::engine::run_sub_workflow`,
 /// sharing the host [`Capabilities`](crate::caps::Capabilities) with the parent
 /// run, and its final run state is emitted as an output item.
 ///
@@ -34,7 +34,7 @@ use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
 ///   that item and resolving `workflow_id` against it (so `=item.x` addresses
 ///   the element that run is for). `config.concurrency` bounds how many run at
 ///   a time and `config.on_item_error` what a failing child does to the batch
-///   (see [`crate::nodes::map`]). This is how an array of work becomes N
+///   (see `crate::nodes::map`). This is how an array of work becomes N
 ///   parallel multi-step workflows.
 ///
 /// Only the fields *this* node reads are `=`-resolved; an inline `workflow`

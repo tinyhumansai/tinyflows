@@ -22,9 +22,6 @@ use crate::{Clock, system_clock};
 use tinystoragedrivers_api::DocumentStore;
 use tinystoragedrivers_types::{Result, StorageError};
 
-#[path = "leases/advanced.rs"]
-mod advanced;
-
 /// The stored body: `{holder, epoch, expires_ms}` plus the optional
 /// `endpoint` and `released` fields, both absent from records that never
 /// used them.
@@ -148,7 +145,7 @@ impl Lease {
 
 /// Leases over [`LEASES`], one record per `(owner, key)`.
 ///
-/// Time comes from an injectable [`Clock`] (Unix epoch milliseconds), so
+/// Time comes from an injectable `Clock` (Unix epoch milliseconds), so
 /// tests drive expiry without sleeping. A lease is live while
 /// `now < expires_ms`.
 #[derive(Clone)]
@@ -346,11 +343,68 @@ impl Leases {
             .filter(|found| found.doc.expires_ms > now && !found.doc.released)
             .map(|found| Lease::from_body(id, found.doc)))
     }
+
+    /// The stored record of `(owner, key)`, live, lapsed or released. Unlike
+    /// [`current`](Self::current) it does not hide a record that stopped
+    /// excluding others, so an observer can tell a clean release from an
+    /// abandoned lease and read the epoch a takeover would continue.
+    ///
+    /// # Errors
+    ///
+    /// A storage error.
+    pub async fn inspect(&self, owner: &str, key: &str) -> Result<Option<LeaseRecord>> {
+        let id = id(owner, key)?;
+        Ok(self
+            .repo
+            .get(&id)
+            .await?
+            .map(|found| LeaseRecord::from_body(found.doc)))
+    }
+
+    /// Drop the record of `(owner, key)` if and only if it still belongs to
+    /// the tenure `(holder, epoch)`, live or not. Returns whether a record was
+    /// removed; a record at another holder or epoch (a takeover wrote it) is
+    /// left alone.
+    ///
+    /// This is the compaction primitive for lease keys that are never
+    /// acquired again (one lease per cron occurrence, per run, per claim),
+    /// which would otherwise pile up: [`release`](Self::release) deliberately
+    /// keeps the record so a takeover continues the epoch, and nothing else
+    /// ever removes it.
+    ///
+    /// # Why dropping is safe
+    ///
+    /// tsd keeps expired and released leases for one reason: a takeover reads
+    /// the old record and writes `epoch + 1`, so a stale holder's fence at the
+    /// old epoch stays dead. The delete is conditional on holder and epoch, so
+    /// it can only remove the very tenure the caller knows: any takeover bumps
+    /// the epoch, and a record that moved on is not touched. A holder's fence token on a
+    /// removed record refuses every write (a missing fence document is a
+    /// failed check), so the tenure that was dropped is fenced out for good.
+    ///
+    /// What the delete gives up is the epoch history: a later acquire of the
+    /// same key would restart at epoch 1. The caller therefore must only
+    /// compact a key that nothing will acquire again (for a cron occurrence:
+    /// once the job's next run has moved past it), or one whose protected
+    /// resources no longer hold epoch-1 writers.
+    ///
+    /// # Errors
+    ///
+    /// A storage error, or a conflict past the retry budget.
+    pub async fn compact(&self, owner: &str, key: &str, holder: &str, epoch: u64) -> Result<bool> {
+        let id = id(owner, key)?;
+        self.repo
+            .delete_if(&id, |lease| lease.holder == holder && lease.epoch == epoch)
+            .await
+    }
 }
 
 fn id(owner: &str, key: &str) -> Result<String> {
     Ok(Key::of([owner, key])?.as_str().to_owned())
 }
+
+#[path = "leases/acquire_with.rs"]
+mod acquire_with;
 
 #[cfg(test)]
 #[path = "leases_tests.rs"]

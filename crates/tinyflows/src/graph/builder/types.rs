@@ -189,7 +189,7 @@ impl std::fmt::Display for Route {
 /// [`GraphDefaults`] (the [`Default`]) changes nothing.
 #[derive(Clone, Debug, Default)]
 pub struct GraphDefaults {
-    /// Maximum number of supersteps before [`crate::GraphError::RecursionLimit`].
+    /// Maximum number of supersteps before `crate::GraphError::RecursionLimit`.
     pub recursion_limit: Option<usize>,
     /// Whether the active node set of a superstep runs concurrently.
     pub parallel: Option<bool>,
@@ -197,7 +197,7 @@ pub struct GraphDefaults {
     /// (only meaningful when `parallel` is enabled). `None` means unbounded.
     pub max_concurrency: Option<usize>,
     /// Default wall-clock timeout applied to every node handler; on elapse the
-    /// run fails with [`crate::GraphError::Timeout`]. `None` means no
+    /// run fails with `crate::GraphError::Timeout`. `None` means no
     /// per-node timeout.
     pub node_timeout: Option<Duration>,
 }

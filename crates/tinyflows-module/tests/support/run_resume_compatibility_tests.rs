@@ -161,7 +161,7 @@ async fn assert_failed_compatibility_refusal(
     let documents = FlowCatalogDocuments::new(owner.docs.clone());
     assert_eq!(
         documents
-            .kv_get(&namespace, "dedup:dedup:tentative")
+            .kv_get(&namespace, &format!("dedup:dedup:tentative:{run_id}"))
             .await
             .unwrap(),
         None,

@@ -31,13 +31,20 @@
 //! flow graph must never collide, so every key this node touches is prefixed
 //! with its own [`Node::id`](crate::model::Node::id).
 //!
-//! For a `dedup` node with id `"<node_id>"`, exactly two `StateStore` keys
-//! exist, built by [`committed_key`] and [`tentative_key`]:
+//! For a `dedup` node with id `"<node_id>"`, these `StateStore` keys exist,
+//! built by [`committed_key`] and [`tentative_key`]:
 //!
 //! | Key | Written by | Read by | Meaning |
 //! |---|---|---|---|
 //! | `dedup:<node_id>:committed` | the **host**, after a run succeeds | this node (every run) | keys proven seen — permanent |
-//! | `dedup:<node_id>:tentative` | this node (every run with an unseen key) | the **host**, after a run finishes | keys passed *this* run, awaiting a commit/release decision |
+//! | `dedup:<node_id>:tentative:<run_id>` | this node (every run with an unseen key) | the **host**, after that run finishes | keys passed *this* run, awaiting a commit/release decision |
+//!
+//! `<run_id>` is the host-seeded `run.id`
+//! ([`RunInput::run_id`](crate::engine::RunInput::run_id)), so overlapping runs
+//! of one flow stage separate tentative sets and the host settles exactly the
+//! finishing run's set. A host that seeds no run id gets the shared
+//! `dedup:<node_id>:tentative` key, where one run's settlement also commits or
+//! releases an overlapping run's keys.
 //!
 //! Each key's stored [`Value`] is a JSON array of strings (order not
 //! meaningful; treat as a set) — chosen over per-member keys because
@@ -64,11 +71,11 @@
 //! # Runtime behavior (per item)
 //!
 //! 1. Resolve `config.key` against the item (same `"=expr"` resolver as
-//!    `condition`/`memory`, via [`crate::nodes::resolve_config_traced_for_item`]).
+//!    `condition`/`memory`, via `crate::nodes::resolve_config_traced_for_item`).
 //! 2. A key that resolves to `null`, is absent, or is an empty string
 //!    **fails open**: the item passes through and is NOT recorded anywhere.
 //!    An item is never silently dropped just because its key could not be
-//!    computed — see [`resolve_key`].
+//!    computed — see `resolve_key`.
 //! 3. Otherwise, if the key is already in `committed` **or** was already seen
 //!    earlier in this same batch, the item is dropped.
 //! 4. Otherwise, the item passes through and the key is added to this run's
@@ -102,11 +109,12 @@
 //! # Concurrency and the scope of the exactly-once guarantee
 //!
 //! `StateStore` exposes only `load`/`store` — there is **no** compare-and-swap
-//! or atomic read-modify-write. The `tentative` write here (and the host's
-//! `committed` union after the run) is therefore a `load` → merge → `store`
-//! that is **not** safe against *two runs of the same flow overlapping in
-//! time*: two concurrent `load`s can each miss the other's not-yet-stored keys,
-//! and the later `store` wins (lost update).
+//! or atomic read-modify-write. With a run id, each run's `tentative` set is
+//! its own key, so overlapping runs never share one. The host's `committed`
+//! union after a run (and, without a run id, the shared `tentative` write) is
+//! still a `load` → merge → `store` that is **not** safe against *two runs of
+//! the same flow overlapping in time*: two concurrent `load`s can each miss
+//! the other's not-yet-stored keys, and the later `store` wins (lost update).
 //!
 //! The exactly-once guarantee holds under the normal assumption that a given
 //! saved flow has **at most one active run at a time** (the usual case: a
@@ -149,13 +157,26 @@ pub fn committed_key(node_id: &str) -> String {
 }
 
 /// The `StateStore` key holding `node_id`'s tentative (pending-decision) key
-/// set for the current/most recent run.
+/// set for run `run_id`.
 ///
 /// Written by this node whenever it passes an unseen item through; the host
-/// unions it into [`committed_key`] on success or clears it on failure.
+/// unions it into [`committed_key`] on success or clears it on failure. With a
+/// run id (the host-seeded `run.id`) each run stages its own set, so one run's
+/// settlement never commits or releases an overlapping run's keys. `None` is the shared `dedup:<node_id>:tentative` set of a host that
+/// seeds no run id.
 #[must_use]
-pub fn tentative_key(node_id: &str) -> String {
-    format!("dedup:{node_id}:tentative")
+pub fn tentative_key(node_id: &str, run_id: Option<&str>) -> String {
+    match run_id {
+        Some(run_id) => format!("dedup:{node_id}:tentative:{run_id}"),
+        None => format!("dedup:{node_id}:tentative"),
+    }
+}
+
+/// The run's durable, host-seeded identity (`run.id`, from
+/// [`RunInput::run_id`](crate::engine::RunInput::run_id)), which scopes this
+/// node's [`tentative_key`]. A host settles with the same id.
+fn run_id<'a>(ctx: &NodeContext<'a>) -> Option<&'a str> {
+    ctx.run.get("id").and_then(Value::as_str)
 }
 
 /// Loads the key set stored under `key` (a JSON array of strings) as a
@@ -272,7 +293,8 @@ impl NodeExecutor for DedupNode {
         }
 
         if !seen_this_run.is_empty() {
-            let mut tentative = load_key_set(&ctx, &tentative_key(node_id)).await?;
+            let tentative_key = tentative_key(node_id, run_id(&ctx));
+            let mut tentative = load_key_set(&ctx, &tentative_key).await?;
             let added = seen_this_run
                 .iter()
                 .filter(|k| tentative.insert((*k).clone()))
@@ -283,7 +305,7 @@ impl NodeExecutor for DedupNode {
                 tentative_len = tentative.len(),
                 "{LOG_PREFIX} writing merged tentative set"
             );
-            store_key_set(&ctx, &tentative_key(node_id), &tentative).await?;
+            store_key_set(&ctx, &tentative_key, &tentative).await?;
         }
 
         tracing::debug!(

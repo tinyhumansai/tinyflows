@@ -3,13 +3,13 @@
 //! A gate collects the tickets a [`spawn`](super::spawn) node produced and emits
 //! their results. What makes it more than a barrier is the release policy: it
 //! can proceed on the first result, on a quorum, or on whatever arrived before
-//! its deadline, rather than only on all of them (see [`crate::nodes::release`]).
+//! its deadline, rather than only on all of them (see `crate::nodes::release`).
 //!
 //! # How waiting works in a super-step engine
 //!
 //! There is no "block here until the callback comes". A gate is activated,
 //! looks at the world, and either proceeds or asks to be run again — via
-//! [`NodeControl::Reenter`], which commits its notes and re-activates it in the
+//! `NodeControl::Reenter`, which commits its notes and re-activates it in the
 //! next super-step. Waiting is therefore counted in **polls**, and every poll
 //! costs a super-step and a node visit against the run's budgets. That is why
 //! the poll count is bounded here rather than left to the run-level backstop:

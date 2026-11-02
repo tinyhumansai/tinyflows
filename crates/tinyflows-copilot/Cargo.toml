@@ -42,7 +42,7 @@ tracing = { workspace = true }
 # through tinyagents) patches this exact URL to its own copy, so the two unify
 # into one package and `tinytools::Tool` stays one type. Keep the rev equal to the
 # tinytools gitlink tinyagents pins.
-tinytools = { git = "https://github.com/senamakel/tinytools", rev = "643df90ba25f93187249fa99f6789f9aa7f8bbc8" }
+tinytools = { git = "https://github.com/tinyhumansai/tinytools", rev = "41cc80ac9acf37a14f20be94f60ee552749f1540" }
 
 [dev-dependencies]
 tokio = { workspace = true }

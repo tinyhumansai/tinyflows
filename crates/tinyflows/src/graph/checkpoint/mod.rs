@@ -5,11 +5,11 @@
 //! another compiled graph, which can run another, each producing its own state.
 //! Checkpointing snapshots every level of that tree at superstep boundaries and
 //! keys them by `thread_id`/`namespace` so a parent and its embedded subgraphs
-//! never collide (see [`crate::graph::subgraph`]). Persisting committed state at
+//! never collide (see `crate::graph::subgraph`). Persisting committed state at
 //! each boundary is what lets a run be paused on an interrupt, resumed later,
 //! forked, or replayed for time-travel debugging.
 //!
-//! See [`types`] for the checkpoint record definitions. Checkpoints are written
+//! See `types` for the checkpoint record definitions. Checkpoints are written
 //! at superstep boundaries only — never mid-node — so resuming always reruns a
 //! node from its start.
 

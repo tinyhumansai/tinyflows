@@ -36,7 +36,7 @@ use crate::graph::error::Result;
 /// - [`Channel::merge`] — how an incoming write combines with the current value.
 /// - [`Channel::allows_concurrent`] — whether two branches in the *same* step may
 ///   both write this channel (aggregates: yes; last-value: no, see
-///   [`crate::GraphError::InvalidConcurrentUpdate`]).
+///   `crate::GraphError::InvalidConcurrentUpdate`).
 /// - [`Channel::is_ephemeral`] — whether the value is cleared at the start of the
 ///   next step (one-shot channels).
 /// - [`Channel::is_tracked`] — whether the value appears in [`ChannelSet::snapshot`]
@@ -58,7 +58,7 @@ pub trait Channel: Send + Sync {
     /// Whether more than one concurrent branch may write this channel within a
     /// single superstep. Aggregates (append/fold/accumulate/barrier) return
     /// `true`; overwrite-style channels return `false` and trigger
-    /// [`crate::GraphError::InvalidConcurrentUpdate`] on a same-step clash.
+    /// `crate::GraphError::InvalidConcurrentUpdate` on a same-step clash.
     fn allows_concurrent(&self) -> bool {
         false
     }
@@ -101,7 +101,7 @@ impl std::fmt::Debug for Box<dyn Channel> {
 /// Overwrite channel: each write replaces the value (last-value semantics).
 ///
 /// Rejects concurrent same-step writes from multiple branches with
-/// [`crate::GraphError::InvalidConcurrentUpdate`].
+/// `crate::GraphError::InvalidConcurrentUpdate`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LastValue;
 

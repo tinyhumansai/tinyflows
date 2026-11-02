@@ -18,11 +18,11 @@
 //!   the stack stays symmetric and always describes the path from the root run
 //!   to the current one.
 //!
-//! The executor ([`crate::graph::CompiledGraph::execute`]) builds one stack per
+//! The executor (`crate::graph::CompiledGraph::execute`) builds one stack per
 //! run, tracks graph-call depth separately from node-loop visits, enforces the
-//! caps with clear recursion errors ([`crate::GraphError::SubAgentDepth`],
-//! [`crate::GraphError::NodeVisitLimit`],
-//! [`crate::GraphError::RecursionLimit`]), records the current stack into
+//! caps with clear recursion errors (`crate::GraphError::SubAgentDepth`,
+//! `crate::GraphError::NodeVisitLimit`,
+//! `crate::GraphError::RecursionLimit`), records the current stack into
 //! checkpoint metadata under a `recursion` array, and emits the live depth on
 //! [`crate::graph::GraphEvent::RecursionDepthChanged`].
 

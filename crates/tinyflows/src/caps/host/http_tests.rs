@@ -286,3 +286,24 @@ fn an_ipv4_mapped_ipv6_loopback_is_recognised_as_private() {
     let public: std::net::IpAddr = "::ffff:8.8.8.8".parse().unwrap();
     assert!(!is_private_addr(&public));
 }
+
+#[tokio::test]
+async fn a_credential_is_never_sent_over_plain_http() {
+    // An allowlisted public IP literal (no DNS) over plain http with a
+    // resolvable credential must be refused before anything is sent.
+    let mut creds = HashMap::new();
+    creds.insert(
+        "ci".to_string(),
+        HttpCredential {
+            header: "Authorization".into(),
+            value: "Bearer must-not-leak".into(),
+        },
+    );
+    let client = AllowlistHttpClient::new(HostAllowlist::new(["8.8.8.8"]), creds);
+    let err = client
+        .request(json!({ "url": "http://8.8.8.8/x" }), Some("http_cred:ci"))
+        .await
+        .expect_err("credential over http must be refused");
+    assert!(err.to_string().contains("plain http"), "got {err}");
+    assert!(!err.to_string().contains("must-not-leak"));
+}

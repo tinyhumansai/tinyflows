@@ -1,7 +1,7 @@
 //! Running a graph against schema-aware mocks to find bindings that can never
 //! resolve, before an author is allowed to save it.
 //!
-//! [`gates`](crate::gates) refuses what is *statically* guaranteed wrong. This
+//! [`gates`] refuses what is *statically* guaranteed wrong. This
 //! module catches the rest of the same failure by actually running the graph:
 //! the engine records, per step, which `=`-expressions resolved to null while it
 //! was assembling a node's config, and an outbound argument that resolved to
@@ -370,7 +370,7 @@ fn is_trigger_scoped_expression(
 ///
 /// Handles both addressing forms the engine can trace:
 /// - explicit `=nodes.<id>...` / `=.nodes["<id>"]...` (parsed via
-///   [`explicit_nodes_ref`]), and
+///   `explicit_nodes_ref`), and
 /// - implicit `=item...` / `=items...`, resolved against `node_id`'s direct
 ///   predecessor — but only when there is exactly ONE incoming edge, so an
 ///   ambiguous fan-in is never mis-attributed to a single upstream node.

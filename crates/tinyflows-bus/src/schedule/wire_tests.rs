@@ -4,8 +4,8 @@
 //! stored job has been orphaned.
 
 use super::{
-    ActiveHours, CronJob, CronJobPatch, CronRun, DeliveryConfig, DeliveryStatus, JobOrigin,
-    JobType, Schedule, SessionTarget,
+    ActiveHours, ChannelConversationIdentity, ChannelSessionIdentity, CronJob, CronJobPatch,
+    CronRun, DeliveryConfig, DeliveryStatus, JobOrigin, JobType, Schedule, SessionTarget,
 };
 
 fn assert_bytes<T>(json: &str, expected: &T)
@@ -124,6 +124,35 @@ fn origin_wire_bytes() {
             sender: Some("alice".into()),
             thread_id: Some("7".into()),
             channel_session: None,
+        },
+    );
+}
+
+#[test]
+fn channel_origin_with_channel_session_wire_bytes() {
+    assert_bytes(
+        r#"{"kind":"channel","channel":"telegram","reply_target":"42","history_key":"telegram:42","channel_session":{"tenant_key":"tenant-1","agent_id":"agent-1","session_key":"session-1","provider":"telegram","conversation":{"kind":"group","id":"chat-1","thread_id":"thread-1"}}}"#,
+        &JobOrigin::Channel {
+            channel: "telegram".into(),
+            reply_target: "42".into(),
+            history_key: "telegram:42".into(),
+            sender: None,
+            thread_id: None,
+            channel_session: Some(Box::new(ChannelSessionIdentity {
+                tenant_key: "tenant-1".into(),
+                agent_id: "agent-1".into(),
+                session_key: "session-1".into(),
+                provider: "telegram".into(),
+                account_id: None,
+                conversation: ChannelConversationIdentity {
+                    kind: "group".into(),
+                    id: "chat-1".into(),
+                    scope_id: None,
+                    parent_id: None,
+                    thread_id: Some("thread-1".into()),
+                    topic_id: None,
+                },
+            })),
         },
     );
 }

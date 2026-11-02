@@ -1,6 +1,12 @@
 use super::*;
 
 #[test]
+fn public_facade_reexports_channel_identity_types() {
+    let _: Option<crate::ChannelSessionIdentity> = None;
+    let _: Option<crate::ChannelConversationIdentity> = None;
+}
+
+#[test]
 fn delay_units_and_default_minutes_match_existing_jobs() {
     for (text, secs) in [
         ("5s", 5),

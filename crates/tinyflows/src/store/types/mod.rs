@@ -14,11 +14,11 @@
 //! The submodules split the model by lifetime rather than by shape, because
 //! that is what decides where each type is stored:
 //!
-//! - [`workflow`] — the versioned document an operator edits.
-//! - [`run`] — one execution's durable record, written once and never revised.
-//! - [`note`] — what the host has learned about a workflow across runs.
-//! - [`proposal`] — a graph change suggested but not yet made.
-//! - [`error`] — the failure vocabulary every surface reports through.
+//! - `workflow` — the versioned document an operator edits.
+//! - `run` — one execution's durable record, written once and never revised.
+//! - `note` — what the host has learned about a workflow across runs.
+//! - `proposal` — a graph change suggested but not yet made.
+//! - `error` — the failure vocabulary every surface reports through.
 //! - [`TranscriptEntry`] — one line of what an agent did inside a step,
 //!   re-exported from [`crate::transcript`] because the engine carries it too.
 //!

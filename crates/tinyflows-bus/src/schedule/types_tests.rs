@@ -1,4 +1,5 @@
 use super::*;
+use crate::schedule::ChannelConversationIdentity;
 use chrono::TimeZone;
 use serde_json::json;
 
@@ -317,7 +318,21 @@ fn job_origin_channel_roundtrips_with_and_without_optionals() {
         history_key: "telegram:chat-42".into(),
         sender: Some("alice".into()),
         thread_id: Some("topic-7".into()),
-        channel_session: None,
+        channel_session: Some(Box::new(ChannelSessionIdentity {
+            tenant_key: "profile:v1:local".into(),
+            agent_id: "telegram-agent".into(),
+            session_key: "main:telegram:account-a:group:room-42:topic:topic-7".into(),
+            provider: "telegram".into(),
+            account_id: Some("account-a".into()),
+            conversation: ChannelConversationIdentity {
+                kind: "group".into(),
+                id: "room-42".into(),
+                scope_id: Some("workspace-3".into()),
+                parent_id: Some("parent-9".into()),
+                thread_id: Some("topic-7".into()),
+                topic_id: Some("topic-7".into()),
+            },
+        })),
     };
     let v = serde_json::to_value(&full).unwrap();
     assert_eq!(v["kind"], "channel");

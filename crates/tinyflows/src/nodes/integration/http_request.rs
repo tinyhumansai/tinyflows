@@ -14,7 +14,7 @@ use crate::nodes::{ExecutionMode, NodeContext, NodeExecutor, NodeOutput, executi
 /// the input, issuing one request per item with the descriptor re-resolved
 /// against that item; `once` issues a single request against the first item.
 /// Output is wrapped in the stable `{ json, text, raw }`
-/// [envelope](crate::nodes::integration::envelope), matching the other
+/// envelope, matching the other
 /// capability nodes.
 #[derive(Debug, Default, Clone)]
 pub struct HttpRequestNode;

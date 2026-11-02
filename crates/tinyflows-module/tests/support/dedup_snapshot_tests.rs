@@ -49,7 +49,7 @@ async fn dedup_cancellation_settles_against_the_executed_graph_snapshot() {
     let state_namespace = format!("flow:{flow_id}");
     assert_eq!(
         catalog_docs
-            .kv_get(&state_namespace, "dedup:original-dedup:tentative")
+            .kv_get(&state_namespace, "dedup:original-dedup:tentative:dedup-run")
             .await
             .unwrap(),
         Some(json!(["item-1"]))
@@ -94,7 +94,7 @@ async fn dedup_cancellation_settles_against_the_executed_graph_snapshot() {
     assert_eq!(terminal.events.last().unwrap().data["status"], "cancelled");
     assert_eq!(
         catalog_docs
-            .kv_get(&state_namespace, "dedup:original-dedup:tentative")
+            .kv_get(&state_namespace, "dedup:original-dedup:tentative:dedup-run")
             .await
             .unwrap(),
         None,
@@ -102,7 +102,7 @@ async fn dedup_cancellation_settles_against_the_executed_graph_snapshot() {
     );
     assert_eq!(
         catalog_docs
-            .kv_get(&state_namespace, "dedup:edited-dedup:tentative")
+            .kv_get(&state_namespace, "dedup:edited-dedup:tentative:dedup-run")
             .await
             .unwrap(),
         None

@@ -459,6 +459,9 @@ mod checkpoint_import;
 #[path = "checkpoint_history_tests.rs"]
 mod history_tests;
 #[cfg(test)]
+#[path = "checkpoint_lineage_tests.rs"]
+mod lineage_tests;
+#[cfg(test)]
 #[path = "checkpoint_tests.rs"]
 mod tests;
 

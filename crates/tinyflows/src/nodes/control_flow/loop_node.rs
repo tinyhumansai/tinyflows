@@ -32,7 +32,7 @@
 //! Because the reducer merges objects key-by-key, an accumulator written
 //! plainly could only ever *gain* keys — an error recorded on pass 1 would
 //! haunt every later pass. The accumulator is therefore written through
-//! [`crate::engine::replace`], which assigns the slot wholesale.
+//! `crate::engine::replace`, which assigns the slot wholesale.
 //!
 //! **The fold is at-least-once.** If an activation is replayed after a resume,
 //! the update applies twice. This is not new — `iteration + 1` has always had

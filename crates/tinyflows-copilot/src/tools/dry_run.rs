@@ -39,7 +39,7 @@ use tinytools::{PermissionLevel, Tool, ToolResult};
 /// `=`-expression that silently resolves to `null` — the preflight above only
 /// catches a *missing/null Composio-required* arg, so a graph like that used to
 /// dry-run green and then do nothing at runtime. The run is driven through
-/// [`tinyflows::engine::run_with_observer`] with a [`CapturingObserver`] that
+/// [`tinyflows::engine::run_with_observer`] with a `CapturingObserver` that
 /// records every node's [`ExecutionStep::diagnostics`](tinyflows::observability::ExecutionStep)
 /// — the `=`-expressions the vendored engine itself traced as null-resolved
 /// (see `tinyflows::expr::resolve_traced`). After the run settles, every
@@ -88,8 +88,8 @@ use tinytools::{PermissionLevel, Tool, ToolResult};
 /// default), so the condition takes a different branch under mock data than
 /// it would at runtime — a graph can dry-run `ok: true` while its most
 /// data-dependent node was never actually checked. After the run settles,
-/// every `agent`/`tool_call` node with no [`ExecutionStep`] in the
-/// [`CapturingObserver`] is collected into `routing_divergence_warnings`
+/// every `agent`/`tool_call` node with no `ExecutionStep` in the
+/// `CapturingObserver` is collected into `routing_divergence_warnings`
 /// (`{ node_id, condition_node_id, message }`, `condition_node_id` naming the
 /// nearest upstream `condition` node found by walking predecessors — see
 /// `tinyflows::diagnostics::nearest_upstream_condition` — or `null` if none is found). This is a

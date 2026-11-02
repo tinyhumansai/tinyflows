@@ -139,7 +139,7 @@ impl ContextBlock {
 /// The discovery half [`ToolInvoker`](crate::caps::ToolInvoker) never had: a
 /// slug plus enough metadata for a model to choose it. Produced from an
 /// author's [`ToolGrant`]s by
-/// [`AgentRunner::resolve_tools`](AgentRunner::resolve_tools).
+/// [`AgentRunner::resolve_tools`].
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ToolDescriptor {
     /// The slug the harness would pass to

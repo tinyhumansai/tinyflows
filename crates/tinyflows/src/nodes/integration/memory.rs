@@ -49,7 +49,7 @@ const LOG_PREFIX: &str = "[memory-node]";
 /// invokes once.
 ///
 /// Output is wrapped in the stable `{ json, text, raw }`
-/// [envelope](crate::nodes::integration::envelope), matching every other
+/// envelope, matching every other
 /// capability node.
 #[derive(Debug, Default, Clone)]
 pub struct MemoryNode;

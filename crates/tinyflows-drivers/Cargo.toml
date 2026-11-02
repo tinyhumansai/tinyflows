@@ -51,8 +51,8 @@ store = [
 test-fixtures = ["catalog"]
 
 [dependencies]
-tinystoragedrivers-api = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
-tinystoragedrivers-types = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
+tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
 tinyflows-storage = { path = "../tinyflows-storage" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -72,4 +72,4 @@ uuid = { workspace = true, optional = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 tokio = { workspace = true }
-tinystoragedrivers-testkit = { git = "https://github.com/senamakel/tinystoragedrivers", version = "2.1.2", rev = "2d23a6a6009fa52d1e7aa18de589bdd109a54b6a" }
+tinystoragedrivers-testkit = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }

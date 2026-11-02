@@ -1,6 +1,6 @@
 //! Channel-per-field state model (additive).
 //!
-//! See [`types`] for the type definitions and the high-level model. This file
+//! See `types` for the type definitions and the high-level model. This file
 //! supplies the concrete [`Channel`] merge rules, the [`ChannelSet`] map
 //! operations, and the [`ChannelState`] ⇒ [`StateReducer`] bridge that lets a
 //! channel graph run on the existing executor.

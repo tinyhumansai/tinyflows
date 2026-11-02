@@ -306,3 +306,40 @@ fn validate_schedule_rejects_invalid_active_hours_end() {
     let err = validate_schedule(&schedule, now).unwrap_err();
     assert!(err.to_string().contains("active_hours.end"));
 }
+
+#[test]
+fn cron_next_run_in_repeated_fall_back_hour_is_after_from() {
+    // M5: 2026-11-01T06:10Z is 01:10 EST, inside the repeated 01:00 hour.
+    let from = Utc.with_ymd_and_hms(2026, 11, 1, 6, 10, 0).unwrap();
+    let schedule = Schedule::Cron {
+        expr: "*/15 * * * *".into(),
+        tz: Some("America/New_York".into()),
+        active_hours: None,
+    };
+    let next = next_run_for_schedule(&schedule, from).unwrap();
+    // 01:15 EST, the second pass through the repeated hour.
+    assert_eq!(
+        next,
+        Utc.with_ymd_and_hms(2026, 11, 1, 6, 15, 0).unwrap(),
+        "next {next} must be the first run after from {from}"
+    );
+}
+
+#[test]
+fn cron_spring_forward_gap_does_not_skip_the_day() {
+    // M5 (gap half): 02:30 does not exist on 2026-03-08 in New York.
+    // from = 00:00 EST (05:00Z); the next run should be on 03-08, not 03-09.
+    let from = Utc.with_ymd_and_hms(2026, 3, 8, 5, 0, 0).unwrap();
+    let schedule = Schedule::Cron {
+        expr: "30 2 * * *".into(),
+        tz: Some("America/New_York".into()),
+        active_hours: None,
+    };
+    let next = next_run_for_schedule(&schedule, from).unwrap();
+    // 02:30 is skipped; the run moves to the first valid instant, 03:00 EDT.
+    assert_eq!(
+        next,
+        Utc.with_ymd_and_hms(2026, 3, 8, 7, 0, 0).unwrap(),
+        "next {next} skipped the spring-forward day"
+    );
+}

@@ -91,7 +91,7 @@ pub enum Respond {
     /// Return this value.
     Value(Value),
     /// Fail with this message, as an
-    /// [`EngineError::Capability`](crate::error::EngineError::Capability).
+    /// [`EngineError::Capability`].
     Error(String),
     /// Answer the nth matching call with the nth entry.
     ///

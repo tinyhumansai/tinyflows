@@ -8,7 +8,7 @@
 //! tree that links a parent graph to the subgraphs and sub-agents it recurses
 //! into, so progress, interrupts, and errors can be rolled up across levels.
 //!
-//! See [`types`] for the [`GraphRunStatus`] definition.
+//! See `types` for the [`GraphRunStatus`] definition.
 
 mod types;
 
