@@ -198,8 +198,9 @@ impl Scheduler {
             let config = self.config.clone();
             let cancellation = self.cancellation.subscribe();
             let permits = Arc::clone(&self.permits);
+            let job_id = claim.job.id.clone();
             self.tasks.spawn(async move {
-                run_claim_with_renewal(
+                let outcome = run_claim_with_renewal(
                     &ports,
                     &config,
                     claim,
@@ -208,8 +209,17 @@ impl Scheduler {
                     Some(permits),
                     cancellation,
                 )
-                .await
-                .map(|_| ())
+                .await?;
+                // The run record holds the result; a failed delivery has no
+                // other trace in the poll loop.
+                if !outcome.success {
+                    tracing::warn!(
+                        %job_id,
+                        delivery_status = ?outcome.delivery_status,
+                        "scheduled run did not succeed"
+                    );
+                }
+                Ok(())
             });
             count += 1;
         }
