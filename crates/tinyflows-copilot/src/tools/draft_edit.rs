@@ -328,7 +328,7 @@ impl Tool for EditWorkflowTool {
         );
 
         // Apply the ops (structural mutation, precise per-op errors).
-        let edited = match tinyflows::graph_ops::apply_ops(&base_graph, &graph_ops) {
+        let mut edited = match tinyflows::graph_ops::apply_ops(&base_graph, &graph_ops) {
             Ok(graph) => graph,
             Err(e) => {
                 tracing::debug!(target: "flows", %name, error = %e, "[flows] edit_workflow: an op failed to apply");
@@ -351,6 +351,12 @@ impl Tool for EditWorkflowTool {
                 )));
             }
         };
+
+        // Stamp the resolved name into the graph itself (openhuman#8453): the
+        // name was previously only passed alongside the graph to the draft
+        // write-back and the proposal, so the durable draft — and anything
+        // saved from it — kept the base graph's name.
+        edited.name = name.clone();
 
         // Structural validation of the RESULT — surface every problem at once.
         let structural = tinyflows::validate::validate_all(&edited);
@@ -482,3 +488,7 @@ impl Tool for EditWorkflowTool {
 #[cfg(test)]
 #[path = "draft_edit_schema_tests.rs"]
 mod schema_tests;
+
+#[cfg(test)]
+#[path = "draft_edit_tests.rs"]
+mod edit_tests;
