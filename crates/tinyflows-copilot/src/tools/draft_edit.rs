@@ -169,8 +169,10 @@ impl Tool for EditWorkflowTool {
                             write_back_draft = Some(draft.id.clone());
                             // A draft may already be linked to a saved flow —
                             // carry that through so the proposal echoes it.
-                            edited_from_flow = draft.flow_id.clone();
-                            (graph, draft.name)
+                            // Fall back to the base GRAPH's name — the draft metadata name
+                            // can go stale and would then be stamped into the graph itself.
+                            let default_name = graph.name.clone();
+                            (graph, default_name)
                         }
                         Err(e) => {
                             return Ok(ToolResult::error(format!(
@@ -220,7 +222,10 @@ impl Tool for EditWorkflowTool {
                             );
                             write_back_draft = Some(new_draft_id);
                             edited_from_flow = Some(flow.id.clone());
-                            (flow.graph, flow.name)
+                            // Same staleness rule: fall back to the graph's name, never
+                            // the flow's top-level name, which can lag behind it.
+                            let default_name = flow.graph.name.clone();
+                            (flow.graph, default_name)
                         }
                         Err(e) => {
                             return Ok(ToolResult::error(format!(
