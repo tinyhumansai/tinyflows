@@ -83,9 +83,14 @@ impl Drop for ActorRecoveryGuard {
         // environment, so even cancellation before its first poll releases
         // this entry without removing a replacement actor.
         let active_cleanup = ActiveCleanupGuard(Arc::clone(&self.active));
+        #[cfg(test)]
+        let run_id = self.run_id.clone();
         runtime.spawn(async move {
             let _active_cleanup = active_cleanup;
             recovery.reconcile().await;
+            drop(_active_cleanup);
+            #[cfg(test)]
+            super::actor_recovery_tests::notify_recovery_finished_for_test(&run_id);
         });
     }
 }

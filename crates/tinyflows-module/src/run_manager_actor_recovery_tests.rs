@@ -31,7 +31,12 @@ async fn dropping_an_unpolled_actor_future_reconciles_only_its_live_run() {
     // Tokio can drop a spawned future before its first poll during shutdown.
     // The actor factory must have captured recovery ownership before it
     // returned this future, so the admitted row cannot be left running.
+    let (reconciled_tx, reconciled_rx) = oneshot::channel();
+    install_recovery_completion(&fixture.run_id, reconciled_tx);
     drop(actor);
+    reconciled_rx
+        .await
+        .expect("actor recovery task must finish");
 
     assert_reconciled(
         &fixture.catalog,
@@ -60,9 +65,14 @@ async fn aborting_an_admitted_actor_reconciles_its_running_row() {
     ));
     admitted_tx.send(()).unwrap();
     arrived_rx.await.unwrap();
+    let (reconciled_tx, reconciled_rx) = oneshot::channel();
+    install_recovery_completion(&fixture.run_id, reconciled_tx);
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     drop(release_tx);
+    reconciled_rx
+        .await
+        .expect("actor recovery task must finish");
 
     assert_reconciled(
         &fixture.catalog,
@@ -467,6 +477,29 @@ fn install_after_admission_gate(
 #[cfg(test)]
 static AFTER_ADMISSION_GATES: LazyLock<Mutex<HashMap<String, AdmissionGate>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+static RECOVERY_COMPLETIONS: LazyLock<Mutex<HashMap<String, oneshot::Sender<()>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+fn install_recovery_completion(run_id: &str, finished: oneshot::Sender<()>) {
+    RECOVERY_COMPLETIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(run_id.to_owned(), finished);
+}
+
+#[cfg(test)]
+pub(super) fn notify_recovery_finished_for_test(run_id: &str) {
+    if let Some(finished) = RECOVERY_COMPLETIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(run_id)
+    {
+        let _ = finished.send(());
+    }
+}
 
 #[cfg(test)]
 pub(super) async fn pause_after_admission_for_test(run_id: &str) {
