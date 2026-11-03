@@ -169,6 +169,7 @@ impl Tool for EditWorkflowTool {
                             write_back_draft = Some(draft.id.clone());
                             // A draft may already be linked to a saved flow —
                             // carry that through so the proposal echoes it.
+                            edited_from_flow = draft.flow_id.clone();
                             // Fall back to the base GRAPH's name — the draft metadata name
                             // can go stale and would then be stamped into the graph itself.
                             let default_name = graph.name.clone();

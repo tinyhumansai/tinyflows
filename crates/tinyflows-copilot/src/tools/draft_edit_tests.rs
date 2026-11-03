@@ -253,3 +253,36 @@ async fn draft_edit_save_edit_save_keeps_graph_name_over_stale_draft_name() {
         "save_workflow overwrote the graph name with the stale draft name"
     );
 }
+
+#[tokio::test]
+async fn draft_edit_linked_to_flow_points_next_step_at_save_workflow() {
+    // Regression: the name-fallback follow-up dropped the draft branch's
+    // `edited_from_flow = draft.flow_id.clone()`, so edits on flow-linked
+    // drafts pointed the proposal's next-step hint at create_workflow instead
+    // of save_workflow.
+    let host = Arc::new(crate::tools::fakes::MemHost::default());
+    host.put_draft("d1", Some("f1"), "Draft name", named_graph("Flow Graph"));
+    let tool = EditWorkflowTool::new(host.clone(), host.clone(), host.clone());
+
+    let result = tool
+        .execute(json!({
+            "draft_id": "d1",
+            "ops": nudge_ops(),
+        }))
+        .await
+        .unwrap();
+    assert!(!result.is_error, "edit failed: {}", result.text());
+
+    let next = serde_json::from_str::<Value>(&result.text().to_string())
+        .ok()
+        .and_then(|p| p.get("next").and_then(Value::as_str).map(str::to_string))
+        .expect("proposal payload carries a next-step hint");
+    assert!(
+        next.contains("save_workflow"),
+        "flow-linked draft edit did not point at save_workflow: {next}"
+    );
+    assert!(
+        !next.contains("create_workflow"),
+        "flow-linked draft edit pointed at create_workflow: {next}"
+    );
+}
