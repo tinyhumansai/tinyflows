@@ -104,6 +104,12 @@ pub struct LaneContext {
     /// How many lanes the fan-out created, which is what a collector counts
     /// arrivals against.
     pub count: usize,
+    /// The super-step of the fan-out activation that opened this lane, which
+    /// tells this pass's lanes apart from an earlier pass's in a loop.
+    ///
+    /// `None` for a lane scheduled by an envelope that predates the field (a
+    /// checkpoint written by an older binary).
+    pub scatter_step: Option<usize>,
 }
 
 /// Builds the expression scope for a node from its runtime [`NodeContext`].

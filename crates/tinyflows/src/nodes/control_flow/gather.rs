@@ -6,7 +6,9 @@
 //! graph. A gather cannot: how many lanes exist is decided at run time by the
 //! scatter, from data. So its barrier is **data-driven**: it counts arrivals in
 //! `nodes.<lane terminal>.lanes.*` against the `lane_count` the scatter
-//! recorded, and asks to be re-run until its release policy is satisfied.
+//! recorded, and asks to be re-run until its release policy is satisfied. Only
+//! lanes opened by the scatter's current activation count, so a loop pass never
+//! gathers an earlier pass's lanes.
 //!
 //! That is also why it supports the same policies as a [`gate`]: once the wait
 //! is a decision rather than a topological fact, "proceed on a quorum" and
@@ -19,6 +21,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::data::Item;
+use crate::engine::{LANE_SCATTER_KEY, LANE_SCATTER_STEP_KEY};
 use crate::error::{EngineError, Result};
 use crate::nodes::release::{Release, ReleasePolicy};
 use crate::nodes::{NodeContext, NodeExecutor, NodeOutput};
@@ -64,23 +67,61 @@ struct Arrived {
     failed: Option<String>,
 }
 
-/// Reads every lane slot recorded by this gather's lane-terminal predecessors.
+/// Every lane slot recorded by this gather's lane-terminal predecessors.
 ///
 /// Lanes are keyed by id under `nodes.<pred>.lanes`, which is what keeps N
 /// concurrent activations of one node from clobbering each other — the reducer
 /// merges objects key-by-key, so distinct lane keys never collide.
-fn arrivals(ctx: &NodeContext<'_>, predecessors: &[String]) -> Vec<Arrived> {
-    let mut arrived = Vec::new();
-    for pred in predecessors {
-        let Some(lanes) = ctx
-            .nodes
-            .get(pred)
-            .and_then(|slot| slot.get("lanes"))
-            .and_then(Value::as_object)
-        else {
-            continue;
-        };
-        for slot in lanes.values() {
+fn lane_slots<'a>(nodes: &'a Value, predecessors: &[String]) -> Vec<&'a Value> {
+    predecessors
+        .iter()
+        .filter_map(|pred| nodes.get(pred)?.get("lanes")?.as_object())
+        .flat_map(|lanes| lanes.values())
+        .collect()
+}
+
+/// The scatter that opened these lanes, as the lane slots record it.
+fn scatter_of<'a>(slots: &[&'a Value]) -> Option<&'a str> {
+    slots
+        .iter()
+        .copied()
+        .find_map(|slot| slot.get(LANE_SCATTER_KEY)?.as_str())
+}
+
+/// Keeps only the slots opened by the scatter's **current** activation.
+///
+/// Slots are never cleared, so in a loop whose body scatters, an earlier pass's
+/// lanes are still in state when a later pass gathers; counting them would
+/// release a narrower pass with a stale lane in it. The current activation is
+/// the super-step the scatter's own slot was last stamped with.
+///
+/// A slot without the stamp was written from an envelope that predates it (a
+/// run checkpointed by an older binary). Such slots are all counted, as before,
+/// when no stamped slot exists, so a run resumed across an upgrade still
+/// completes; once any stamped slot exists, unstamped ones are stale and ignored.
+fn current_activation<'a>(
+    nodes: &Value,
+    slots: Vec<&'a Value>,
+    scatter: Option<&str>,
+) -> Vec<&'a Value> {
+    let step_of = |slot: &Value| slot.get(LANE_SCATTER_STEP_KEY).and_then(Value::as_u64);
+    if !slots.iter().any(|slot| step_of(slot).is_some()) {
+        return slots;
+    }
+    let current = scatter
+        .and_then(|id| nodes.get(id)?.get("_activation_step")?.as_u64())
+        .or_else(|| slots.iter().filter_map(|slot| step_of(slot)).max());
+    slots
+        .into_iter()
+        .filter(|slot| step_of(slot) == current)
+        .collect()
+}
+
+/// Decodes the lane slots that count.
+fn arrivals(slots: Vec<&Value>) -> Vec<Arrived> {
+    slots
+        .into_iter()
+        .map(|slot| {
             let index = slot
                 .get("index")
                 .and_then(Value::as_u64)
@@ -106,27 +147,31 @@ fn arrivals(ctx: &NodeContext<'_>, predecessors: &[String]) -> Vec<Arrived> {
                         .unwrap_or("lane failed")
                         .to_string()
                 });
-            arrived.push(Arrived {
+            Arrived {
                 index,
                 items,
                 failed,
-            });
-        }
-    }
-    arrived
+            }
+        })
+        .collect()
 }
 
 /// How many lanes the scatter upstream of this gather opened.
 ///
 /// Read from the scatter's own slot rather than inferred from arrivals: a
 /// gather that guessed "however many turned up" would release immediately on
-/// the first one, which is the bug this exists to prevent.
-fn expected_lanes(ctx: &NodeContext<'_>) -> Option<usize> {
-    ctx.nodes.as_object()?.values().find_map(|slot| {
+/// the first one, which is the bug this exists to prevent. Slots that do not
+/// name their scatter (pre-stamp) fall back to the first `lane_count` in state.
+fn expected_lanes(nodes: &Value, scatter: Option<&str>) -> Option<usize> {
+    let lane_count = |slot: &Value| {
         slot.get("lane_count")
             .and_then(Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
-    })
+    };
+    match scatter {
+        Some(id) => nodes.get(id).and_then(lane_count),
+        None => nodes.as_object()?.values().find_map(lane_count),
+    }
 }
 
 fn positive_u64(config: &Value, key: &str, default: u64) -> u64 {
@@ -157,8 +202,10 @@ impl NodeExecutor for GatherNode {
             })
             .unwrap_or_default();
 
-        let arrived = arrivals(&ctx, &predecessors);
-        let expected = expected_lanes(&ctx).unwrap_or(arrived.len());
+        let slots = lane_slots(ctx.nodes, &predecessors);
+        let scatter = scatter_of(&slots);
+        let arrived = arrivals(current_activation(ctx.nodes, slots, scatter));
+        let expected = expected_lanes(ctx.nodes, scatter).unwrap_or(arrived.len());
 
         let polls = ctx
             .nodes

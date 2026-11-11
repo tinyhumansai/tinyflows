@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Gather in a looping scatter
+
+- **Fixed** a `gather` inside a loop body collecting an earlier pass's lanes: a
+  narrower pass (3 lanes, then 2) released the stale third lane too. Lane slots
+  now record the scatter and the super-step of the activation that opened them
+  (`_scatter`, `_scatter_step`), and a gather counts only the current
+  activation's lanes against its own scatter's `lane_count`. Slots from a
+  checkpoint written before this change carry no stamp and are counted as before
+  when no stamped slot exists, so an in-flight run still completes.
+- **Added** `LaneContext::scatter_step` (`Option<usize>`); code that builds a
+  `LaneContext` literal must set it.
+- **Fixed** the validation reason for a gather with no upstream `scatter`: it
+  releases with no items, silently dropping its predecessors' output, rather
+  than waiting out its poll budget.
+
 ### Run event outcomes
 
 - **Added** the engine output to `Runs.PollRun` parked and finished event
