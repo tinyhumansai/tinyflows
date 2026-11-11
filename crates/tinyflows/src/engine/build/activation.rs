@@ -248,7 +248,7 @@ impl HandlerData {
             // winds down fast and reports cancelled.
             if token.is_cancelled() {
                 tracing::info!(node = %node.id, "run cancelled during retry; skipping remaining attempts");
-                return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                return cancelled_result(&node.id, lane.as_ref(), None);
             }
             let ctx = NodeContext {
                 node: &node,
@@ -340,7 +340,7 @@ impl HandlerData {
                 while remaining > 0 {
                     if token.is_cancelled() {
                         tracing::info!(node = %node.id, "run cancelled during backoff; skipping remaining attempts");
-                        return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                        return cancelled_result(&node.id, lane.as_ref(), None);
                     }
                     let step = remaining.min(BACKOFF_POLL_MS);
                     // Yields even when the timer has already fired, so a retry

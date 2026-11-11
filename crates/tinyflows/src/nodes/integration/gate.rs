@@ -109,8 +109,7 @@ fn awaited(ctx: &NodeContext<'_>) -> Result<Vec<Awaited>> {
     if let Some(from) = ctx.node.config.get("from").and_then(Value::as_array) {
         for source in from.iter().filter_map(Value::as_str) {
             let items = ctx
-                .nodes
-                .get(source)
+                .slot(source)
                 .and_then(|slot| slot.get("items"))
                 .and_then(Value::as_array);
             let Some(items) = items else {
@@ -190,8 +189,7 @@ impl NodeExecutor for GateNode {
         // Poll count carried in this node's own slot, so it survives a
         // checkpoint — the same reason a `loop` node keeps its iteration there.
         let polls = ctx
-            .nodes
-            .get(&ctx.node.id)
+            .slot(&ctx.node.id)
             .and_then(|slot| slot.get(POLLS_KEY))
             .and_then(Value::as_u64)
             .unwrap_or(0);

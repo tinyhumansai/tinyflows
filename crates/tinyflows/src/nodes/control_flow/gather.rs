@@ -121,6 +121,15 @@ fn current_activation<'a>(
 fn arrivals(slots: Vec<&Value>) -> Vec<Arrived> {
     slots
         .into_iter()
+        // A lane whose terminal is still re-entering (a gate polling) has
+        // written `"pending"` notes, and a cancelled one never finished.
+        // Neither has arrived.
+        .filter(|slot| {
+            !matches!(
+                slot.get("status").and_then(Value::as_str),
+                Some("pending" | "cancelled")
+            )
+        })
         .map(|slot| {
             let index = slot
                 .get("index")

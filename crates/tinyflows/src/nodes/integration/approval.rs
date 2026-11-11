@@ -270,8 +270,7 @@ impl ApprovalNode {
         }
 
         let polls = ctx
-            .nodes
-            .get(&ctx.node.id)
+            .slot(&ctx.node.id)
             .and_then(|slot| slot.get(POLLS_KEY))
             .and_then(Value::as_u64)
             .unwrap_or(0);

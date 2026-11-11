@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   releases with no items, silently dropping its predecessors' output, rather
   than waiting out its poll budget.
 
+### Lane activations never write the top-level slot
+
+- **Fixed** three paths where an activation inside a `scatter` lane wrote the
+  node's top-level `nodes.<id>` slot instead of its lane slot: a cancel seen at
+  the node boundary, a cancel seen during retry or backoff, and a `Reenter`
+  (a `gate` or `approval` polling). A cancelled lane now marks its lane slot
+  `"cancelled"` and schedules nothing further; a re-entering lane writes its
+  notes to its lane slot as `"pending"` and re-activates with its own lane
+  envelope, so it stays in its lane. A `gather` counts neither as an arrival.
+- **Fixed** `gate` and `approval` inside a lane reading their poll count (and a
+  gate its `from` spawn's tickets) from the top-level slot; they now read this
+  lane's slot, falling back to the top level.
+
 ### Run event outcomes
 
 - **Added** the engine output to `Runs.PollRun` parked and finished event
