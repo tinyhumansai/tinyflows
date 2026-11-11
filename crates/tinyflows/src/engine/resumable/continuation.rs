@@ -55,7 +55,7 @@ async fn resume_with_checkpointer_inner(
     // `resume` loads the state persisted under `thread_id`. Node handlers fire
     // `observer.on_step_finish` for every node that runs after the interrupt
     // boundary, so a host observer sees the resumed steps live.
-    let terminal_error: Arc<Mutex<Option<EngineError>>> = Arc::new(Mutex::new(None));
+    let terminal_error: TerminalSlot = Arc::new(Mutex::new(None));
     let mut config = RunConfig::new(workflow)?.with_checkpointer(checkpointer, thread_id);
     if let Some(token) = &token {
         config = config.with_token(token.clone());
@@ -79,7 +79,8 @@ async fn resume_with_checkpointer_inner(
             let structured = terminal_error
                 .lock()
                 .expect("terminal error mutex poisoned")
-                .take();
+                .take()
+                .map(|held| held.error);
             return Err(structured.unwrap_or_else(|| EngineError::Capability(error.to_string())));
         }
     };

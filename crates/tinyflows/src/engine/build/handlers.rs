@@ -7,7 +7,7 @@ pub(super) fn register_handlers(
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
     steps: &Arc<Mutex<Vec<ExecutionStep>>>,
-    terminal_error: &Arc<Mutex<Option<EngineError>>>,
+    terminal_error: &TerminalSlot,
     token: &CancellationToken,
     node_timeout: Option<std::time::Duration>,
     loop_edges: &std::collections::HashSet<(String, String)>,

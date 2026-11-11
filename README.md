@@ -67,7 +67,10 @@ Rust 2024 · MSRV 1.85 · `#![forbid(unsafe_code)]` · GPL-3.0-or-later.
 
 - Per-node error handling: `on_error` policy (`stop` / `continue` / `route`),
   bounded `retry`, and an `error` output port for routing failures to a recovery
-  sub-graph.
+  sub-graph. When several parallel branches fail under `stop` in one super-step,
+  the run reports the error of the branch earliest in that step's active set
+  (for a fan-out, its edge order), never the first to finish; an earlier
+  super-step's failure always wins.
 - Node postconditions: `config.postcondition = { "require": "non_empty" }` (or
   `field_present` / `non_empty_list` with a dotted `field`) is checked against
   every emitted item, so an empty or misshapen output is a failed attempt that
