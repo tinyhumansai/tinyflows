@@ -776,6 +776,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "icu_casemap"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2edfd120d8445de853cf53a1abec916f638f933a70a6f4bf8f7e2d7b7f884e9"
+dependencies = [
+ "icu_casemap_data",
+ "icu_collections",
+ "icu_locale_core",
+ "icu_properties",
+ "icu_provider",
+ "potential_utf",
+ "writeable",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_casemap_data"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "059fcda0fc8d33effc6633a8cf0d8a3c17caf7d7c91918fba9918744f501e4e8"
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -783,6 +805,7 @@ checksum = "fa68d21081c4a05d5a901a1c62add574c77048b6a1c67be3b50ce0b60d4ca513"
 dependencies = [
  "displaydoc",
  "potential_utf",
+ "serde",
  "utf8_iter",
  "yoke",
  "zerofrom",
@@ -797,6 +820,7 @@ checksum = "d56e28588da92eee5c3201a6eff33fabdd49b62269c8938d4ff050ce4d900deb"
 dependencies = [
  "displaydoc",
  "litemap",
+ "serde",
  "tinystr",
  "writeable",
  "zerovec",
@@ -851,6 +875,8 @@ checksum = "d27bbb9d3abbefac45d55f647c9de1d44aafcd1186eb91879afef17c396c3e73"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
+ "serde",
+ "stable_deref_trait",
  "writeable",
  "yoke",
  "zerofrom",
@@ -1035,9 +1061,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -1113,18 +1139,6 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
-]
-
-[[package]]
-name = "nix"
-version = "0.31.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
-dependencies = [
- "bitflags",
- "cfg-if",
- "cfg_aliases",
- "libc",
 ]
 
 [[package]]
@@ -1264,6 +1278,8 @@ version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661"
 dependencies = [
+ "serde_core",
+ "writeable",
  "zerovec",
 ]
 
@@ -1484,6 +1500,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawzip"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac9999039f74cd73c03158cddfe4362991703c74efe5ce5c8073026f80a5e48c"
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1558,9 +1580,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags",
  "fallible-iterator",
@@ -1588,15 +1610,15 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1666,9 +1688,9 @@ checksum = "eec689c0bc40ff2458a5977b6619cb718087084a18e02a131c599b62d05e1a5f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -2005,12 +2027,14 @@ dependencies = [
 
 [[package]]
 name = "tinybus"
-version = "0.3.6"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=6ce06bc674e4f4d718aa51e643ef62c1f372e270#6ce06bc674e4f4d718aa51e643ef62c1f372e270"
+version = "0.3.12"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=106eda127f8a40c0ba401efc0074667e43d4c52e#106eda127f8a40c0ba401efc0074667e43d4c52e"
 dependencies = [
  "async-trait",
  "flate2",
+ "icu_casemap",
  "libc",
+ "rawzip",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2021,14 +2045,14 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "unicode-normalization",
  "ureq",
- "zip",
 ]
 
 [[package]]
 name = "tinybus-macros"
-version = "0.3.6"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=6ce06bc674e4f4d718aa51e643ef62c1f372e270#6ce06bc674e4f4d718aa51e643ef62c1f372e270"
+version = "0.3.12"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=106eda127f8a40c0ba401efc0074667e43d4c52e#106eda127f8a40c0ba401efc0074667e43d4c52e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2037,8 +2061,8 @@ dependencies = [
 
 [[package]]
 name = "tinybus-module"
-version = "0.3.6"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=6ce06bc674e4f4d718aa51e643ef62c1f372e270#6ce06bc674e4f4d718aa51e643ef62c1f372e270"
+version = "0.3.12"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=106eda127f8a40c0ba401efc0074667e43d4c52e#106eda127f8a40c0ba401efc0074667e43d4c52e"
 dependencies = [
  "async-trait",
  "serde",
@@ -2220,8 +2244,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-api"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2234,8 +2258,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-blob"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2248,8 +2272,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-bus"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "serde",
  "serde_json",
@@ -2259,8 +2283,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-busproxy"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2277,8 +2301,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-connect"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -2289,8 +2313,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-document"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -2307,8 +2331,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-kv"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "async-trait",
  "serde",
@@ -2319,8 +2343,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-queue"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -2335,8 +2359,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "async-trait",
  "tinystoragedrivers-api",
@@ -2346,8 +2370,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-testkit"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2367,8 +2391,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-types"
-version = "2.1.2"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=6226b9484c8bd01c58741718cd89ba90a13a36bb#6226b9484c8bd01c58741718cd89ba90a13a36bb"
+version = "2.1.3"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers?rev=f5a33025b9feaa36fea522cce764fe8c796e5139#f5a33025b9feaa36fea522cce764fe8c796e5139"
 dependencies = [
  "serde",
  "serde_json",
@@ -2382,6 +2406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643"
 dependencies = [
  "displaydoc",
+ "serde_core",
  "zerovec",
 ]
 
@@ -2592,12 +2617,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
 
 [[package]]
-name = "typed-path"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2634,6 +2653,15 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "untrusted"
@@ -2839,9 +2867,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "293198dcebfb821155b5092ab94b5a82ff180eddd7241df3bd6e66a4ffd1a585"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -3037,9 +3065,9 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xattr"
-version = "1.6.1"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+checksum = "963d6fab92d5504b971dc8bd90ca743c2575e590bc8071ea5bc571598667ae08"
 dependencies = [
  "libc",
  "rustix",
@@ -3124,6 +3152,7 @@ dependencies = [
  "displaydoc",
  "yoke",
  "zerofrom",
+ "zerovec",
 ]
 
 [[package]]
@@ -3132,6 +3161,7 @@ version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8"
 dependencies = [
+ "serde",
  "yoke",
  "zerofrom",
  "zerovec-derive",
@@ -3146,20 +3176,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "zip"
-version = "9.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap",
- "memchr",
- "nix",
- "typed-path",
 ]
 
 [[package]]

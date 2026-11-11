@@ -2,7 +2,7 @@
 name = "tinyflows-adaptive"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-3.0-or-later"
 description = "An adaptive loop over the tinyflows engine: select or author a workflow, run it, judge it, learn."
 # Source the public storage ports and TinyFlows-owned helpers from the host's
@@ -19,8 +19,8 @@ thiserror = "2"
 # revision so a host that vendors tinystoragedrivers once can `[patch]` it; chrono
 # turns the RFC 3339 instants of the records into the stored `*_ms`; tokio's
 # `OnceCell` for one-time collection setup.
-tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb", optional = true }
-tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb", optional = true }
+tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.3", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139", optional = true }
+tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.3", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139", optional = true }
 tinyflows-storage = { path = "../tinyflows-storage", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
 tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["sync"], optional = true }
 default = []
 # The ledger and vault on a `tinystoragedrivers` document port
 # (`Storage::from_documents`), so the host's storage backend (SQLite, MongoDB,
-# memory) holds them alongside everything else. Needs Rust 1.88.
+# memory) holds them alongside everything else. Needs Rust 1.89.
 storage-drivers = ["dep:tinystoragedrivers-api", "dep:tinystoragedrivers-types", "dep:tinyflows-storage", "dep:chrono", "dep:tokio", "dep:tracing"]
 
 [dev-dependencies]
@@ -41,9 +41,9 @@ tinyflows = { path = "../tinyflows", features = ["store", "mock"] }
 # The engine's `WorkflowStore` on an in-memory storage backend, for tests and
 # the eval example.
 tinyflows-drivers = { path = "../tinyflows-drivers", default-features = false, features = ["store"] }
-tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-testkit = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.3", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.3", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-testkit = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.3", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [lints.rust]

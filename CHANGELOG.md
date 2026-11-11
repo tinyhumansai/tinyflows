@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### tinystoragedrivers 2.1.3
+
+- **Changed** the tinystoragedrivers dependency of `tinyflows-storage`,
+  `tinyflows-drivers`, `tinyflows-module` and `tinyflows-adaptive` to v2.1.3
+  (rusqlite 0.41 for RUSTSEC-2026-0459, rustix 1.1.6 for RUSTSEC-2026-0486, and
+  a busproxy upload race fixed), and tinybus to v0.3.12, the rev those crates
+  pin. These four crates now need Rust 1.89; the engine and the crates that do
+  not depend on tinystoragedrivers keep Rust 1.88.
+
 ### Gather in a looping scatter
 
 - **Fixed** a `gather` inside a loop body collecting an earlier pass's lanes: a
