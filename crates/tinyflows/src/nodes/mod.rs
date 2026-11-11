@@ -87,6 +87,24 @@ pub struct NodeContext<'a> {
     pub step: usize,
 }
 
+impl NodeContext<'_> {
+    /// The run-state slot this activation reads for node `id`: inside a lane,
+    /// that node's slot for this same lane when it has one, else its top-level
+    /// slot.
+    ///
+    /// A lane activation writes only `nodes.<id>.lanes.<lane id>`, so a node
+    /// that re-enters inside a lane (a `gate`, an `approval`) finds its own
+    /// poll count there — and a gate finds the tickets of a `spawn` in the
+    /// same lane there — rather than at the top level.
+    pub(crate) fn slot(&self, id: &str) -> Option<&Value> {
+        let top = self.nodes.get(id)?;
+        self.lane
+            .as_ref()
+            .and_then(|lane| top.get("lanes").and_then(|lanes| lanes.get(&lane.id)))
+            .or(Some(top))
+    }
+}
+
 /// Which lane of a fan-out an activation belongs to.
 ///
 /// Travels with the activation itself rather than through the run state, so N
@@ -104,6 +122,12 @@ pub struct LaneContext {
     /// How many lanes the fan-out created, which is what a collector counts
     /// arrivals against.
     pub count: usize,
+    /// The super-step of the fan-out activation that opened this lane, which
+    /// tells this pass's lanes apart from an earlier pass's in a loop.
+    ///
+    /// `None` for a lane scheduled by an envelope that predates the field (a
+    /// checkpoint written by an older binary).
+    pub scatter_step: Option<usize>,
 }
 
 /// Builds the expression scope for a node from its runtime [`NodeContext`].

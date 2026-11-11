@@ -22,8 +22,11 @@ pub(super) async fn finish_execution<F>(
     lane: &Option<crate::nodes::LaneContext>,
     resume_value: &Option<Value>,
     activation_step: usize,
+    // This activation's index in its superstep's active set; picks the
+    // reported error when several branches fail together.
+    branch: usize,
     steps: &Arc<Mutex<Vec<ExecutionStep>>>,
-    terminal_error: &Arc<Mutex<Option<EngineError>>>,
+    terminal_error: &TerminalSlot,
     plain_targets: &[String],
     emit: F,
 ) -> crate::graph::Result<NodeResult<Value>>
@@ -76,13 +79,28 @@ where
                 // one node visit, so the caller's own bounded poll
                 // count is what stops this — not the run-level
                 // backstop, which cannot say which node span.
+                //
+                // Inside a lane the notes go to the lane slot, marked
+                // `"pending"` so a gather does not count a lane that is
+                // still waiting as arrived, and the re-activation carries
+                // the same lane envelope so it stays in its lane.
                 Some(crate::nodes::NodeControl::Reenter { after_ms }) => {
-                    let update = items_update_with_meta(
-                        &node.id,
-                        &output.items,
-                        port,
-                        output.meta.as_ref(),
-                    )?;
+                    let update = match lane.as_ref() {
+                        Some(lane) => lane_items_update(
+                            &node.id,
+                            lane,
+                            &output.items,
+                            port,
+                            "pending",
+                            output.meta.as_ref(),
+                        )?,
+                        None => items_update_with_meta(
+                            &node.id,
+                            &output.items,
+                            port,
+                            output.meta.as_ref(),
+                        )?,
+                    };
                     if after_ms > 0 {
                         // Chopped into slices so a cancel during a
                         // long poll interval is seen promptly, the
@@ -91,7 +109,7 @@ where
                         while remaining > 0 {
                             if token.is_cancelled() {
                                 tracing::info!(node = %node.id, "run cancelled while waiting to re-enter");
-                                return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                                return cancelled_result(&node.id, lane.as_ref(), None);
                             }
                             let slice = remaining.min(BACKOFF_POLL_MS);
                             // Always yields, so the tasks this node is polling
@@ -101,9 +119,23 @@ where
                             remaining -= slice;
                         }
                     }
-                    return Ok(NodeResult::Command(
-                        Command::goto(vec![node.id.clone()]).with_update(update),
-                    ));
+                    let command = match lane.as_ref() {
+                        // `input` is this lane's own items (read from its
+                        // envelope), so the rebuilt envelope is the one this
+                        // activation was scheduled with.
+                        Some(lane) => {
+                            let envelope = lane_envelope(
+                                &lane.origin,
+                                lane.index,
+                                lane.count,
+                                lane.scatter_step,
+                                input,
+                            )?;
+                            Command::send(vec![crate::graph::Send::new(node.id.clone(), envelope)])
+                        }
+                        None => Command::goto(vec![node.id.clone()]),
+                    };
+                    return Ok(NodeResult::Command(command.with_update(update)));
                 }
                 // Open a lane per entry: schedule every successor
                 // once for each, each carrying its own work.
@@ -118,8 +150,14 @@ where
                     let mut routed: Vec<RouteTarget> = Vec::new();
                     for (index, lane_items) in lanes.iter().enumerate() {
                         for target in plain_targets {
-                            let envelope = lane_envelope(&node.id, index, count, lane_items)
-                                .unwrap_or(Value::Null);
+                            let envelope = lane_envelope(
+                                &node.id,
+                                index,
+                                count,
+                                Some(activation_step),
+                                lane_items,
+                            )
+                            .unwrap_or(Value::Null);
                             routed.push(RouteTarget::Send(crate::graph::Send::new(
                                 target.clone(),
                                 envelope,
@@ -269,9 +307,9 @@ where
                 // into `EngineError::Capability` and a host could not
                 // tell a loop that ran away from an HTTP call that
                 // 500'd. `build_and_run` prefers whatever lands here.
-                // First writer wins: the failure that ends the run is
-                // the one worth reporting, and a parallel superstep
-                // may produce several.
+                // A parallel superstep may produce several; the rule in
+                // `terminal_error::offer` keeps the lowest-ordered one, not
+                // the first to finish.
                 _ => {
                     let message = err.to_string();
                     // A lane failure belongs to its gather, whose
@@ -286,9 +324,7 @@ where
                     let mut slot = terminal_error
                         .lock()
                         .expect("terminal error mutex poisoned");
-                    if slot.is_none() {
-                        *slot = Some(err);
-                    }
+                    crate::engine::terminal_error::offer(&mut slot, activation_step, branch, err);
                     drop(slot);
                     // The message still travels the string channel
                     // unchanged, so every path that only sees the

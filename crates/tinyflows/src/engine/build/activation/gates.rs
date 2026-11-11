@@ -9,11 +9,9 @@
     // starting further node work. The engine reports it as cancelled.
     if token.is_cancelled() {
         tracing::info!(node = %node.id, "run cancelled; skipping node work");
-        let mut update = items_update(&node.id, &[], None)?;
-        if lane.is_none() {
-            stamp_activation_step(&mut update, &node.id, ctx.step);
-        }
-        return Ok(NodeResult::Update(update));
+        // A lane marks its own lane slot cancelled and ends there; it never
+        // owns `nodes.<id>`. Only a non-lane activation is step-stamped.
+        return cancelled_result(&node.id, lane.as_ref(), Some(ctx.step));
     }
     
     if is_trigger {

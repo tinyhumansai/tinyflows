@@ -267,9 +267,10 @@ mod state;
 pub(crate) use state::replace;
 #[cfg(test)]
 pub(crate) use state::{LANE_KEY, REPLACE};
+pub(crate) use state::{LANE_SCATTER_KEY, LANE_SCATTER_STEP_KEY};
 use state::{
-    MergeReducer, collect_input, collect_input_since, lane_context, lane_envelope, lane_input,
-    lane_items_update, merge, stamp_activation_step,
+    MergeReducer, cancelled_result, collect_input, collect_input_since, lane_context,
+    lane_envelope, lane_input, lane_items_update, merge, stamp_activation_step,
 };
 
 mod routing;
@@ -294,6 +295,9 @@ use build::build_graph;
 
 mod run_config;
 use run_config::RunConfig;
+
+mod terminal_error;
+use terminal_error::TerminalSlot;
 
 mod run_state;
 pub use run_state::resume;

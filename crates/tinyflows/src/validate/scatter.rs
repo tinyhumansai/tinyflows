@@ -29,7 +29,10 @@ pub(super) fn validate_scatter_regions(graph: &WorkflowGraph, errors: &mut Vec<V
         .map(|n| n.id.as_str())
         .collect();
 
-    // A gather with no scatter waits on lanes nobody will ever open.
+    // A gather with no scatter sees no lanes, so with no `lane_count` in state
+    // it releases at once with nothing: whatever its predecessors emitted is
+    // silently dropped. (An unrelated scatter's `lane_count` would instead make
+    // it wait out its poll budget and fail.)
     for gather in &gathers {
         let reached_by_a_scatter = scatters
             .iter()
@@ -38,7 +41,8 @@ pub(super) fn validate_scatter_regions(graph: &WorkflowGraph, errors: &mut Vec<V
             errors.push(ValidationError::InvalidNodeConfig {
                 node: (*gather).to_string(),
                 reason: "gather is not downstream of any `scatter`, so no lane can ever reach \
-                         it and the run would wait until its poll budget ran out"
+                         it: it would release with no items, silently dropping whatever its \
+                         predecessors emitted"
                     .to_string(),
             });
         }

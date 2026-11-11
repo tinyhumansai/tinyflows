@@ -79,3 +79,4 @@ fn child_transform() -> WorkflowGraph {
 
 include!("complex_graphs/composition_tests.rs");
 include!("complex_graphs/concurrency_and_failures_tests.rs");
+include!("complex_graphs/loop_scatter_and_lane_switch_tests.rs");

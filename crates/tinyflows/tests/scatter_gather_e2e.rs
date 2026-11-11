@@ -365,8 +365,8 @@ async fn a_scatter_without_a_gather_is_refused() {
     );
 }
 
-/// A gather with no scatter upstream is refused: it would wait on lanes nobody
-/// opens until its poll budget ran out.
+/// A gather with no scatter upstream is refused: no lane ever reaches it, so it
+/// would release at once with nothing and drop its predecessors' output.
 #[tokio::test]
 async fn a_gather_without_a_scatter_is_refused() {
     let graph = WorkflowGraph {
