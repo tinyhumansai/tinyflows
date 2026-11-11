@@ -76,13 +76,28 @@ where
                 // one node visit, so the caller's own bounded poll
                 // count is what stops this — not the run-level
                 // backstop, which cannot say which node span.
+                //
+                // Inside a lane the notes go to the lane slot, marked
+                // `"pending"` so a gather does not count a lane that is
+                // still waiting as arrived, and the re-activation carries
+                // the same lane envelope so it stays in its lane.
                 Some(crate::nodes::NodeControl::Reenter { after_ms }) => {
-                    let update = items_update_with_meta(
-                        &node.id,
-                        &output.items,
-                        port,
-                        output.meta.as_ref(),
-                    )?;
+                    let update = match lane.as_ref() {
+                        Some(lane) => lane_items_update(
+                            &node.id,
+                            lane,
+                            &output.items,
+                            port,
+                            "pending",
+                            output.meta.as_ref(),
+                        )?,
+                        None => items_update_with_meta(
+                            &node.id,
+                            &output.items,
+                            port,
+                            output.meta.as_ref(),
+                        )?,
+                    };
                     if after_ms > 0 {
                         // Chopped into slices so a cancel during a
                         // long poll interval is seen promptly, the
@@ -91,7 +106,7 @@ where
                         while remaining > 0 {
                             if token.is_cancelled() {
                                 tracing::info!(node = %node.id, "run cancelled while waiting to re-enter");
-                                return Ok(NodeResult::Update(items_update(&node.id, &[], None)?));
+                                return cancelled_result(&node.id, lane.as_ref(), None);
                             }
                             let slice = remaining.min(BACKOFF_POLL_MS);
                             // Always yields, so the tasks this node is polling
@@ -101,9 +116,23 @@ where
                             remaining -= slice;
                         }
                     }
-                    return Ok(NodeResult::Command(
-                        Command::goto(vec![node.id.clone()]).with_update(update),
-                    ));
+                    let command = match lane.as_ref() {
+                        // `input` is this lane's own items (read from its
+                        // envelope), so the rebuilt envelope is the one this
+                        // activation was scheduled with.
+                        Some(lane) => {
+                            let envelope = lane_envelope(
+                                &lane.origin,
+                                lane.index,
+                                lane.count,
+                                lane.scatter_step,
+                                input,
+                            )?;
+                            Command::send(vec![crate::graph::Send::new(node.id.clone(), envelope)])
+                        }
+                        None => Command::goto(vec![node.id.clone()]),
+                    };
+                    return Ok(NodeResult::Command(command.with_update(update)));
                 }
                 // Open a lane per entry: schedule every successor
                 // once for each, each carrying its own work.

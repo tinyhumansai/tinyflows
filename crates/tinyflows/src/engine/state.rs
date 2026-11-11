@@ -111,6 +111,36 @@ pub(super) fn lane_items_update(
     Ok(json!({ "nodes": { node_id: { "lanes": { lane.id.clone(): slot } } } }))
 }
 
+/// What an activation that observed cancellation returns: an empty result in
+/// the slot it owns, and no further work.
+///
+/// An ordinary activation empties the node's top-level slot (stamped with
+/// `step` when given) and follows its static edge, so each successor no-ops
+/// in turn — exactly as it always has.
+///
+/// A lane activation marks only its own lane slot `"cancelled"`, which a
+/// gather does not count as an arrival, and routes to `END`. Following the
+/// static edge instead would schedule the successor as a *plain* activation,
+/// outside the lane, and that activation would write the successor's
+/// top-level slot.
+pub(super) fn cancelled_result(
+    node_id: &str,
+    lane: Option<&crate::nodes::LaneContext>,
+    step: Option<usize>,
+) -> crate::graph::Result<NodeResult<Value>> {
+    let Some(lane) = lane else {
+        let mut update = items_update(node_id, &[], None)?;
+        if let Some(step) = step {
+            stamp_activation_step(&mut update, node_id, step);
+        }
+        return Ok(NodeResult::Update(update));
+    };
+    let update = lane_items_update(node_id, lane, &[], None, "cancelled", None)?;
+    Ok(NodeResult::Command(
+        Command::goto(vec![END.to_string()]).with_update(update),
+    ))
+}
+
 /// The lane envelope a fan-out schedules one activation with.
 ///
 /// `scatter_step` is the super-step of the scatter activation that opened the
