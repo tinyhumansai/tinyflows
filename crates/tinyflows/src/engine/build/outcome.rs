@@ -22,8 +22,11 @@ pub(super) async fn finish_execution<F>(
     lane: &Option<crate::nodes::LaneContext>,
     resume_value: &Option<Value>,
     activation_step: usize,
+    // This activation's index in its superstep's active set; picks the
+    // reported error when several branches fail together.
+    branch: usize,
     steps: &Arc<Mutex<Vec<ExecutionStep>>>,
-    terminal_error: &Arc<Mutex<Option<EngineError>>>,
+    terminal_error: &TerminalSlot,
     plain_targets: &[String],
     emit: F,
 ) -> crate::graph::Result<NodeResult<Value>>
@@ -269,9 +272,9 @@ where
                 // into `EngineError::Capability` and a host could not
                 // tell a loop that ran away from an HTTP call that
                 // 500'd. `build_and_run` prefers whatever lands here.
-                // First writer wins: the failure that ends the run is
-                // the one worth reporting, and a parallel superstep
-                // may produce several.
+                // A parallel superstep may produce several; the rule in
+                // `terminal_error::offer` keeps the lowest-ordered one, not
+                // the first to finish.
                 _ => {
                     let message = err.to_string();
                     // A lane failure belongs to its gather, whose
@@ -286,9 +289,7 @@ where
                     let mut slot = terminal_error
                         .lock()
                         .expect("terminal error mutex poisoned");
-                    if slot.is_none() {
-                        *slot = Some(err);
-                    }
+                    crate::engine::terminal_error::offer(&mut slot, activation_step, branch, err);
                     drop(slot);
                     // The message still travels the string channel
                     // unchanged, so every path that only sees the

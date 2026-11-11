@@ -10,7 +10,7 @@ pub(super) struct HandlerData {
     pub(super) agents: Arc<Vec<crate::model::AgentDefinition>>,
     pub(super) observer: Arc<dyn RunObserver>,
     pub(super) steps: Arc<Mutex<Vec<ExecutionStep>>>,
-    pub(super) terminal_error: Arc<Mutex<Option<EngineError>>>,
+    pub(super) terminal_error: TerminalSlot,
     pub(super) token: CancellationToken,
     pub(super) routing: HandlerRouting,
     pub(super) plain_targets: Vec<String>,
@@ -61,6 +61,8 @@ impl HandlerData {
         let lane = lane_context(ctx.send_arg.as_ref());
         let lane_send_arg = lane.is_some().then(|| ctx.send_arg.clone()).flatten();
         let activation_step = ctx.step;
+        // A sequential step has no fork; it stops at its first failure.
+        let branch = ctx.fork.as_ref().map_or(0, |fork| fork.branch_index);
         // A checkpointed resume (see `ResumableRun::resume`) delivers a resume
         // value to the interrupted node via `NodeContext::resume`. A resume
         // approves *this* gate only when it is a bare `true` (backward-compat,
@@ -444,6 +446,7 @@ impl HandlerData {
             &lane,
             &resume_value,
             activation_step,
+            branch,
             &steps,
             &terminal_error,
             &plain_targets,

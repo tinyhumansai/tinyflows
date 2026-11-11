@@ -30,7 +30,7 @@ pub(super) fn build_graph(
     capabilities: &Capabilities,
     observer: &Arc<dyn RunObserver>,
     steps: &Arc<Mutex<Vec<ExecutionStep>>>,
-    terminal_error: &Arc<Mutex<Option<EngineError>>>,
+    terminal_error: &TerminalSlot,
     config: &RunConfig,
 ) -> Result<(CompiledGraph<Value, Value>, String)> {
     let checkpointer = config.checkpointer.clone();

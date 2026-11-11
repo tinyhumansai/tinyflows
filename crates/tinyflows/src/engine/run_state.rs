@@ -105,7 +105,7 @@ pub(super) async fn build_and_run(
     // Where a run-ending node failure leaves its structured error on the way
     // out (see the `stop`-policy branch in `build_graph`), so the caller gets
     // the real `EngineError` instead of its `Display` string.
-    let terminal_error: Arc<Mutex<Option<EngineError>>> = Arc::new(Mutex::new(None));
+    let terminal_error: TerminalSlot = Arc::new(Mutex::new(None));
 
     // Build and compile the graph under the host-supplied checkpointer;
     // `trigger_id` is the graph's entry node.
@@ -205,7 +205,8 @@ pub(super) async fn build_and_run(
             let structured = terminal_error
                 .lock()
                 .expect("terminal error mutex poisoned")
-                .take();
+                .take()
+                .map(|held| held.error);
             return Err(structured.unwrap_or_else(|| EngineError::Capability(e.to_string())));
         }
     };
