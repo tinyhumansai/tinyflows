@@ -14,6 +14,26 @@ fn a_well_formed_envelope_decodes() {
     assert_eq!(lane.origin, "fan");
     assert_eq!(lane.index, 2);
     assert_eq!(lane.count, 5);
+    assert_eq!(
+        lane.scatter_step, None,
+        "an envelope from before the stamp still decodes, unstamped"
+    );
+}
+
+/// The scatter's activation step survives the envelope and lands on the lane
+/// slot, where a node's own meta cannot overwrite it.
+#[test]
+fn the_scatter_step_travels_from_envelope_to_lane_slot() {
+    let packet = lane_envelope("fan", 1, 2, Some(7), &[]).expect("envelope");
+    let lane = lane_context(Some(&packet)).expect("decodes");
+    assert_eq!(lane.scatter_step, Some(7));
+
+    let forged = json!({ "_scatter_step": 1, "_scatter": "other" });
+    let meta = Some(&forged);
+    let update = lane_items_update("work", &lane, &[], None, "ok", meta).expect("update");
+    let slot = &update["nodes"]["work"]["lanes"]["fan#1"];
+    assert_eq!(slot["_scatter_step"], 7);
+    assert_eq!(slot["_scatter"], "fan");
 }
 
 /// The ordinary case, and the only one that occurs until a fan-out node

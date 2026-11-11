@@ -96,19 +96,30 @@ pub(super) fn lane_items_update(
         "status": status,
         "index": lane.index,
     });
-    if let (Some(Value::Object(extra)), Some(map)) = (meta, slot.as_object_mut()) {
-        for (key, value) in extra {
-            map.insert(key.clone(), value.clone());
+    if let Some(map) = slot.as_object_mut() {
+        if let Some(Value::Object(extra)) = meta {
+            for (key, value) in extra {
+                map.insert(key.clone(), value.clone());
+            }
+        }
+        // After `meta`, so a node's own meta cannot claim another activation.
+        map.insert(LANE_SCATTER_KEY.to_string(), json!(lane.origin));
+        if let Some(step) = lane.scatter_step {
+            map.insert(LANE_SCATTER_STEP_KEY.to_string(), json!(step));
         }
     }
     Ok(json!({ "nodes": { node_id: { "lanes": { lane.id.clone(): slot } } } }))
 }
 
 /// The lane envelope a fan-out schedules one activation with.
+///
+/// `scatter_step` is the super-step of the scatter activation that opened the
+/// lane; every node along the lane passes it on unchanged.
 pub(super) fn lane_envelope(
     origin: &str,
     index: usize,
     count: usize,
+    scatter_step: Option<usize>,
     items: &[Item],
 ) -> crate::graph::Result<Value> {
     Ok(json!({
@@ -117,6 +128,7 @@ pub(super) fn lane_envelope(
             "origin": origin,
             "index": index,
             "count": count,
+            "scatter_step": scatter_step,
         },
         "items": serde_json::to_value(items)?,
     }))
@@ -147,6 +159,15 @@ pub(super) fn lane_input(send_arg: Option<&Value>) -> Vec<Item> {
 /// and must never be mistaken for user data.
 pub(crate) const LANE_KEY: &str = "_lane";
 
+/// The lane-slot key naming the scatter that opened the lane.
+pub(crate) const LANE_SCATTER_KEY: &str = "_scatter";
+
+/// The lane-slot key recording the super-step of the scatter activation that
+/// opened the lane. Lane ids repeat across loop passes (`<scatter>#<index>`)
+/// and slots are never cleared, so this is what lets a gather count only the
+/// current pass. Absent on slots written from a pre-stamp envelope.
+pub(crate) const LANE_SCATTER_STEP_KEY: &str = "_scatter_step";
+
 /// Decodes the lane identity from an activation's `send_arg`.
 ///
 /// `None` for an ordinary activation — one scheduled by a plain route rather
@@ -160,6 +181,12 @@ pub(super) fn lane_context(send_arg: Option<&Value>) -> Option<crate::nodes::Lan
         origin: lane.get("origin")?.as_str()?.to_string(),
         index: usize::try_from(lane.get("index")?.as_u64()?).ok()?,
         count: usize::try_from(lane.get("count")?.as_u64()?).ok()?,
+        // Optional: an envelope from an older binary has none, and must still
+        // decode as a lane.
+        scatter_step: lane
+            .get("scatter_step")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok()),
     })
 }
 

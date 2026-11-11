@@ -118,8 +118,14 @@ where
                     let mut routed: Vec<RouteTarget> = Vec::new();
                     for (index, lane_items) in lanes.iter().enumerate() {
                         for target in plain_targets {
-                            let envelope = lane_envelope(&node.id, index, count, lane_items)
-                                .unwrap_or(Value::Null);
+                            let envelope = lane_envelope(
+                                &node.id,
+                                index,
+                                count,
+                                Some(activation_step),
+                                lane_items,
+                            )
+                            .unwrap_or(Value::Null);
                             routed.push(RouteTarget::Send(crate::graph::Send::new(
                                 target.clone(),
                                 envelope,

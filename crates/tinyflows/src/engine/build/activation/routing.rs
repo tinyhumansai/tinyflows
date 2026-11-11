@@ -37,9 +37,14 @@
                 if gather_nodes.contains(&target) {
                     RouteTarget::Node(target.into())
                 } else {
-                    let envelope =
-                        lane_envelope(&lane.origin, lane.index, lane.count, routed_items)
-                            .unwrap_or(Value::Null);
+                    let envelope = lane_envelope(
+                        &lane.origin,
+                        lane.index,
+                        lane.count,
+                        lane.scatter_step,
+                        routed_items,
+                    )
+                    .unwrap_or(Value::Null);
                     RouteTarget::Send(crate::graph::Send::new(target, envelope))
                 }
             })
