@@ -116,7 +116,7 @@ impl Key {
     /// order randomly.
     #[must_use]
     pub fn ulid() -> Self {
-        Self(Ulid::new().to_string())
+        Self(Ulid::generate().to_string())
     }
 
     /// A ULID stamped with `timestamp_ms` (Unix epoch milliseconds) and a
@@ -124,7 +124,7 @@ impl Key {
     /// time in its new id.
     #[must_use]
     pub fn ulid_at(timestamp_ms: u64) -> Self {
-        Self(Ulid::from_parts(timestamp_ms, Ulid::new().random()).to_string())
+        Self(Ulid::from_parts(timestamp_ms, Ulid::generate().random()).to_string())
     }
 
     /// The parts this key was built from, unescaped.
