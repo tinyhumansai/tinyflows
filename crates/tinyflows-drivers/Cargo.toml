@@ -4,13 +4,13 @@
 # are git dependencies (OpenHuman vendors them once and `[patch]`es the URL),
 # and the published `tinyflows` package cannot carry a git dependency, even an
 # optional one. It also keeps the engine's MSRV where it is; this crate needs
-# the storage crates' 1.88.
+# the storage crates' 1.89.
 [package]
 name = "tinyflows-drivers"
 version = "0.1.0"
 description = "tinyflows StateStore and graph Checkpointer over tinystoragedrivers document ports"
 edition.workspace = true
-rust-version = "1.88"
+rust-version = "1.89"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -51,8 +51,8 @@ store = [
 test-fixtures = ["catalog"]
 
 [dependencies]
-tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-api = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.3", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-types = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.3", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
 tinyflows-storage = { path = "../tinyflows-storage" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -72,4 +72,4 @@ uuid = { workspace = true, optional = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 tokio = { workspace = true }
-tinystoragedrivers-testkit = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.2", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-testkit = { git = "https://github.com/tinyhumansai/tinystoragedrivers", version = "2.1.3", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }

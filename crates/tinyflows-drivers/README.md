@@ -280,7 +280,7 @@ TinyAgents) and points the URL at that copy with
 exactly one `DocumentStore` trait in its graph. The published `tinyflows`
 package cannot carry a git dependency, so these adapters live here
 (`publish = false`). The engine stays dependency-free and keeps its MSRV; this
-crate needs Rust 1.88, the storage crates' MSRV.
+crate needs Rust 1.89, the storage crates' MSRV.
 
 The split is a recorded decision, with what would end it, in
 [`docs/storage-crate-split.md`](../../docs/storage-crate-split.md).

@@ -20,10 +20,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.89.0
 
       - name: Check the workspace at its declared minimum compiler version
         run: cargo check --locked --workspace --all-features
+
+      # The tinystoragedrivers crates need 1.89; the engine and the crates that
+      # do not depend on them keep their own, lower minimum.
+      - name: Check the storage-free crates at their minimum compiler version
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check --locked --all-features \
+            -p tinyflows -p tinyflows-bus -p tinyflows-catalog -p tinyflows-copilot -p tinyflows-schedule
 
   rust-sdk:
     name: Rust SDK
