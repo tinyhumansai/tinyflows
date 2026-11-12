@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Rust 1.89
+
+- **Changed** the minimum supported Rust of the engine and the crates that do
+  not depend on tinystoragedrivers from 1.88 to 1.89, so every crate now needs
+  1.89. uuid 1.28 and later require it. The CI MSRV job now checks the whole
+  workspace on 1.89 only.
+
 ### tinystoragedrivers 2.1.3
 
 - **Changed** the tinystoragedrivers dependency of `tinyflows-storage`,

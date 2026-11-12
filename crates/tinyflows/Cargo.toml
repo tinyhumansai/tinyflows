@@ -2,7 +2,7 @@
 name = "tinyflows"
 version = "0.9.5"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-3.0-or-later"
 description = "A Rust-based workflow management solution."
 readme = "README.md"
